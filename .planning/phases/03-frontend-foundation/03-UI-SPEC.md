@@ -1,7 +1,8 @@
 ---
 phase: 3
 slug: frontend-foundation
-status: draft
+status: approved
+reviewed_at: 2026-06-06T00:00:00Z
 shadcn_initialized: false
 preset: none
 created: 2026-06-06
