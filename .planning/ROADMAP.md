@@ -14,7 +14,7 @@ start_phase: 1
 | # | Phase | Goal | Requirements | Success Criteria |
 |---|-------|------|--------------|-----------------|
 | 1 | Backend App Layer | FastAPI app, SQLite DB, all API endpoints working | BACK-01–11 | 4 |
-| 2 | LLM Chat Integration | AI chat with structured output, auto-trade, mock mode | CHAT-01–06 | 4 |
+| 2 | LLM Chat Integration | 1/3 | In Progress|  |
 | 3 | Frontend Foundation | Next.js project, SSE connection, watchlist panel, sparklines | FE-01–08 | 4 |
 | 4 | Frontend Portfolio & Trading | Charts, heatmap, P&L chart, positions table, trade bar, chat UI | FE-09–15 | 4 |
 | 5 | Infrastructure & E2E | Dockerfile, scripts, docker-compose, E2E tests | INFRA-01–07 | 4 |
@@ -61,12 +61,12 @@ start_phase: 1
 3. `LLM_MOCK=true` returns deterministic responses without calling OpenRouter
 4. Conversation history loaded from `chat_messages` table; new messages persisted with executed actions in `actions` JSON field
 
-**Plans:** 3 plans
+**Plans:** 1/3 plans executed
 
 Plans:
 **Wave 1**
 
-- [ ] 02-01-PLAN.md — Extract execute_trade_on_conn and apply_watchlist_change_on_conn helper functions
+- [x] 02-01-PLAN.md — Extract execute_trade_on_conn and apply_watchlist_change_on_conn helper functions
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
