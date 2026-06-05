@@ -101,6 +101,25 @@ Plans:
 3. Sparklines accumulate progressively from SSE stream since page load
 4. Header shows live portfolio value, cash balance, and connection status dot (green/yellow/red)
 
+**Plans:** 4 plans
+
+Plans:
+**Wave 1**
+
+- [ ] 03-01-PLAN.md — Scaffold Next.js Pages Router + static export, dark terminal Tailwind theme, market types, Jest test infra (FE-01, FE-03)
+
+**Wave 2** *(blocked on Wave 1)*
+
+- [ ] 03-02-PLAN.md — SSE data layer: Zustand price store + usePriceStream EventSource hook (FE-04)
+
+**Wave 3** *(blocked on Wave 2)*
+
+- [ ] 03-03-PLAN.md — Header: portfolio value + cash via SWR + connection status dot (FE-02)
+
+**Wave 4** *(blocked on Wave 3)*
+
+- [ ] 03-04-PLAN.md — Watchlist panel, row (flash + selection), sparkline chart, dashboard wiring (FE-05, FE-06, FE-07, FE-08)
+
 **Dependencies:** Phase 1 complete (SSE stream endpoint available)
 
 **Key constraints:**
@@ -214,5 +233,5 @@ Plans:
 
 ---
 *Roadmap created: 2026-06-05*
-*Last updated: 2026-06-05 — Phase 2 planned (3 plans)*
+*Last updated: 2026-06-06 — Phase 3 planned (4 plans)*
 *Milestone: v1.0 — Complete Trading Workstation*
