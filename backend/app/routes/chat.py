@@ -233,18 +233,20 @@ def create_chat_router(price_cache: PriceCache, db_path: str) -> APIRouter:
             ]
 
             # Step 7: Persist both messages (T-02-12 — parameterized SQL)
+            # Separate timestamps guarantee deterministic ORDER BY created_at ordering
+            # even when both rows are written in the same request (WR-02).
             actions = {"trades": trade_outcomes, "watchlist_changes": watch_outcomes}
-            now = datetime.now(timezone.utc).isoformat()
-
+            user_ts = datetime.now(timezone.utc).isoformat()
             conn.execute(
                 "INSERT INTO chat_messages (id, user_id, role, content, actions, created_at) "
                 "VALUES (?, 'default', 'user', ?, NULL, ?)",
-                (str(uuid.uuid4()), body.message, now),
+                (str(uuid.uuid4()), body.message, user_ts),
             )
+            asst_ts = datetime.now(timezone.utc).isoformat()
             conn.execute(
                 "INSERT INTO chat_messages (id, user_id, role, content, actions, created_at) "
                 "VALUES (?, 'default', 'assistant', ?, ?, ?)",
-                (str(uuid.uuid4()), parsed.message, json.dumps(actions), now),
+                (str(uuid.uuid4()), parsed.message, json.dumps(actions), asst_ts),
             )
             conn.commit()
 
@@ -255,6 +257,9 @@ def create_chat_router(price_cache: PriceCache, db_path: str) -> APIRouter:
                 "watchlist_changes": watch_outcomes,
             }
 
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 

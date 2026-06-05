@@ -57,6 +57,9 @@ def apply_watchlist_change_on_conn(
     if not ticker:
         return {"status": "failed", "ticker": ticker, "error": "Ticker must not be empty"}
 
+    if len(ticker) > 10:
+        return {"status": "failed", "ticker": ticker, "error": "Ticker must be 10 characters or fewer"}
+
     if action == "add":
         conn.execute(
             "INSERT OR IGNORE INTO watchlist (id, user_id, ticker, added_at) VALUES (?, 'default', ?, ?)",

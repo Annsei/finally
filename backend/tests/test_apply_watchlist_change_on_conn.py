@@ -53,6 +53,13 @@ class TestApplyWatchlistChangeOnConnFailurePaths:
         assert isinstance(result, dict)
         assert result["status"] == "failed"
 
+    def test_ticker_too_long_returns_failed(self, fresh_db):
+        from app.routes.watchlist import apply_watchlist_change_on_conn
+        result = apply_watchlist_change_on_conn(fresh_db, "TOOLONGTICKER", "add")
+        assert isinstance(result, dict)
+        assert result["status"] == "failed"
+        assert "10" in result["error"] or "characters" in result["error"].lower()
+
     def test_invalid_action_returns_failed(self, fresh_db):
         from app.routes.watchlist import apply_watchlist_change_on_conn
         result = apply_watchlist_change_on_conn(fresh_db, "AAPL", "buy")
