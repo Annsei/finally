@@ -21,17 +21,19 @@ start_phase: 1
 
 ---
 
-## Phase 1: Backend App Layer
+## Phase 1: Backend App Layer ✓ COMPLETE (2026-06-05)
 
 **Goal:** Build the complete FastAPI application with SQLite persistence and all REST API endpoints, wiring together the existing market data subsystem.
 
 **Requirements:** BACK-01, BACK-02, BACK-03, BACK-04, BACK-05, BACK-06, BACK-07, BACK-08, BACK-09, BACK-10, BACK-11
 
 **Success Criteria:**
-1. `GET /api/health` returns `{"status": "ok"}` with 200
-2. Fresh SQLite DB is auto-created with seed data (default user, 10 watchlist tickers) on first request
-3. `POST /api/portfolio/trade` correctly validates cash/shares, updates positions, records trade, and snapshots portfolio
-4. All 9 API endpoints return correct responses; background snapshot task fires every 30 seconds
+1. ✓ `GET /api/health` returns `{"status": "ok"}` with 200
+2. ✓ Fresh SQLite DB is auto-created with seed data (default user, 10 watchlist tickers) on first request
+3. ✓ `POST /api/portfolio/trade` correctly validates cash/shares, updates positions, records trade, and snapshots portfolio
+4. ✓ All API endpoints return correct responses; background snapshot task fires every 30 seconds
+
+**Plans:** 5/5 complete | **Tests:** 89 passing | **Verification:** passed 2026-06-05
 
 **Dependencies:** `backend/app/market/` (complete) — use PriceCache, MarketDataSource, create_market_data_source, create_stream_router
 
@@ -139,17 +141,17 @@ start_phase: 1
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| BACK-01 | 1 | Pending |
-| BACK-02 | 1 | Pending |
-| BACK-03 | 1 | Pending |
-| BACK-04 | 1 | Pending |
-| BACK-05 | 1 | Pending |
-| BACK-06 | 1 | Pending |
-| BACK-07 | 1 | Pending |
-| BACK-08 | 1 | Pending |
-| BACK-09 | 1 | Pending |
-| BACK-10 | 1 | Pending |
-| BACK-11 | 1 | Pending |
+| BACK-01 | 1 | Complete |
+| BACK-02 | 1 | Complete |
+| BACK-03 | 1 | Complete |
+| BACK-04 | 1 | Complete |
+| BACK-05 | 1 | Complete |
+| BACK-06 | 1 | Complete |
+| BACK-07 | 1 | Complete |
+| BACK-08 | 1 | Complete |
+| BACK-09 | 1 | Complete |
+| BACK-10 | 1 | Complete |
+| BACK-11 | 1 | Complete |
 | CHAT-01 | 2 | Pending |
 | CHAT-02 | 2 | Pending |
 | CHAT-03 | 2 | Pending |
