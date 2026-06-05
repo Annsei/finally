@@ -14,7 +14,7 @@ start_phase: 1
 | # | Phase | Goal | Requirements | Success Criteria |
 |---|-------|------|--------------|-----------------|
 | 1 | Backend App Layer | FastAPI app, SQLite DB, all API endpoints working | BACK-01–11 | 4 |
-| 2 | LLM Chat Integration | 2/3 | In Progress|  |
+| 2 | LLM Chat Integration | 3/3 | Complete   | 2026-06-05 |
 | 3 | Frontend Foundation | Next.js project, SSE connection, watchlist panel, sparklines | FE-01–08 | 4 |
 | 4 | Frontend Portfolio & Trading | Charts, heatmap, P&L chart, positions table, trade bar, chat UI | FE-09–15 | 4 |
 | 5 | Infrastructure & E2E | Dockerfile, scripts, docker-compose, E2E tests | INFRA-01–07 | 4 |
@@ -61,7 +61,7 @@ start_phase: 1
 3. `LLM_MOCK=true` returns deterministic responses without calling OpenRouter
 4. Conversation history loaded from `chat_messages` table; new messages persisted with executed actions in `actions` JSON field
 
-**Plans:** 2/3 plans executed
+**Plans:** 3/3 plans complete
 
 Plans:
 **Wave 1**
@@ -74,7 +74,7 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 02-03-PLAN.md — Register chat router in main.py, add test fixtures, write test_chat.py suite
+- [x] 02-03-PLAN.md — Register chat router in main.py, add test fixtures, write test_chat.py suite
 
 **Dependencies:** Phase 1 complete (portfolio, watchlist, trade endpoints available)
 
