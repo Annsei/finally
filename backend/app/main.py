@@ -9,25 +9,49 @@ Wires together:
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from app.db.connection import init_db
+from app.db.connection import init_db, get_conn
 from app.market import PriceCache, create_market_data_source, create_stream_router
 from app.market.seed_prices import SEED_PRICES
 
 logger = logging.getLogger(__name__)
 
 
+async def _snapshot_loop(price_cache: PriceCache, db_path: str, interval: int = 30) -> None:
+    """Background task: record a portfolio snapshot every ``interval`` seconds.
+
+    Runs indefinitely until cancelled via ``asyncio.CancelledError``.
+    """
+    while True:
+        try:
+            conn = get_conn(db_path)
+            try:
+                from app.routes.portfolio import _record_snapshot
+                _record_snapshot(conn, price_cache)
+            finally:
+                conn.close()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Snapshot loop error — will retry in %ds", interval)
+        await asyncio.sleep(interval)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifecycle: start/stop market data and initialize DB."""
-    logger.info("FinAlly startup: initializing database")
-    init_db()
+    db_path = os.getenv("DB_PATH", "db/finally.db")
+
+    logger.info("FinAlly startup: initializing database at %s", db_path)
+    init_db(db_path)
 
     logger.info("FinAlly startup: creating price cache and market data source")
     price_cache = PriceCache()
@@ -44,10 +68,27 @@ async def lifespan(app: FastAPI):
 
     # Register routers that depend on price_cache inside lifespan (factory pattern)
     app.include_router(create_stream_router(price_cache))
-    # Portfolio router (wave 2 — added when 01C/01D execute)
-    # Watchlist router (wave 2 — added when 01C/01D execute)
+
+    # Portfolio router
+    from app.routes.portfolio import create_portfolio_router
+    portfolio_router = create_portfolio_router(price_cache, db_path)
+    app.include_router(portfolio_router)
+
+    # Watchlist router (wave 2 — added when 01D executes)
+
+    # Start background portfolio snapshot task (every 30 seconds)
+    snapshot_task = asyncio.create_task(_snapshot_loop(price_cache, db_path))
+    app.state.snapshot_task = snapshot_task
+    logger.info("FinAlly startup: portfolio snapshot background task started")
 
     yield
+
+    logger.info("FinAlly shutdown: cancelling snapshot task")
+    snapshot_task.cancel()
+    try:
+        await snapshot_task
+    except asyncio.CancelledError:
+        pass
 
     logger.info("FinAlly shutdown: stopping market data source")
     await source.stop()
