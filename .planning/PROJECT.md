@@ -1,5 +1,17 @@
 # FinAlly — AI Trading Workstation
 
+## Current Milestone: v1.0 — Complete Trading Workstation
+
+**Goal:** Build the complete FinAlly trading workstation on top of the existing market data subsystem — backend API layer, SQLite database, Next.js frontend, LLM chat integration, and Docker deployment.
+
+**Target features:**
+- Backend app layer: FastAPI main.py, SQLite lazy-init, all REST API endpoints, portfolio snapshot background task
+- LLM chat: structured output via LiteLLM/OpenRouter/Cerebras, auto-execute trades and watchlist changes, mock mode for tests
+- Frontend: Next.js static export with streaming watchlist, sparklines, charts, portfolio heatmap, positions table, trade bar, AI chat panel
+- Infrastructure: Multi-stage Dockerfile, start/stop scripts, Playwright E2E tests
+
+---
+
 ## What This Is
 
 FinAlly (Finance Ally) is a visually stunning AI-powered trading workstation built as a capstone project for an agentic AI coding course. It streams live market data, lets users trade a simulated $10,000 portfolio via market orders, and integrates an LLM chat assistant (powered by Cerebras/OpenRouter) that can analyze positions and execute trades on the user's behalf. It runs as a single Docker container — one command to start, a browser to use.
@@ -127,4 +139,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-06-04 after initialization*
+*Last updated: 2026-06-05 after milestone v1.0 initialization*
