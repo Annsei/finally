@@ -16,7 +16,8 @@ import sqlite3
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from app.db.connection import get_conn
@@ -131,22 +132,13 @@ def create_portfolio_router(price_cache: PriceCache, db_path: str) -> APIRouter:
         # Validate inputs before touching the DB
         current_price = price_cache.get_price(ticker)
         if current_price is None:
-            raise HTTPException(
-                status_code=400,
-                detail={"error": "Ticker not found in price cache"},
-            )
+            return JSONResponse(status_code=400, content={"error": "Ticker not found in price cache"})
 
         if side not in {"buy", "sell"}:
-            raise HTTPException(
-                status_code=400,
-                detail={"error": "Side must be 'buy' or 'sell'"},
-            )
+            return JSONResponse(status_code=400, content={"error": "Side must be 'buy' or 'sell'"})
 
         if quantity <= 0:
-            raise HTTPException(
-                status_code=400,
-                detail={"error": "Quantity must be greater than 0"},
-            )
+            return JSONResponse(status_code=400, content={"error": "Quantity must be greater than 0"})
 
         conn = get_conn(db_path)
         try:
@@ -161,10 +153,8 @@ def create_portfolio_router(price_cache: PriceCache, db_path: str) -> APIRouter:
 
             if side == "buy":
                 if cash_balance < cost:
-                    raise HTTPException(
-                        status_code=400,
-                        detail={"error": "Insufficient cash"},
-                    )
+                    conn.close()
+                    return JSONResponse(status_code=400, content={"error": "Insufficient cash"})
 
                 # Deduct cash
                 conn.execute(
@@ -195,10 +185,8 @@ def create_portfolio_router(price_cache: PriceCache, db_path: str) -> APIRouter:
                 current_qty: float = pos_row["quantity"] if pos_row else 0.0
 
                 if current_qty < quantity:
-                    raise HTTPException(
-                        status_code=400,
-                        detail={"error": "Insufficient shares to sell"},
-                    )
+                    conn.close()
+                    return JSONResponse(status_code=400, content={"error": "Insufficient shares to sell"})
 
                 # Add cash proceeds
                 conn.execute(
@@ -237,9 +225,6 @@ def create_portfolio_router(price_cache: PriceCache, db_path: str) -> APIRouter:
                 "price": current_price,
                 "trade_id": trade_id,
             }
-        except HTTPException:
-            conn.rollback()
-            raise
         except Exception:
             conn.rollback()
             logger.exception("Unexpected error executing trade %s %s %s", side, quantity, ticker)
