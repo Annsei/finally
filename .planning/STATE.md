@@ -9,7 +9,7 @@ progress:
   total_phases: 5
   completed_phases: 0
   total_plans: 5
-  completed_plans: 2
+  completed_plans: 4
   percent: 0
 ---
 
@@ -18,9 +18,9 @@ progress:
 ## Current Position
 
 Phase: 1 — Backend App Layer
-Plan: Wave 1 complete (01A ✓, 01B ✓) — Wave 2 next (01C, 01D)
+Plan: Wave 2 complete (01C ✓, 01D ✓) — Wave 3 next (01E)
 Status: In Progress
-Last activity: 2026-06-05 -- Phase 1 wave 1 complete (db package + FastAPI app entry point)
+Last activity: 2026-06-05 -- Phase 1 wave 2 complete (Portfolio API + Watchlist API)
 
 ## Project Reference
 
