@@ -57,8 +57,13 @@ async def lifespan(app: FastAPI):
     price_cache = PriceCache()
     source = create_market_data_source(price_cache)
 
-    # Start market data with all default tickers
-    tickers = list(SEED_PRICES.keys())
+    # Start market data with tickers from DB watchlist, falling back to SEED_PRICES
+    conn = get_conn(db_path)
+    rows = conn.execute("SELECT ticker FROM watchlist WHERE user_id = 'default'").fetchall()
+    tickers = [row["ticker"] for row in rows]
+    conn.close()
+    if not tickers:
+        tickers = list(SEED_PRICES.keys())
     await source.start(tickers)
     logger.info("FinAlly startup: market data source started with %d tickers", len(tickers))
 
@@ -74,7 +79,10 @@ async def lifespan(app: FastAPI):
     portfolio_router = create_portfolio_router(price_cache, db_path)
     app.include_router(portfolio_router)
 
-    # Watchlist router (wave 2 — added when 01D executes)
+    # Watchlist router
+    from app.routes.watchlist import create_watchlist_router
+    watchlist_router = create_watchlist_router(price_cache, db_path)
+    app.include_router(watchlist_router)
 
     # Start background portfolio snapshot task (every 30 seconds)
     snapshot_task = asyncio.create_task(_snapshot_loop(price_cache, db_path))
