@@ -458,16 +458,16 @@ def _assemble_portfolio_context(conn, price_cache) -> str:
 
 **If a real OpenRouter call is desired in any test:** it requires a live `OPENROUTER_API_KEY` and network. All automated tests for this phase should use `LLM_MOCK=true`.
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **Should chat-added watchlist tickers start streaming live prices?**
    - What we know: Current manual `POST /api/watchlist` (watchlist.py:72-98) is DB-only and does NOT call `market_source.add_ticker()`. So AI-added tickers would show `price: null` until the source is restarted — same as manual adds today.
    - What's unclear: Whether parity (DB-only) is acceptable, or whether the AI should also start the ticker.
-   - Recommendation: Match existing behavior (DB-only) to stay in scope. If live prices for new tickers are wanted, file it as a follow-up touching both the manual route and chat — out of CHAT-04 scope.
+   - RESOLVED: Match existing behavior (DB-only) to stay in scope. If live prices for new tickers are wanted, file it as a follow-up touching both the manual route and chat — out of CHAT-04 scope.
 
 2. **Where does the `execute_trade_on_conn` / `apply_watchlist_change_on_conn` helper live?**
    - What we know: Cleanest is to add the helper to `portfolio.py` / `watchlist.py` and have both the HTTP route and chat import it.
-   - Recommendation: Put trade helper in `portfolio.py` (refactor `execute_trade` to call it); put watchlist helper in `watchlist.py`. `chat.py` imports both. Avoids circular imports (chat depends on portfolio/watchlist, not vice versa).
+   - RESOLVED: Put trade helper in `portfolio.py` (refactor `execute_trade` to call it); put watchlist helper in `watchlist.py`. `chat.py` imports both. Avoids circular imports (chat depends on portfolio/watchlist, not vice versa).
 
 ## Environment Availability
 
