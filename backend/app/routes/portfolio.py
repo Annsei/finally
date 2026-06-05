@@ -60,6 +60,129 @@ def _record_snapshot(conn: sqlite3.Connection, price_cache: PriceCache) -> None:
     conn.commit()
 
 
+def execute_trade_on_conn(
+    conn: sqlite3.Connection,
+    price_cache: PriceCache,
+    ticker: str,
+    side: str,
+    quantity: float,
+) -> dict:
+    """Execute a market order on an open SQLite connection.
+
+    Validates and executes a buy or sell trade against the provided connection.
+    All validation failures return a dict with status="failed" and an "error" key
+    — this function never raises on validation errors.
+
+    Args:
+        conn: An open SQLite connection (caller manages lifecycle and rollback).
+        price_cache: Live price cache for current market prices.
+        ticker: Ticker symbol (normalized to uppercase internally).
+        side: "buy" or "sell" (normalized to lowercase internally).
+        quantity: Number of shares to trade (must be > 0).
+
+    Returns:
+        On success: {"status": "executed", "ticker", "side", "quantity", "price", "trade_id"}
+        On failure: {"status": "failed", "ticker", "error"}
+    """
+    ticker = ticker.upper()
+    side = side.lower()
+
+    # Validate price availability
+    current_price = price_cache.get_price(ticker)
+    if current_price is None:
+        return {"status": "failed", "ticker": ticker, "error": "Ticker not found in price cache"}
+
+    # Validate side
+    if side not in {"buy", "sell"}:
+        return {"status": "failed", "ticker": ticker, "error": "Side must be 'buy' or 'sell'"}
+
+    # Validate quantity
+    if quantity <= 0:
+        return {"status": "failed", "ticker": ticker, "error": "Quantity must be greater than 0"}
+
+    user_row = conn.execute(
+        "SELECT cash_balance FROM users_profile WHERE id = 'default'"
+    ).fetchone()
+    cash_balance: float = user_row["cash_balance"] if user_row else 0.0
+
+    trade_id = str(uuid.uuid4())
+    now = datetime.now(timezone.utc).isoformat()
+    cost = quantity * current_price
+
+    if side == "buy":
+        if cash_balance < cost:
+            return {"status": "failed", "ticker": ticker, "error": "Insufficient cash"}
+
+        # Deduct cash
+        conn.execute(
+            "UPDATE users_profile SET cash_balance = cash_balance - ? WHERE id = 'default'",
+            (cost,),
+        )
+
+        # Upsert position — weighted average cost on conflict
+        position_id = str(uuid.uuid4())
+        conn.execute(
+            """
+            INSERT INTO positions (id, user_id, ticker, quantity, avg_cost, updated_at)
+            VALUES (?, 'default', ?, ?, ?, ?)
+            ON CONFLICT(user_id, ticker) DO UPDATE SET
+                avg_cost = (avg_cost * quantity + excluded.avg_cost * excluded.quantity)
+                           / (quantity + excluded.quantity),
+                quantity = quantity + excluded.quantity,
+                updated_at = excluded.updated_at
+            """,
+            (position_id, ticker, quantity, current_price, now),
+        )
+
+    else:  # sell
+        pos_row = conn.execute(
+            "SELECT quantity FROM positions WHERE user_id = 'default' AND ticker = ?",
+            (ticker,),
+        ).fetchone()
+        current_qty: float = pos_row["quantity"] if pos_row else 0.0
+
+        if current_qty < quantity:
+            return {"status": "failed", "ticker": ticker, "error": "Insufficient shares to sell"}
+
+        # Add cash proceeds
+        conn.execute(
+            "UPDATE users_profile SET cash_balance = cash_balance + ? WHERE id = 'default'",
+            (cost,),
+        )
+
+        new_qty = current_qty - quantity
+        if new_qty <= 0:
+            conn.execute(
+                "DELETE FROM positions WHERE user_id = 'default' AND ticker = ?",
+                (ticker,),
+            )
+        else:
+            conn.execute(
+                "UPDATE positions SET quantity = ?, updated_at = ? WHERE user_id = 'default' AND ticker = ?",
+                (new_qty, now, ticker),
+            )
+
+    # Insert trade log entry
+    conn.execute(
+        "INSERT INTO trades (id, user_id, ticker, side, quantity, price, executed_at) VALUES (?, 'default', ?, ?, ?, ?, ?)",
+        (trade_id, ticker, side, quantity, current_price, now),
+    )
+
+    conn.commit()
+
+    # Record portfolio snapshot immediately after trade
+    _record_snapshot(conn, price_cache)
+
+    return {
+        "status": "executed",
+        "ticker": ticker,
+        "side": side,
+        "quantity": quantity,
+        "price": current_price,
+        "trade_id": trade_id,
+    }
+
+
 def create_portfolio_router(price_cache: PriceCache, db_path: str) -> APIRouter:
     """Factory: build the portfolio APIRouter with injected dependencies.
 
@@ -122,115 +245,36 @@ def create_portfolio_router(price_cache: PriceCache, db_path: str) -> APIRouter:
     async def execute_trade(body: TradeRequest, request: Request) -> dict:
         """Execute a market order (buy or sell).
 
+        Thin wrapper over ``execute_trade_on_conn``.
         Validation errors return HTTP 400 with ``{"error": "message"}``.
-        On success returns trade confirmation with updated cash and trade_id.
+        On success returns trade confirmation with status="ok" and trade_id.
         """
-        ticker = body.ticker.upper()
-        side = body.side.lower()
-        quantity = body.quantity
-
-        # Validate inputs before touching the DB
-        current_price = price_cache.get_price(ticker)
-        if current_price is None:
-            return JSONResponse(status_code=400, content={"error": "Ticker not found in price cache"})
-
-        if side not in {"buy", "sell"}:
-            return JSONResponse(status_code=400, content={"error": "Side must be 'buy' or 'sell'"})
-
-        if quantity <= 0:
-            return JSONResponse(status_code=400, content={"error": "Quantity must be greater than 0"})
-
         conn = get_conn(db_path)
         try:
-            user_row = conn.execute(
-                "SELECT cash_balance FROM users_profile WHERE id = 'default'"
-            ).fetchone()
-            cash_balance: float = user_row["cash_balance"] if user_row else 0.0
-
-            trade_id = str(uuid.uuid4())
-            now = datetime.now(timezone.utc).isoformat()
-            cost = quantity * current_price
-
-            if side == "buy":
-                if cash_balance < cost:
-                    conn.close()
-                    return JSONResponse(status_code=400, content={"error": "Insufficient cash"})
-
-                # Deduct cash
-                conn.execute(
-                    "UPDATE users_profile SET cash_balance = cash_balance - ? WHERE id = 'default'",
-                    (cost,),
-                )
-
-                # Upsert position — weighted average cost on conflict
-                position_id = str(uuid.uuid4())
-                conn.execute(
-                    """
-                    INSERT INTO positions (id, user_id, ticker, quantity, avg_cost, updated_at)
-                    VALUES (?, 'default', ?, ?, ?, ?)
-                    ON CONFLICT(user_id, ticker) DO UPDATE SET
-                        avg_cost = (avg_cost * quantity + excluded.avg_cost * excluded.quantity)
-                                   / (quantity + excluded.quantity),
-                        quantity = quantity + excluded.quantity,
-                        updated_at = excluded.updated_at
-                    """,
-                    (position_id, ticker, quantity, current_price, now),
-                )
-
-            else:  # sell
-                pos_row = conn.execute(
-                    "SELECT quantity FROM positions WHERE user_id = 'default' AND ticker = ?",
-                    (ticker,),
-                ).fetchone()
-                current_qty: float = pos_row["quantity"] if pos_row else 0.0
-
-                if current_qty < quantity:
-                    conn.close()
-                    return JSONResponse(status_code=400, content={"error": "Insufficient shares to sell"})
-
-                # Add cash proceeds
-                conn.execute(
-                    "UPDATE users_profile SET cash_balance = cash_balance + ? WHERE id = 'default'",
-                    (cost,),
-                )
-
-                new_qty = current_qty - quantity
-                if new_qty <= 0:
-                    conn.execute(
-                        "DELETE FROM positions WHERE user_id = 'default' AND ticker = ?",
-                        (ticker,),
-                    )
-                else:
-                    conn.execute(
-                        "UPDATE positions SET quantity = ?, updated_at = ? WHERE user_id = 'default' AND ticker = ?",
-                        (new_qty, now, ticker),
-                    )
-
-            # Insert trade log entry
-            conn.execute(
-                "INSERT INTO trades (id, user_id, ticker, side, quantity, price, executed_at) VALUES (?, 'default', ?, ?, ?, ?, ?)",
-                (trade_id, ticker, side, quantity, current_price, now),
+            outcome = execute_trade_on_conn(
+                conn, price_cache, body.ticker, body.side, body.quantity
             )
-
-            conn.commit()
-
-            # Record portfolio snapshot immediately after trade
-            _record_snapshot(conn, price_cache)
-
-            return {
-                "status": "ok",
-                "ticker": ticker,
-                "side": side,
-                "quantity": quantity,
-                "price": current_price,
-                "trade_id": trade_id,
-            }
         except Exception:
             conn.rollback()
-            logger.exception("Unexpected error executing trade %s %s %s", side, quantity, ticker)
+            logger.exception(
+                "Unexpected error executing trade %s %s %s",
+                body.side, body.quantity, body.ticker,
+            )
             raise
         finally:
             conn.close()
+
+        if outcome["status"] == "failed":
+            return JSONResponse(status_code=400, content={"error": outcome["error"]})
+
+        return {
+            "status": "ok",
+            "ticker": outcome["ticker"],
+            "side": outcome["side"],
+            "quantity": outcome["quantity"],
+            "price": outcome["price"],
+            "trade_id": outcome["trade_id"],
+        }
 
     @router.get("/history")
     async def get_portfolio_history(request: Request) -> dict:
