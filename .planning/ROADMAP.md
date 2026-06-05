@@ -58,6 +58,13 @@ start_phase: 1
 3. `LLM_MOCK=true` returns deterministic responses without calling OpenRouter
 4. Conversation history loaded from `chat_messages` table; new messages persisted with executed actions in `actions` JSON field
 
+**Plans:** 3 plans
+
+Plans:
+- [ ] 02-01-PLAN.md — Extract execute_trade_on_conn and apply_watchlist_change_on_conn helper functions
+- [ ] 02-02-PLAN.md — Implement backend/app/routes/chat.py with full POST /api/chat handler
+- [ ] 02-03-PLAN.md — Register chat router in main.py, add test fixtures, write test_chat.py suite
+
 **Dependencies:** Phase 1 complete (portfolio, watchlist, trade endpoints available)
 
 **Key constraints:**
@@ -188,4 +195,5 @@ start_phase: 1
 
 ---
 *Roadmap created: 2026-06-05*
+*Last updated: 2026-06-05 — Phase 2 planned (3 plans)*
 *Milestone: v1.0 — Complete Trading Workstation*
