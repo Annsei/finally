@@ -96,8 +96,8 @@ class TestSSEStream:
                             return
 
         await asyncio.wait_for(collect(), timeout=3.0)
-        assert any(l.startswith("retry:") for l in lines_seen)
-        assert not any(l.startswith("data:") for l in lines_seen)
+        assert any(line.startswith("retry:") for line in lines_seen)
+        assert not any(line.startswith("data:") for line in lines_seen)
 
     async def test_multiple_router_instances_do_not_conflict(self):
         """Each call to create_stream_router() produces an independent router."""

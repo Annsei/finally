@@ -18,7 +18,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from app.db.connection import init_db, get_conn
+from app.db.connection import get_conn, init_db
 from app.market import PriceCache, create_market_data_source, create_stream_router
 from app.market.seed_prices import SEED_PRICES
 
