@@ -84,6 +84,11 @@ async def lifespan(app: FastAPI):
     watchlist_router = create_watchlist_router(price_cache, db_path)
     app.include_router(watchlist_router)
 
+    # Chat router
+    from app.routes.chat import create_chat_router
+    chat_router = create_chat_router(price_cache, db_path)
+    app.include_router(chat_router)
+
     # Start background portfolio snapshot task (every 30 seconds)
     snapshot_task = asyncio.create_task(_snapshot_loop(price_cache, db_path))
     app.state.snapshot_task = snapshot_task
