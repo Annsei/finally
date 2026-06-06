@@ -57,6 +57,7 @@ metrics:
   tests_added: 14
   tests_total: 31
   duration: "~20 minutes"
+---
 
 ## Self-Check: PASSED
 
