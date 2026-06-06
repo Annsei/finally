@@ -15,7 +15,7 @@ start_phase: 1
 |---|-------|------|--------------|-----------------|
 | 1 | Backend App Layer | FastAPI app, SQLite DB, all API endpoints working | BACK-01–11 | 4 |
 | 2 | LLM Chat Integration | 3/3 | Complete   | 2026-06-05 |
-| 3 | Frontend Foundation | Next.js project, SSE connection, watchlist panel, sparklines | FE-01–08 | 4 |
+| 3 | Frontend Foundation | 1/4 | In Progress|  |
 | 4 | Frontend Portfolio & Trading | Charts, heatmap, P&L chart, positions table, trade bar, chat UI | FE-09–15 | 4 |
 | 5 | Infrastructure & E2E | Dockerfile, scripts, docker-compose, E2E tests | INFRA-01–07 | 4 |
 
@@ -101,12 +101,12 @@ Plans:
 3. Sparklines accumulate progressively from SSE stream since page load
 4. Header shows live portfolio value, cash balance, and connection status dot (green/yellow/red)
 
-**Plans:** 4 plans
+**Plans:** 1/4 plans executed
 
 Plans:
 **Wave 1**
 
-- [ ] 03-01-PLAN.md — Scaffold Next.js Pages Router + static export, dark terminal Tailwind theme, market types, Jest test infra (FE-01, FE-03)
+- [x] 03-01-PLAN.md — Scaffold Next.js Pages Router + static export, dark terminal Tailwind theme, market types, Jest test infra (FE-01, FE-03)
 
 **Wave 2** *(blocked on Wave 1)*
 
