@@ -30,10 +30,16 @@ let mockInstance: MockEventSource | null = null;
 // Install global mock before all tests
 beforeAll(() => {
   // @ts-ignore
-  global.EventSource = jest.fn().mockImplementation((url: string) => {
+  const MockES = jest.fn().mockImplementation((url: string) => {
     mockInstance = new MockEventSource(url);
     return mockInstance;
   });
+  // Attach static constants so the hook can read EventSource.CONNECTING etc.
+  MockES.CONNECTING = MockEventSource.CONNECTING;
+  MockES.OPEN = MockEventSource.OPEN;
+  MockES.CLOSED = MockEventSource.CLOSED;
+  // @ts-ignore
+  global.EventSource = MockES;
 });
 
 afterAll(() => {
