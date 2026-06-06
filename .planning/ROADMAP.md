@@ -110,7 +110,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1)*
 
-- [ ] 03-02-PLAN.md — SSE data layer: Zustand price store + usePriceStream EventSource hook (FE-04)
+- [x] 03-02-PLAN.md — SSE data layer: Zustand price store + usePriceStream EventSource hook (FE-04)
 
 **Wave 3** *(blocked on Wave 2)*
 
