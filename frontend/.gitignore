@@ -39,3 +39,8 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# The root .gitignore has a bare 'lib/' pattern (Python convention) that would
+# incorrectly exclude frontend/src/lib/. Negate it here for this subdirectory.
+!src/lib/
+!src/lib/**
