@@ -636,17 +636,17 @@ cat frontend/package.json | grep tailwindcss
 
 ---
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-1. **Lightweight Charts time format for SSE timestamps**
-   - What we know: Backend sends `timestamp` as Unix epoch seconds (float); Lightweight Charts v5 `LineSeries` accepts `{ time, value }` where `time` can be UTC timestamp (seconds) or a date string
-   - What's unclear: Whether `Math.floor(priceUpdate.timestamp)` produces valid UTCTimestamp or requires a cast
-   - Recommendation: Use `time: Math.floor(priceUpdate.timestamp) as UTCTimestamp` with the type import from `lightweight-charts`. If the chart shows "time not in order" errors, accumulate points in an array and call `series.setData(points)` instead of `series.update()`.
+1. **Lightweight Charts time format for SSE timestamps** — RESOLVED: use `time: Math.floor(priceUpdate.timestamp) as UTCTimestamp` (cast with the `UTCTimestamp` type import from `lightweight-charts`); call `series.update()` per tick. If "time not in order" errors surface at runtime, fall back to accumulating points in an array and calling `series.setData(points)`. This is the approach implemented in Plan 04 Task 1 (SparklineChart).
+   - What we know: Backend sends `timestamp` as Unix epoch seconds (float); Lightweight Charts v5 `LineSeries` accepts `{ time, value }` where `time` can be a UTC timestamp (seconds) or a date string
+   - What was unclear: Whether `Math.floor(priceUpdate.timestamp)` produces a valid UTCTimestamp or requires a cast — resolved: a cast to `UTCTimestamp` is required; `Math.floor` yields integer seconds which is the accepted UTCTimestamp form
+   - Resolution: Use `time: Math.floor(priceUpdate.timestamp) as UTCTimestamp`; `setData` fallback only if time-ordering errors appear
 
-2. **useShallow import path in zustand v5**
+2. **useShallow import path in zustand v5** — RESOLVED: not needed for this phase. The plans use separate single-atom selectors (`usePriceStore((s) => s.connectionStatus)`, `usePriceStore((s) => s.setPrices)`, etc.) per Pitfall 2 guidance, so no object selector and therefore no `useShallow` import is required anywhere in Phase 3. If a future component needs multiple atoms in one call, import `useShallow` from `'zustand/react/shallow'` (path confirmed unchanged from v4 to v5).
    - What we know: `useShallow` exists in zustand v5 from `'zustand/react/shallow'`
-   - What's unclear: Whether the path changed between zustand 4 and 5
-   - Recommendation: Use `import { useShallow } from 'zustand/react/shallow'` as shown in the official README.
+   - What was unclear: Whether the path changed between zustand 4 and 5 — resolved: the path is unchanged (`'zustand/react/shallow'`)
+   - Resolution: Separate atom selectors are used throughout Phase 3 — `useShallow` is not needed
 
 ---
 
@@ -698,6 +698,7 @@ cat frontend/package.json | grep tailwindcss
 ### Wave 0 Gaps (all new — frontend directory does not exist)
 - [ ] `frontend/jest.config.js` — Jest + next/jest configuration with jsdom + canvas mock
 - [ ] `frontend/jest.setup.ts` — `import '@testing-library/jest-dom'` + `import 'jest-canvas-mock'`
+- [ ] `frontend/__tests__/index.test.tsx` — covers FE-03 (root element has bg-terminal-bg dark theme class)
 - [ ] `frontend/__tests__/Header.test.tsx` — covers FE-02
 - [ ] `frontend/__tests__/WatchlistPanel.test.tsx` — covers FE-05
 - [ ] `frontend/__tests__/WatchlistRow.test.tsx` — covers FE-06, FE-08

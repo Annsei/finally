@@ -118,7 +118,7 @@ Plans:
 
 **Wave 4** *(blocked on Wave 3)*
 
-- [ ] 03-04-PLAN.md — Watchlist panel, row (flash + selection), sparkline chart, dashboard wiring (FE-05, FE-06, FE-07, FE-08)
+- [ ] 03-04-PLAN.md — Watchlist panel, row (flash + selection), sparkline chart, dashboard wiring + FE-03 dark-theme root test (FE-03, FE-05, FE-06, FE-07, FE-08)
 
 **Dependencies:** Phase 1 complete (SSE stream endpoint available)
 
