@@ -70,7 +70,9 @@ describe('Header component', () => {
     mockUseSWR.mockReturnValue({ data: undefined } as any);
     // Should not throw; should render '—' placeholders
     expect(() => render(<Header />)).not.toThrow();
-    const dashes = screen.getAllByText('—');
+    // The '—' is rendered inside a span alongside '$', so we use getAllByText with exact:false
+    // to find elements containing the dash placeholder text
+    const dashes = screen.getAllByText(/—/);
     expect(dashes.length).toBeGreaterThanOrEqual(2);
   });
 });
