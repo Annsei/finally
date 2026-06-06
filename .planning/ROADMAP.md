@@ -88,7 +88,7 @@ Plans:
 
 ---
 
-## Phase 3: Frontend Foundation
+## Phase 3: Frontend Foundation ✓ COMPLETE (2026-06-06)
 
 **Goal:** Bootstrap the Next.js TypeScript project with SSE integration, the watchlist panel with live price flashing and sparklines, and the dark terminal theme.
 
@@ -96,12 +96,12 @@ Plans:
 
 **Success Criteria:**
 
-1. `npm run build` produces static export in `out/`; FastAPI serves it at `/`
-2. Prices in watchlist panel flash green/red on each SSE update and fade in ~500ms
-3. Sparklines accumulate progressively from SSE stream since page load
-4. Header shows live portfolio value, cash balance, and connection status dot (green/yellow/red)
+1. ✓ `npm run build` produces static export in `out/`; FastAPI serves it at `/`
+2. ✓ Prices in watchlist panel flash green/red on each SSE update and fade in ~500ms
+3. ✓ Sparklines accumulate progressively from SSE stream since page load
+4. ✓ Header shows live portfolio value, cash balance, and connection status dot (green/yellow/red)
 
-**Plans:** 4/4 plans complete
+**Plans:** 4/4 complete | **Tests:** 31 passing | **Verification:** passed 2026-06-06
 
 Plans:
 **Wave 1**
