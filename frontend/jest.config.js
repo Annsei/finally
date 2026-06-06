@@ -12,6 +12,8 @@ const customJestConfig = {
   moduleNameMapper: {
     '^@/(.*)$': '<rootDir>/src/$1',
     'next/font/google': '<rootDir>/__mocks__/nextFontMock.js',
+    // lightweight-charts is pure ESM; stub lets jest.mock() resolve the path
+    '^lightweight-charts$': '<rootDir>/__mocks__/lightweightChartsStub.js',
   },
   testPathIgnorePatterns: ['<rootDir>/node_modules/', '<rootDir>/.next/'],
 };
