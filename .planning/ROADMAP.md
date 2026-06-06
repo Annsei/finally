@@ -101,7 +101,7 @@ Plans:
 3. Sparklines accumulate progressively from SSE stream since page load
 4. Header shows live portfolio value, cash balance, and connection status dot (green/yellow/red)
 
-**Plans:** 1/4 plans executed
+**Plans:** 4/4 plans complete
 
 Plans:
 **Wave 1**
@@ -118,7 +118,7 @@ Plans:
 
 **Wave 4** *(blocked on Wave 3)*
 
-- [ ] 03-04-PLAN.md — Watchlist panel, row (flash + selection), sparkline chart, dashboard wiring + FE-03 dark-theme root test (FE-03, FE-05, FE-06, FE-07, FE-08)
+- [x] 03-04-PLAN.md — Watchlist panel, row (flash + selection), sparkline chart, dashboard wiring + FE-03 dark-theme root test (FE-03, FE-05, FE-06, FE-07, FE-08) ✓ 2026-06-06
 
 **Dependencies:** Phase 1 complete (SSE stream endpoint available)
 
