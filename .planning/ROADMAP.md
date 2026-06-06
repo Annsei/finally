@@ -114,7 +114,7 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2)*
 
-- [ ] 03-03-PLAN.md — Header: portfolio value + cash via SWR + connection status dot (FE-02)
+- [x] 03-03-PLAN.md — Header: portfolio value + cash via SWR + connection status dot (FE-02) ✓ 2026-06-06
 
 **Wave 4** *(blocked on Wave 3)*
 
