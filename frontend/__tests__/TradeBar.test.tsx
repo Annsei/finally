@@ -1,5 +1,5 @@
 /**
- * TradeBar tests (TDD RED-first):
+ * TradeBar tests (TDD):
  * Test T-4-01: Empty/invalid ticker blocks fetch with inline error
  * Test T-4-03: Quantity <= 0 blocks fetch with inline error
  * Test T-4-buy: Clicking Buy with valid inputs calls POST /api/portfolio/trade with side "buy"
@@ -9,6 +9,17 @@
  */
 import React from 'react';
 import { render, fireEvent, waitFor, act } from '@testing-library/react';
+import useSWR from 'swr';
+
+// jest.mock is hoisted above variable declarations — define inline data in the factory
+// to avoid "Cannot access before initialization" errors. We override per-test with
+// jest.mocked(useSWR).mockReturnValue in beforeEach.
+jest.mock('swr', () => ({
+  __esModule: true,
+  default: jest.fn(),
+}));
+
+import TradeBar from '@/components/TradeBar';
 
 // Mock portfolio data matching PortfolioResponse
 const mockPortfolio = {
@@ -26,30 +37,25 @@ const mockPortfolio = {
   ],
 };
 
-// Mock mutate that invokes the async mutator and respects rollbackOnError
-const mockMutate = jest.fn().mockImplementation(async (fn: ((current: typeof mockPortfolio) => Promise<typeof mockPortfolio>) | undefined, opts?: { rollbackOnError?: boolean }) => {
+// mockMutate: invokes the async mutator and re-throws errors so the caller's
+// catch block fires. SWR v2 applies rollback internally AND re-throws — our mock
+// matches that behavior so TradeBar.handleTrade can setError on failure.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const mockMutate = jest.fn().mockImplementation(async (fn: any) => {
   if (typeof fn === 'function') {
-    try {
-      await fn(mockPortfolio);
-    } catch (e) {
-      if (!opts?.rollbackOnError) throw e;
-      // swallow error when rollbackOnError is true (SWR v2 handles rollback internally)
-    }
+    await fn(mockPortfolio); // let any throw propagate to the caller
   }
 });
-
-// Mock swr before importing the component
-jest.mock('swr', () => ({
-  __esModule: true,
-  default: jest.fn().mockReturnValue({ data: mockPortfolio, mutate: mockMutate }),
-}));
-
-import TradeBar from '@/components/TradeBar';
 
 describe('TradeBar', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     global.fetch = jest.fn();
+    // Wire up useSWR mock for each test — safe here because hoisting is done
+    jest.mocked(useSWR).mockReturnValue({
+      data: mockPortfolio,
+      mutate: mockMutate,
+    } as ReturnType<typeof useSWR>);
   });
 
   it('Test T-4-01: empty ticker blocks fetch and shows inline error', async () => {
