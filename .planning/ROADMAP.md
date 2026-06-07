@@ -154,7 +154,7 @@ Plans:
 - Trade bar: optimistic update on submit, reconcile on API response
 - Chat panel: no streaming — show loading indicator until full response arrives
 
-**Plans:** 1/6 plans executed
+**Plans:** 5/6 plans executed
 
 Plans:
 **Wave 1**
@@ -163,10 +163,10 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1)*
 
-- [ ] 04-02-PLAN.md — MainChart (selected ticker) + PnLChart (portfolio value, 30s poll) (FE-09, FE-11)
-- [ ] 04-03-PLAN.md — PortfolioHeatmap (CSS treemap) + PositionsTable (live flashing) (FE-10, FE-12)
-- [ ] 04-04-PLAN.md — TradeBar: validated buy/sell with optimistic update + inline errors (FE-13)
-- [ ] 04-05-PLAN.md — ChatPanel: history load, send + loading, action badges (FE-14, FE-15)
+- [x] 04-02-PLAN.md — MainChart (selected ticker) + PnLChart (portfolio value, 30s poll) (FE-09, FE-11)
+- [x] 04-03-PLAN.md — PortfolioHeatmap (CSS treemap) + PositionsTable (live flashing) (FE-10, FE-12)
+- [x] 04-04-PLAN.md — TradeBar: validated buy/sell with optimistic update + inline errors (FE-13)
+- [x] 04-05-PLAN.md — ChatPanel: history load, send + loading, action badges (FE-14, FE-15)
 
 **Wave 3** *(blocked on Wave 2)*
 
