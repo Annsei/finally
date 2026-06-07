@@ -113,14 +113,13 @@ describe('ChatPanel', () => {
       expect(indicator).toBeTruthy();
     });
 
-    // Resolve the fetch
+    // Resolve the fetch with a plain mock response (jsdom does not have Response)
     await act(async () => {
-      resolveFetch(
-        new Response(
-          JSON.stringify({ message: 'Done!', trades: [], watchlist_changes: [] }),
-          { status: 200, headers: { 'Content-Type': 'application/json' } }
-        )
-      );
+      resolveFetch({
+        status: 200,
+        ok: true,
+        json: async () => ({ message: 'Done!', trades: [], watchlist_changes: [] }),
+      } as unknown as Response);
       await Promise.resolve();
       await Promise.resolve();
     });
@@ -160,8 +159,11 @@ describe('ChatPanel', () => {
     // Message text renders
     expect(screen.getByText('I bought AAPL for you.')).toBeTruthy();
 
-    // Trade badge — should contain "Bought 5 AAPL @ 190.00"
-    expect(screen.getByText(/Bought 5 AAPL/i)).toBeTruthy();
+    // Trade badge — "Bought 5 AAPL @ $190.00" should appear in a <span> badge element
+    // The badge text is distinct from the message text so exact match works
+    const badgeEl = screen.getByText(/Bought 5 AAPL @ \$190\.00/i);
+    expect(badgeEl).toBeTruthy();
+    expect(badgeEl.tagName.toLowerCase()).toBe('span');
   });
 
   // -------------------------------------------------------------------------
@@ -190,8 +192,13 @@ describe('ChatPanel', () => {
     // Message text renders
     expect(screen.getByText('Added NVDA to your watchlist.')).toBeTruthy();
 
-    // Watchlist badge — should contain "Added NVDA"
-    expect(screen.getByText(/Added NVDA/i)).toBeTruthy();
+    // Watchlist badge — "Added NVDA" appears in both the message bubble and the badge span;
+    // use getAllByText and confirm at least one match is the badge span element
+    const matches = screen.getAllByText(/Added NVDA/i);
+    expect(matches.length).toBeGreaterThanOrEqual(1);
+    // The badge is a <span> — verify at least one match is a span
+    const badgeSpan = matches.find((el) => el.tagName.toLowerCase() === 'span');
+    expect(badgeSpan).toBeTruthy();
   });
 
   // -------------------------------------------------------------------------
