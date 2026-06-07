@@ -16,7 +16,7 @@ start_phase: 1
 | 1 | Backend App Layer | FastAPI app, SQLite DB, all API endpoints working | BACK-01–11 | 4 |
 | 2 | LLM Chat Integration | 3/3 | Complete   | 2026-06-05 |
 | 3 | Frontend Foundation | 1/4 | In Progress|  |
-| 4 | Frontend Portfolio & Trading | Charts, heatmap, P&L chart, positions table, trade bar, chat UI | FE-09–15 | 4 |
+| 4 | Frontend Portfolio & Trading | 1/6 | In Progress|  |
 | 5 | Infrastructure & E2E | Dockerfile, scripts, docker-compose, E2E tests | INFRA-01–07 | 4 |
 
 ---
@@ -154,12 +154,12 @@ Plans:
 - Trade bar: optimistic update on submit, reconcile on API response
 - Chat panel: no streaming — show loading indicator until full response arrives
 
-**Plans:** 6 plans
+**Plans:** 1/6 plans executed
 
 Plans:
 **Wave 1**
 
-- [ ] 04-01-PLAN.md — Frontend Phase 4 types + backend GET /api/chat/ history endpoint (FE-14, FE-15)
+- [x] 04-01-PLAN.md — Frontend Phase 4 types + backend GET /api/chat/ history endpoint (FE-14, FE-15)
 
 **Wave 2** *(blocked on Wave 1)*
 
