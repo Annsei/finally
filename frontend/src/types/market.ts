@@ -49,3 +49,54 @@ export const DEFAULT_TICKERS = [
   'AAPL', 'GOOGL', 'MSFT', 'AMZN', 'TSLA',
   'NVDA', 'META', 'JPM', 'V', 'NFLX',
 ] as const;
+
+// GET /api/portfolio/history response:
+export interface PortfolioSnapshot {
+  total_value: number;
+  recorded_at: string;  // ISO timestamp string
+}
+
+export interface PortfolioHistoryResponse {
+  snapshots: PortfolioSnapshot[];
+}
+
+// POST /api/portfolio/trade outcome (included in POST /api/chat response trades[]):
+export interface TradeOutcome {
+  status: 'executed' | 'failed';
+  ticker: string;
+  side?: string;
+  quantity?: number;
+  price?: number;
+  trade_id?: string;
+  error?: string;
+}
+
+// POST /api/chat watchlist_changes[] item:
+export interface WatchlistOutcome {
+  status: string;
+  ticker: string;
+  action: string;
+}
+
+// GET /api/chat/ response message item:
+export interface ChatMessage {
+  role: 'user' | 'assistant';
+  content: string;
+  actions: {
+    trades: TradeOutcome[];
+    watchlist_changes: WatchlistOutcome[];
+  } | null;
+  created_at: string;
+}
+
+// GET /api/chat/ response:
+export interface ChatHistoryResponse {
+  messages: ChatMessage[];
+}
+
+// POST /api/chat response:
+export interface ChatPostResponse {
+  message: string;
+  trades: TradeOutcome[];
+  watchlist_changes: WatchlistOutcome[];
+}
