@@ -116,3 +116,61 @@ class TestChat:
         assert data["message"] == (
             "I've added PYPL to your watchlist and bought 5 shares of AAPL for you."
         )
+
+    async def test_get_chat_history(self, chat_client):
+        """D-11: GET /api/chat/ returns 200 with messages array in ascending chronological order.
+
+        Verifies:
+        - GET /api/chat/ returns 200 with a JSON body containing a "messages" key
+        - messages is a list
+        - After seeding two messages, each item has keys role, content, actions, created_at
+        - Messages are ordered ascending by created_at (earliest first)
+        - actions is a parsed JSON object (dict) for assistant messages, not a raw string
+        """
+        import asyncio
+
+        # Seed: post one chat message which creates user + assistant rows
+        resp = await chat_client.post("/api/chat/", json={"message": "seed message"})
+        assert resp.status_code == 200
+
+        # Small delay to ensure distinct timestamps (both rows use datetime.now() in quick succession)
+        await asyncio.sleep(0.01)
+
+        # Now GET history
+        response = await chat_client.get("/api/chat/")
+        assert response.status_code == 200
+        data = response.json()
+
+        # Must have a "messages" key whose value is a list
+        assert "messages" in data
+        assert isinstance(data["messages"], list)
+
+        # After one chat POST we have at least 2 rows (user + assistant)
+        assert len(data["messages"]) >= 2
+
+        # Each message has the expected keys
+        for msg in data["messages"]:
+            assert "role" in msg
+            assert "content" in msg
+            assert "actions" in msg
+            assert "created_at" in msg
+
+        # Messages are ordered ascending by created_at (earliest first)
+        timestamps = [msg["created_at"] for msg in data["messages"]]
+        assert timestamps == sorted(timestamps), "Messages must be in ascending chronological order"
+
+        # The user message should appear before the assistant message
+        roles = [msg["role"] for msg in data["messages"]]
+        assert roles[0] == "user"
+        assert roles[1] == "assistant"
+
+        # actions for user message should be None
+        user_msg = data["messages"][0]
+        assert user_msg["actions"] is None
+
+        # actions for assistant message should be a dict (parsed JSON), not a string
+        asst_msg = data["messages"][1]
+        if asst_msg["actions"] is not None:
+            assert isinstance(asst_msg["actions"], dict), (
+                f"actions must be a parsed dict, not {type(asst_msg['actions'])}"
+            )
