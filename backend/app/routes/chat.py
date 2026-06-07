@@ -144,6 +144,40 @@ def create_chat_router(price_cache: PriceCache, db_path: str) -> APIRouter:
     """
     router = APIRouter(prefix="/api/chat", tags=["chat"])
 
+    @router.get("/")
+    async def get_chat_history(request: Request) -> dict:
+        """Return last 20 chat messages in ascending chronological order.
+
+        Query selects DESC then reverses so the response is ascending by created_at.
+        The ``actions`` field is parsed from its stored JSON string to a dict (or None).
+
+        Returns:
+            {"messages": [{"role", "content", "actions", "created_at"}, ...]}
+        """
+        conn = get_conn(db_path)
+        try:
+            rows = conn.execute(
+                """
+                SELECT role, content, actions, created_at
+                FROM chat_messages
+                WHERE user_id = 'default'
+                ORDER BY created_at DESC
+                LIMIT 20
+                """
+            ).fetchall()
+            messages = list(reversed([
+                {
+                    "role": row["role"],
+                    "content": row["content"],
+                    "actions": json.loads(row["actions"]) if row["actions"] else None,
+                    "created_at": row["created_at"],
+                }
+                for row in rows
+            ]))
+            return {"messages": messages}
+        finally:
+            conn.close()
+
     @router.post("/")
     async def chat(body: ChatRequest, request: Request) -> dict:
         """Process a chat message: call LLM (or mock), auto-execute actions, persist.
