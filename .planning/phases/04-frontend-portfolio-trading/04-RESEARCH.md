@@ -982,7 +982,7 @@ Backend tests:
 
 ---
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **Auto-select first ticker: watchlist order**
    - What we know: `GET /api/watchlist` returns tickers in `added_at ASC` order
