@@ -13,17 +13,17 @@ export default function WatchlistRow({ ticker, isSelected, onSelect }: Props) {
   const priceRef = useRef<HTMLTableCellElement>(null);
   const flashTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Flash animation: clear prior timeout, force reflow, re-add class (Pitfall 5)
   useEffect(() => {
     if (!priceUpdate || !priceRef.current) return;
-    if (priceUpdate.direction === 'flat') return;
 
     const cell = priceRef.current;
     if (flashTimeoutRef.current) clearTimeout(flashTimeoutRef.current);
+    cell.classList.remove('animate-flash-up', 'animate-flash-down');
 
-    const cls = priceUpdate.direction === 'up' ? 'flash-up' : 'flash-down';
-    cell.classList.remove('flash-up', 'flash-down');
-    void cell.offsetWidth; // force reflow so re-adding the class re-triggers transition
+    if (priceUpdate.direction === 'flat') return;
+
+    void cell.offsetWidth; // force reflow so re-adding the class re-triggers the animation
+    const cls = priceUpdate.direction === 'up' ? 'animate-flash-up' : 'animate-flash-down';
     cell.classList.add(cls);
 
     flashTimeoutRef.current = setTimeout(() => {

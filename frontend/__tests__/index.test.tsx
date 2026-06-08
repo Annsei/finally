@@ -92,7 +92,7 @@ describe('Dashboard index page', () => {
   it('Test 7 (D-03): first watchlist ticker is auto-selected when no ticker is selected', () => {
     // Mock watchlist SWR to return ticker data
     mockUseSWR.mockImplementation((key: any) => {
-      if (key === '/api/watchlist') {
+      if (key === '/api/watchlist/') {
         return {
           data: { tickers: [{ ticker: 'AAPL' }, { ticker: 'GOOGL' }] },
           mutate: jest.fn(),

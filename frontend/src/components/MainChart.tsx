@@ -34,7 +34,6 @@ export default function MainChart({ ticker }: Props) {
       },
       timeScale: {
         borderColor: '#30363d',
-        textColor: '#8b949e',
       },
     });
 

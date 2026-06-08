@@ -22,6 +22,13 @@ import sqlite3
 import pytest
 
 
+def _post_chat_handler(router):
+    for route in router.routes:
+        if hasattr(route, "endpoint") and "POST" in getattr(route, "methods", set()):
+            return route.endpoint
+    raise AssertionError("Router must expose a POST route endpoint")
+
+
 class TestHandlerStructure:
     """Handler function is present and has correct structure."""
 
@@ -33,12 +40,7 @@ class TestHandlerStructure:
         cache = PriceCache()
         router = create_chat_router(cache, ":memory:")
 
-        # Find the POST "/" route handler
-        route_funcs = [
-            r.endpoint for r in router.routes if hasattr(r, "endpoint")
-        ]
-        assert len(route_funcs) >= 1, "Router must have at least one route endpoint"
-        post_handler = route_funcs[0]
+        post_handler = _post_chat_handler(router)
         assert inspect.iscoroutinefunction(post_handler), "chat handler must be async"
 
     def test_litellm_not_imported_at_module_level(self):
@@ -117,7 +119,7 @@ class TestHandlerMockPathIntegration:
         from app.routes.chat import ChatRequest, create_chat_router
 
         router = create_chat_router(cache, db_path)
-        handler = [r.endpoint for r in router.routes if hasattr(r, "endpoint")][0]
+        handler = _post_chat_handler(router)
 
         result = await handler(body=ChatRequest(message="hello"), request=None)
         assert result["message"] == (
@@ -130,7 +132,7 @@ class TestHandlerMockPathIntegration:
         from app.routes.chat import ChatRequest, create_chat_router
 
         router = create_chat_router(cache, db_path)
-        handler = [r.endpoint for r in router.routes if hasattr(r, "endpoint")][0]
+        handler = _post_chat_handler(router)
 
         result = await handler(body=ChatRequest(message="hello"), request=None)
         assert "trades" in result
@@ -141,7 +143,7 @@ class TestHandlerMockPathIntegration:
         from app.routes.chat import ChatRequest, create_chat_router
 
         router = create_chat_router(cache, db_path)
-        handler = [r.endpoint for r in router.routes if hasattr(r, "endpoint")][0]
+        handler = _post_chat_handler(router)
 
         result = await handler(body=ChatRequest(message="hello"), request=None)
         assert "watchlist_changes" in result
@@ -153,7 +155,7 @@ class TestHandlerMockPathIntegration:
         from app.routes.chat import ChatRequest, create_chat_router
 
         router = create_chat_router(cache, db_path)
-        handler = [r.endpoint for r in router.routes if hasattr(r, "endpoint")][0]
+        handler = _post_chat_handler(router)
 
         result = await handler(body=ChatRequest(message="hello"), request=None)
         assert len(result["trades"]) == 1
@@ -169,7 +171,7 @@ class TestHandlerMockPathIntegration:
         from app.routes.chat import ChatRequest, create_chat_router
 
         router = create_chat_router(cache, db_path)
-        handler = [r.endpoint for r in router.routes if hasattr(r, "endpoint")][0]
+        handler = _post_chat_handler(router)
 
         await handler(body=ChatRequest(message="hello"), request=None)
 
@@ -190,7 +192,7 @@ class TestHandlerMockPathIntegration:
         from app.routes.chat import ChatRequest, create_chat_router
 
         router = create_chat_router(cache, db_path)
-        handler = [r.endpoint for r in router.routes if hasattr(r, "endpoint")][0]
+        handler = _post_chat_handler(router)
 
         await handler(body=ChatRequest(message="hello"), request=None)
 
@@ -213,7 +215,7 @@ class TestHandlerMockPathIntegration:
         from app.routes.chat import ChatRequest, create_chat_router
 
         router = create_chat_router(cache, db_path)
-        handler = [r.endpoint for r in router.routes if hasattr(r, "endpoint")][0]
+        handler = _post_chat_handler(router)
 
         await handler(body=ChatRequest(message="hello"), request=None)
 
@@ -238,7 +240,7 @@ class TestHandlerMockPathIntegration:
         from app.routes.chat import ChatRequest, create_chat_router
 
         router = create_chat_router(cache, db_path)
-        handler = [r.endpoint for r in router.routes if hasattr(r, "endpoint")][0]
+        handler = _post_chat_handler(router)
 
         # First request
         await handler(body=ChatRequest(message="first message"), request=None)

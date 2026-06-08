@@ -22,10 +22,10 @@ export default function Dashboard() {
   const [chatOpen, setChatOpen] = useState(true);
 
   // SWR for portfolio (bound mutate passed to TradeBar + ChatPanel for revalidation)
-  const { mutate: mutatePortfolio } = useSWR<PortfolioResponse>('/api/portfolio', fetcher);
+  const { mutate: mutatePortfolio } = useSWR<PortfolioResponse>('/api/portfolio/', fetcher);
 
   // SWR for watchlist (needed for auto-select D-03)
-  const { data: watchlistData } = useSWR<WatchlistResponse>('/api/watchlist', fetcher);
+  const { data: watchlistData } = useSWR<WatchlistResponse>('/api/watchlist/', fetcher);
 
   // Auto-select first ticker on load when none is selected (D-03)
   useEffect(() => {

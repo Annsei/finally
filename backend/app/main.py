@@ -25,6 +25,14 @@ from app.market.seed_prices import SEED_PRICES
 logger = logging.getLogger(__name__)
 
 
+def _mount_static_files(app: FastAPI) -> None:
+    """Mount the static frontend after all API routers are registered."""
+    static_dir = Path(__file__).parent.parent / "static"
+    if static_dir.exists():
+        app.mount("/", StaticFiles(directory=str(static_dir), html=True), name="static")
+        logger.info("Serving static files from %s", static_dir)
+
+
 async def _snapshot_loop(price_cache: PriceCache, db_path: str, interval: int = 30) -> None:
     """Background task: record a portfolio snapshot every ``interval`` seconds.
 
@@ -89,6 +97,9 @@ async def lifespan(app: FastAPI):
     chat_router = create_chat_router(price_cache, db_path)
     app.include_router(chat_router)
 
+    # Mount static files LAST — must not shadow /api/* routes.
+    _mount_static_files(app)
+
     # Start background portfolio snapshot task (every 30 seconds)
     snapshot_task = asyncio.create_task(_snapshot_loop(price_cache, db_path))
     app.state.snapshot_task = snapshot_task
@@ -120,9 +131,3 @@ app = FastAPI(
 from app.routes.health import router as health_router  # noqa: E402
 
 app.include_router(health_router)
-
-# Mount static files LAST — must not shadow /api/* routes
-static_dir = Path(__file__).parent.parent / "static"
-if static_dir.exists():
-    app.mount("/", StaticFiles(directory=str(static_dir), html=True), name="static")
-    logger.info("Serving static files from %s", static_dir)

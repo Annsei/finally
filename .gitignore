@@ -191,6 +191,11 @@ cython_debug/
 # Ruff stuff:
 .ruff_cache/
 
+# Project build and test artifacts
+backend/static/
+test-results/
+tmp-*.spec.js
+
 # PyPI configuration file
 .pypirc
 

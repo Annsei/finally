@@ -33,7 +33,7 @@ export default function Header() {
   const connectionStatus = usePriceStore((s) => s.connectionStatus);
 
   // SWR polling every 5s — satisfies FE-02 "live updating" for portfolio numbers (D-04)
-  const { data } = useSWR<PortfolioResponse>('/api/portfolio', fetcher, {
+  const { data } = useSWR<PortfolioResponse>('/api/portfolio/', fetcher, {
     refreshInterval: 5000,
   });
 

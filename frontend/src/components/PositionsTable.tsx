@@ -76,7 +76,7 @@ function PositionsRow({ pos }: { pos: Position }) {
 }
 
 export default function PositionsTable() {
-  const { data } = useSWR<PortfolioResponse>('/api/portfolio', fetcher);
+  const { data } = useSWR<PortfolioResponse>('/api/portfolio/', fetcher);
   const positions = data?.positions;
 
   if (!positions || positions.length === 0) {

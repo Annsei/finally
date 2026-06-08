@@ -3,7 +3,7 @@ import type { PortfolioResponse } from '@/types/market';
 import { fetcher } from '@/lib/fetcher';
 
 export default function PortfolioHeatmap() {
-  const { data } = useSWR<PortfolioResponse>('/api/portfolio', fetcher);
+  const { data } = useSWR<PortfolioResponse>('/api/portfolio/', fetcher);
   const positions = data?.positions;
   const totalValue = data?.total_value ?? 0;
 

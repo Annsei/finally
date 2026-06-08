@@ -3,6 +3,7 @@
  * Test 1: On mount, createChart called once and addSeries called with LineSeries
  * Test 2: When store ticker price updates, series.update called with { time, value: price }
  * Test 3: On unmount, chart.remove() called once
+ * Test 4: Width/height prop changes are applied to the existing chart
  */
 import React from 'react';
 import { render, act } from '@testing-library/react';
@@ -11,10 +12,12 @@ import { usePriceStore } from '@/stores/priceStore';
 jest.mock('lightweight-charts', () => {
   const mockSeriesUpdate = jest.fn();
   const mockChartRemove = jest.fn();
+  const mockApplyOptions = jest.fn();
   const mockAddSeries = jest.fn().mockReturnValue({ update: mockSeriesUpdate });
   const mockCreateChart = jest.fn().mockReturnValue({
     addSeries: mockAddSeries,
     remove: mockChartRemove,
+    applyOptions: mockApplyOptions,
   });
   const LineSeries = { __sentinelType: 'LineSeries' };
   return { createChart: mockCreateChart, LineSeries };
@@ -63,7 +66,7 @@ describe('SparklineChart', () => {
     });
 
     expect(series.update).toHaveBeenCalledWith(
-      expect.objectContaining({ time: 1717700000, value: 190.5 })
+      expect.objectContaining({ time: 1, value: 190.5 })
     );
   });
 
@@ -76,5 +79,16 @@ describe('SparklineChart', () => {
     unmount();
 
     expect(chart.remove).toHaveBeenCalledTimes(1);
+  });
+
+  it('Test 4: Width/height prop changes are applied to the existing chart', () => {
+    const { rerender } = render(<SparklineChart ticker="AAPL" width={80} height={28} />);
+
+    const mc = jest.mocked(createChart);
+    const chart = mc.mock.results[0].value as { applyOptions: jest.Mock };
+
+    rerender(<SparklineChart ticker="AAPL" width={120} height={40} />);
+
+    expect(chart.applyOptions).toHaveBeenLastCalledWith({ width: 120, height: 40 });
   });
 });

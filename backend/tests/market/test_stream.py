@@ -6,11 +6,35 @@ import asyncio
 import json
 
 import pytest
-from fastapi import FastAPI
-from httpx import ASGITransport, AsyncClient
+from fastapi.responses import StreamingResponse
 
 from app.market.cache import PriceCache
-from app.market.stream import create_stream_router
+from app.market.stream import _generate_events, create_stream_router
+
+
+class DummyRequest:
+    client = None
+
+    async def is_disconnected(self) -> bool:
+        return False
+
+
+class DisconnectAfterOneCheckRequest:
+    client = None
+
+    def __init__(self) -> None:
+        self.checks = 0
+
+    async def is_disconnected(self) -> bool:
+        self.checks += 1
+        return self.checks > 1
+
+
+def _prices_endpoint(router):
+    for route in router.routes:
+        if getattr(route, "path", "").endswith("/prices"):
+            return route.endpoint
+    raise AssertionError("Router must expose /prices endpoint")
 
 
 @pytest.mark.asyncio
@@ -20,58 +44,37 @@ class TestSSEStream:
     async def test_stream_returns_event_stream_content_type(self):
         """SSE endpoint responds with text/event-stream content type."""
         cache = PriceCache()
-        app = FastAPI()
-        app.include_router(create_stream_router(cache))
+        router = create_stream_router(cache)
+        endpoint = _prices_endpoint(router)
 
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            async with client.stream("GET", "/api/stream/prices") as response:
-                assert response.status_code == 200
-                assert "text/event-stream" in response.headers["content-type"]
+        response = await endpoint(DummyRequest())
+
+        assert isinstance(response, StreamingResponse)
+        assert response.media_type == "text/event-stream"
 
     async def test_stream_sends_retry_directive(self):
         """First event from SSE stream is the retry directive."""
         cache = PriceCache()
-        app = FastAPI()
-        app.include_router(create_stream_router(cache))
 
-        first_nonempty_line: str | None = None
+        gen = _generate_events(cache, DummyRequest())
+        first_event = await anext(gen)
+        await gen.aclose()
 
-        async def collect() -> None:
-            nonlocal first_nonempty_line
-            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-                async with client.stream("GET", "/api/stream/prices") as response:
-                    async for line in response.aiter_lines():
-                        if line:
-                            first_nonempty_line = line
-                            return
-
-        await asyncio.wait_for(collect(), timeout=3.0)
-        assert first_nonempty_line is not None
-        assert first_nonempty_line.startswith("retry:")
+        assert first_event.startswith("retry:")
 
     async def test_stream_sends_price_data_from_cache(self):
         """SSE stream delivers JSON price data for all cached tickers."""
         cache = PriceCache()
         cache.update("AAPL", 190.00)
         cache.update("GOOGL", 175.00)
-        app = FastAPI()
-        app.include_router(create_stream_router(cache))
 
-        data_line: str | None = None
+        gen = _generate_events(cache, DummyRequest())
+        await anext(gen)
+        data_event = await anext(gen)
+        await gen.aclose()
 
-        async def collect() -> None:
-            nonlocal data_line
-            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-                async with client.stream("GET", "/api/stream/prices") as response:
-                    async for line in response.aiter_lines():
-                        if line.startswith("data:"):
-                            data_line = line
-                            return
-
-        await asyncio.wait_for(collect(), timeout=3.0)
-
-        assert data_line is not None
-        payload = json.loads(data_line[len("data: "):])
+        assert data_event.startswith("data:")
+        payload = json.loads(data_event[len("data: "):])
         assert "AAPL" in payload
         assert "GOOGL" in payload
         assert payload["AAPL"]["ticker"] == "AAPL"
@@ -82,22 +85,14 @@ class TestSSEStream:
     async def test_stream_no_data_event_when_cache_empty(self):
         """SSE stream sends no data event when cache is empty (only retry directive)."""
         cache = PriceCache()
-        app = FastAPI()
-        app.include_router(create_stream_router(cache))
 
-        lines_seen: list[str] = []
+        gen = _generate_events(cache, DisconnectAfterOneCheckRequest(), interval=0)
+        first_event = await anext(gen)
+        with pytest.raises(StopAsyncIteration):
+            await anext(gen)
+        await gen.aclose()
 
-        async def collect() -> None:
-            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-                async with client.stream("GET", "/api/stream/prices") as response:
-                    async for line in response.aiter_lines():
-                        lines_seen.append(line)
-                        if len(lines_seen) >= 3:
-                            return
-
-        await asyncio.wait_for(collect(), timeout=3.0)
-        assert any(line.startswith("retry:") for line in lines_seen)
-        assert not any(line.startswith("data:") for line in lines_seen)
+        assert first_event.startswith("retry:")
 
     async def test_multiple_router_instances_do_not_conflict(self):
         """Each call to create_stream_router() produces an independent router."""

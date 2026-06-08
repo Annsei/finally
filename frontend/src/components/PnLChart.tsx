@@ -33,7 +33,6 @@ export default function PnLChart() {
       },
       timeScale: {
         borderColor: '#30363d',
-        textColor: '#8b949e',
       },
     });
 

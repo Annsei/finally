@@ -9,7 +9,7 @@ interface Props {
 }
 
 export default function WatchlistPanel({ selectedTicker, onSelectTicker }: Props) {
-  const { data } = useSWR<WatchlistResponse>('/api/watchlist', fetcher);
+  const { data } = useSWR<WatchlistResponse>('/api/watchlist/', fetcher);
   const tickers = data?.tickers?.map((t) => t.ticker) ?? [];
 
   if (tickers.length === 0) {

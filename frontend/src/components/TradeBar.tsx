@@ -12,7 +12,7 @@
  *   - POST /api/portfolio/trade with optimistic SWR mutate
  *   - Inline error display below inputs (D-14)
  *
- * SWR key '/api/portfolio' — exact match with Header.tsx so a trade
+ * SWR key '/api/portfolio/' — exact match with Header.tsx so a trade
  * revalidates the header cash/portfolio total at the same time.
  */
 'use client';
@@ -35,7 +35,7 @@ export default function TradeBar({ selectedTicker, onTradeComplete }: TradeBarPr
   const [pending, setPending] = useState(false);
 
   // Shared SWR key with Header.tsx — trade revalidates header too
-  const { data: portfolio, mutate } = useSWR<PortfolioResponse>('/api/portfolio', fetcher);
+  const { data: portfolio, mutate } = useSWR<PortfolioResponse>('/api/portfolio/', fetcher);
 
   // Auto-fill ticker from parent selection (D-12)
   useEffect(() => {
@@ -74,23 +74,25 @@ export default function TradeBar({ selectedTicker, onTradeComplete }: TradeBarPr
             const data = await res.json();
             throw new Error(data.error ?? 'Trade failed');
           }
-          // Return current; revalidate: true will fetch the real updated state
-          return current;
+          // Return current state; if SWR had no cache yet, fetch a valid snapshot.
+          return current ?? (await fetcher('/api/portfolio/'));
         },
         {
-          optimisticData: (current) => {
-            if (!current) return current;
-            // Look up price from current positions or fall back to Zustand price store
-            const price =
-              current.positions.find((p) => p.ticker === trimmedTicker)?.current_price ??
-              usePriceStore.getState().prices[trimmedTicker]?.price ??
-              0;
-            const cost = Number(qty) * price;
-            return {
-              ...current,
-              cash: current.cash + (side === 'sell' ? cost : -cost),
-            };
-          },
+          optimisticData: portfolio
+            ? (current) => {
+                const base = current ?? portfolio;
+                // Look up price from current positions or fall back to Zustand price store
+                const price =
+                  base.positions.find((p) => p.ticker === trimmedTicker)?.current_price ??
+                  usePriceStore.getState().prices[trimmedTicker]?.price ??
+                  0;
+                const cost = Number(qty) * price;
+                return {
+                  ...base,
+                  cash: base.cash + (side === 'sell' ? cost : -cost),
+                };
+              }
+            : undefined,
           rollbackOnError: true,
           revalidate: true,
         }

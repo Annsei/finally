@@ -13,6 +13,7 @@ export default function SparklineChart({ ticker, width = 80, height = 28 }: Prop
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<'Line'> | null>(null);
+  const tickCountRef = useRef<number>(0);
 
   const priceUpdate = useTicker(ticker);
 
@@ -54,11 +55,17 @@ export default function SparklineChart({ ticker, width = 80, height = 28 }: Prop
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Update: append price point on each SSE tick
+  // Resize chart when width/height props change (WR-05)
+  useEffect(() => {
+    chartRef.current?.applyOptions({ width, height });
+  }, [width, height]);
+
+  // Update: append price point on each SSE tick using monotonic counter (WR-04)
   useEffect(() => {
     if (!seriesRef.current || !priceUpdate) return;
+    tickCountRef.current += 1;
     seriesRef.current.update({
-      time: Math.floor(priceUpdate.timestamp) as UTCTimestamp,
+      time: tickCountRef.current as UTCTimestamp,
       value: priceUpdate.price,
     });
   }, [priceUpdate]);

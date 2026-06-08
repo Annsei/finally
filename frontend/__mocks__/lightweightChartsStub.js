@@ -2,6 +2,10 @@
 // jest.mock('lightweight-charts', factory) in individual tests overrides this
 // with test-specific mock behaviour.
 module.exports = {
-  createChart: () => ({}),
+  createChart: () => ({
+    addSeries: () => ({ update: () => {} }),
+    remove: () => {},
+    applyOptions: () => {},
+  }),
   LineSeries: {},
 };

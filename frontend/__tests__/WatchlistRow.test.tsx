@@ -1,11 +1,12 @@
 /**
  * WatchlistRow tests (TDD):
- * Test 1: direction 'up' → price cell gains class 'flash-up'
- * Test 2: direction 'down' → price cell gains class 'flash-down'
+ * Test 1: direction 'up' → price cell gains class 'animate-flash-up'
+ * Test 2: direction 'down' → price cell gains class 'animate-flash-down'
  * Test 3: direction 'flat' → no flash class added
- * Test 4: After 500ms (fake timers), flash class is removed from price cell
- * Test 5: isSelected=true → row has border-l-2, border-terminal-accent, bg-terminal-surface
- * Test 6: Clicking the row calls onSelect exactly once
+ * Test 4: flat tick clears an active flash class
+ * Test 5: After 500ms (fake timers), flash class is removed from price cell
+ * Test 6: isSelected=true → row has border-l-2, border-terminal-accent, bg-terminal-surface
+ * Test 7: Clicking the row calls onSelect exactly once
  */
 import React from 'react';
 import { render, act, fireEvent } from '@testing-library/react';
@@ -24,8 +25,8 @@ const mkPrice = (direction: 'up' | 'down' | 'flat', ts = 1717700000): PriceUpdat
   price: 190.5,
   previous_price: 189.5,
   timestamp: ts,
-  change: direction === 'down' ? -1 : 1,
-  change_percent: direction === 'down' ? -0.53 : 0.53,
+  change: direction === 'down' ? -1 : direction === 'flat' ? 0 : 1,
+  change_percent: direction === 'down' ? -0.53 : direction === 'flat' ? 0 : 0.53,
   direction,
 });
 
@@ -59,26 +60,26 @@ describe('WatchlistRow', () => {
     jest.useRealTimers();
   });
 
-  it('Test 1: direction up → price cell gains class flash-up', () => {
+  it('Test 1: direction up → price cell gains class animate-flash-up', () => {
     const { priceCell } = renderRow();
 
     act(() => {
       usePriceStore.setState({ prices: { AAPL: mkPrice('up') } });
     });
 
-    expect(priceCell.classList.contains('flash-up')).toBe(true);
-    expect(priceCell.classList.contains('flash-down')).toBe(false);
+    expect(priceCell.classList.contains('animate-flash-up')).toBe(true);
+    expect(priceCell.classList.contains('animate-flash-down')).toBe(false);
   });
 
-  it('Test 2: direction down → price cell gains class flash-down', () => {
+  it('Test 2: direction down → price cell gains class animate-flash-down', () => {
     const { priceCell } = renderRow();
 
     act(() => {
       usePriceStore.setState({ prices: { AAPL: mkPrice('down') } });
     });
 
-    expect(priceCell.classList.contains('flash-down')).toBe(true);
-    expect(priceCell.classList.contains('flash-up')).toBe(false);
+    expect(priceCell.classList.contains('animate-flash-down')).toBe(true);
+    expect(priceCell.classList.contains('animate-flash-up')).toBe(false);
   });
 
   it('Test 3: direction flat → no flash class added', () => {
@@ -88,26 +89,42 @@ describe('WatchlistRow', () => {
       usePriceStore.setState({ prices: { AAPL: mkPrice('flat') } });
     });
 
-    expect(priceCell.classList.contains('flash-up')).toBe(false);
-    expect(priceCell.classList.contains('flash-down')).toBe(false);
+    expect(priceCell.classList.contains('animate-flash-up')).toBe(false);
+    expect(priceCell.classList.contains('animate-flash-down')).toBe(false);
   });
 
-  it('Test 4: After 500ms, flash class is removed from price cell', () => {
+  it('Test 4: flat tick clears an active flash class', () => {
     const { priceCell } = renderRow();
 
     act(() => {
       usePriceStore.setState({ prices: { AAPL: mkPrice('up') } });
     });
-    expect(priceCell.classList.contains('flash-up')).toBe(true);
+    expect(priceCell.classList.contains('animate-flash-up')).toBe(true);
+
+    act(() => {
+      usePriceStore.setState({ prices: { AAPL: mkPrice('flat', 1717700001) } });
+    });
+
+    expect(priceCell.classList.contains('animate-flash-up')).toBe(false);
+    expect(priceCell.classList.contains('animate-flash-down')).toBe(false);
+  });
+
+  it('Test 5: After 500ms, flash class is removed from price cell', () => {
+    const { priceCell } = renderRow();
+
+    act(() => {
+      usePriceStore.setState({ prices: { AAPL: mkPrice('up') } });
+    });
+    expect(priceCell.classList.contains('animate-flash-up')).toBe(true);
 
     act(() => {
       jest.advanceTimersByTime(500);
     });
 
-    expect(priceCell.classList.contains('flash-up')).toBe(false);
+    expect(priceCell.classList.contains('animate-flash-up')).toBe(false);
   });
 
-  it('Test 5: isSelected=true → row has border-l-2, border-terminal-accent, bg-terminal-surface', () => {
+  it('Test 6: isSelected=true → row has border-l-2, border-terminal-accent, bg-terminal-surface', () => {
     const { row } = renderRow({ isSelected: true });
 
     expect(row.classList.contains('border-l-2')).toBe(true);
@@ -115,7 +132,7 @@ describe('WatchlistRow', () => {
     expect(row.classList.contains('bg-terminal-surface')).toBe(true);
   });
 
-  it('Test 6: Clicking the row calls onSelect exactly once', () => {
+  it('Test 7: Clicking the row calls onSelect exactly once', () => {
     const onSelect = jest.fn();
     const { row } = renderRow({ onSelect });
 
