@@ -1,0 +1,6 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Flash animations use Tailwind animate-flash-up / animate-flash-down keyframe utilities */
+/* Keyframes defined in tailwind.config.js: instant color, fades to transparent over 500ms */
