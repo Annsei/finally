@@ -46,7 +46,7 @@ The LLM chat integration is structurally sound: helper extraction is clean, the 
 **File:** `.env:3`
 **Severity:** CRITICAL
 
-**Issue:** The `.env` file contains what appears to be a real, active OpenRouter API key (`sk-or-v1-d3aa2073f3f93625...`). The comment above it reads "Replace the placeholder below with your real API key" — the placeholder was replaced but the file was not scrubbed before the codebase was shared. Although `.env` is correctly listed in `.gitignore` and is not tracked in git, the key exists on disk and has been exposed in the context of this review. Any key that has been observed outside a secrets manager must be considered compromised.
+**Issue:** The `.env` file contains what appears to be a real, active OpenRouter API key (`sk-or-v1-[REDACTED]`). The comment above it reads "Replace the placeholder below with your real API key" — the placeholder was replaced but the file was not scrubbed before the codebase was shared. Although `.env` is correctly listed in `.gitignore` and is not tracked in git, the key exists on disk and has been exposed in the context of this review. Any key that has been observed outside a secrets manager must be considered compromised.
 
 **Fix:**
 1. Rotate the key immediately in the OpenRouter dashboard — treat the current key as compromised.
