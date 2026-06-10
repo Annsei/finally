@@ -70,8 +70,11 @@ export default function Header() {
           </span>
         </div>
 
-        {/* Connection status dot — 8px circle, color driven by Zustand SSE state */}
+        {/* Connection status dot — 8px circle, color driven by Zustand SSE state.
+            data-testid/data-state form the E2E contract: state ∈ connected | reconnecting | disconnected */}
         <div
+          data-testid="connection-status"
+          data-state={connectionStatus}
           className={`w-2 h-2 rounded-full ${DOT_COLORS[connectionStatus]}`}
           title={connectionStatus}
         />

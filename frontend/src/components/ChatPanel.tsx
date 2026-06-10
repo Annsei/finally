@@ -55,23 +55,25 @@ export default function ChatPanel({ open, onToggle, onNewTrade }: Props) {
 
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // Auto-scroll to bottom when messages change or loading state changes
+  // Auto-scroll to bottom when messages change, loading state changes, or an error appears
   // Guard for jsdom test environment where scrollIntoView may not be implemented
   useEffect(() => {
     const el = messagesEndRef.current;
     if (el && typeof el.scrollIntoView === 'function') {
       el.scrollIntoView({ behavior: 'smooth' });
     }
-  }, [history?.messages?.length, loading]);
+  }, [history?.messages?.length, loading, error]);
 
   const handleSubmit = async () => {
     const trimmed = input.trim();
     if (!trimmed || loading) return;
 
     setLoading(true);
+    setError(null);
     setInput('');
 
     try {
@@ -80,11 +82,24 @@ export default function ChatPanel({ open, onToggle, onNewTrade }: Props) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: trimmed }),
       });
+      if (!res.ok) {
+        // Surface backend error detail when available (e.g. {"error": "..."})
+        let detail = '';
+        try {
+          const body = await res.json();
+          detail = body?.error ?? body?.detail ?? '';
+        } catch {
+          // Non-JSON error body — fall through to generic message
+        }
+        throw new Error(detail || `Request failed (${res.status})`);
+      }
       const data: ChatPostResponse = await res.json();
       await mutateHistory();
       if (data.trades?.length || data.watchlist_changes?.length) {
         onNewTrade?.();
       }
+    } catch (e) {
+      setError(e instanceof Error && e.message ? e.message : 'Something went wrong. Please try again.');
     } finally {
       setLoading(false);
     }
@@ -157,6 +172,15 @@ export default function ChatPanel({ open, onToggle, onNewTrade }: Props) {
           <div className="flex items-start" data-testid="chat-loading">
             <div className="bg-terminal-surface px-3 py-2 rounded text-xs text-terminal-muted">
               Thinking…
+            </div>
+          </div>
+        )}
+
+        {/* Inline error — shown in the history area when POST /api/chat/ fails */}
+        {error && !loading && (
+          <div className="flex items-start" data-testid="chat-error">
+            <div className="bg-terminal-surface border border-terminal-down/60 px-3 py-2 rounded text-xs text-terminal-down leading-relaxed">
+              {error}
             </div>
           </div>
         )}

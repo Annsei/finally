@@ -30,7 +30,9 @@ const mkPrice = (direction: 'up' | 'down' | 'flat', ts = 1717700000): PriceUpdat
   direction,
 });
 
-const renderRow = (props: { isSelected?: boolean; onSelect?: () => void } = {}) => {
+const renderRow = (
+  props: { isSelected?: boolean; onSelect?: () => void; onRemove?: () => void } = {}
+) => {
   const onSelect = props.onSelect ?? jest.fn();
   const result = render(
     <table>
@@ -39,12 +41,13 @@ const renderRow = (props: { isSelected?: boolean; onSelect?: () => void } = {}) 
           ticker="AAPL"
           isSelected={props.isSelected ?? false}
           onSelect={onSelect}
+          onRemove={props.onRemove}
         />
       </tbody>
     </table>
   );
   const row = result.container.querySelector('tr')!;
-  // Second <td> is the price cell (Symbol | Price | Change% | Sparkline)
+  // Second <td> is the price cell (Symbol | Price | Change% | Sparkline | Remove)
   const tds = result.container.querySelectorAll('td');
   const priceCell = tds[1] as HTMLElement;
   return { ...result, row, priceCell, onSelect };
@@ -139,5 +142,28 @@ describe('WatchlistRow', () => {
     fireEvent.click(row);
 
     expect(onSelect).toHaveBeenCalledTimes(1);
+  });
+
+  it('Test 8 (FIX 4): renders remove button with E2E test-id watchlist-remove-AAPL', () => {
+    const { getByTestId } = renderRow({ onRemove: jest.fn() });
+
+    expect(getByTestId('watchlist-remove-AAPL')).toBeTruthy();
+  });
+
+  it('Test 9 (FIX 4): clicking remove calls onRemove without triggering onSelect', () => {
+    const onSelect = jest.fn();
+    const onRemove = jest.fn();
+    const { getByTestId } = renderRow({ onSelect, onRemove });
+
+    fireEvent.click(getByTestId('watchlist-remove-AAPL'));
+
+    expect(onRemove).toHaveBeenCalledTimes(1);
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it('Test 10 (FIX 4): no remove button rendered when onRemove prop is absent', () => {
+    const { queryByTestId } = renderRow();
+
+    expect(queryByTestId('watchlist-remove-AAPL')).toBeNull();
   });
 });

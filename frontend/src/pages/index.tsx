@@ -24,8 +24,11 @@ export default function Dashboard() {
   // SWR for portfolio (bound mutate passed to TradeBar + ChatPanel for revalidation)
   const { mutate: mutatePortfolio } = useSWR<PortfolioResponse>('/api/portfolio/', fetcher);
 
-  // SWR for watchlist (needed for auto-select D-03)
-  const { data: watchlistData } = useSWR<WatchlistResponse>('/api/watchlist/', fetcher);
+  // SWR for watchlist (needed for auto-select D-03; mutate revalidates after AI watchlist changes)
+  const { data: watchlistData, mutate: mutateWatchlist } = useSWR<WatchlistResponse>(
+    '/api/watchlist/',
+    fetcher
+  );
 
   // Auto-select first ticker on load when none is selected (D-03)
   useEffect(() => {
@@ -46,7 +49,19 @@ export default function Dashboard() {
 
         {/* Column 2: Center — main chart → [heatmap | P&L] → trade bar → positions (D-02/D-04) */}
         <div className="flex-1 flex flex-col gap-4 overflow-auto">
-          <MainChart ticker={selectedTicker ?? ''} />
+          {selectedTicker ? (
+            <MainChart ticker={selectedTicker} />
+          ) : (
+            // Placeholder keeps the layout stable until the watchlist loads and
+            // auto-select picks the first ticker (matches MainChart's footprint)
+            <div
+              data-testid="main-chart-placeholder"
+              className="flex items-center justify-center text-terminal-muted text-xs"
+              style={{ height: '264px' }}
+            >
+              Waiting for market data…
+            </div>
+          )}
           <div className="flex gap-4">
             <PortfolioHeatmap />
             <PnLChart />
@@ -67,7 +82,12 @@ export default function Dashboard() {
           <ChatPanel
             open={chatOpen}
             onToggle={() => setChatOpen(!chatOpen)}
-            onNewTrade={() => mutatePortfolio()}
+            onNewTrade={() => {
+              // AI actions can affect both portfolio (trades) and watchlist
+              // (watchlist_changes) — revalidate both so no panel goes stale
+              void mutatePortfolio();
+              void mutateWatchlist();
+            }}
           />
         </div>
       </div>

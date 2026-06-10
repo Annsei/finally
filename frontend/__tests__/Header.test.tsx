@@ -66,6 +66,16 @@ describe('Header component', () => {
     expect(screen.getByText(/12,345\.67/)).toBeTruthy();
   });
 
+  it('Test 4b (FIX 4): connection dot exposes data-testid="connection-status" and data-state', () => {
+    for (const status of ['connected', 'reconnecting', 'disconnected'] as const) {
+      usePriceStore.setState({ connectionStatus: status });
+      const { unmount } = render(<Header />);
+      const dot = screen.getByTestId('connection-status');
+      expect(dot.getAttribute('data-state')).toBe(status);
+      unmount();
+    }
+  });
+
   it('Test 5: renders — placeholder for cash and total_value before data loads', () => {
     mockUseSWR.mockReturnValue({ data: undefined } as any);
     // Should not throw; should render '—' placeholders

@@ -19,7 +19,8 @@ export default function PortfolioHeatmap() {
     <div className="flex flex-wrap gap-1 p-2 bg-terminal-surface rounded">
       {positions.map((pos) => {
         const posValue = pos.quantity * pos.current_price;
-        const widthPct = (posValue / totalValue) * 100;
+        // Guard divide-by-zero: total_value of 0 would yield NaN widths
+        const widthPct = totalValue > 0 ? (posValue / totalValue) * 100 : 0;
         const alpha = Math.min(Math.abs(pos.pnl_pct) / 20, 1.0);
         const bg =
           pos.pnl_pct > 0

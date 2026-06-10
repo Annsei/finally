@@ -6,9 +6,10 @@ interface Props {
   ticker: string;
   isSelected: boolean;
   onSelect: () => void;
+  onRemove?: () => void;
 }
 
-export default function WatchlistRow({ ticker, isSelected, onSelect }: Props) {
+export default function WatchlistRow({ ticker, isSelected, onSelect, onRemove }: Props) {
   const priceUpdate = useTicker(ticker);
   const priceRef = useRef<HTMLTableCellElement>(null);
   const flashTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -35,9 +36,10 @@ export default function WatchlistRow({ ticker, isSelected, onSelect }: Props) {
     };
   }, [priceUpdate?.direction, priceUpdate?.timestamp]);
 
+  // `group` enables the hover-reveal remove control in the trailing cell
   const rowClass = isSelected
-    ? 'border-l-2 border-terminal-accent bg-terminal-surface cursor-pointer'
-    : 'border-l-2 border-transparent cursor-pointer hover:bg-terminal-surface/50';
+    ? 'group border-l-2 border-terminal-accent bg-terminal-surface cursor-pointer'
+    : 'group border-l-2 border-transparent cursor-pointer hover:bg-terminal-surface/50';
 
   const changeColor =
     priceUpdate?.direction === 'up'
@@ -57,8 +59,25 @@ export default function WatchlistRow({ ticker, isSelected, onSelect }: Props) {
           ? `${priceUpdate.change_percent > 0 ? '+' : ''}${priceUpdate.change_percent.toFixed(2)}%`
           : '—'}
       </td>
-      <td className="py-1 pr-2">
+      <td className="py-1 pr-1">
         <SparklineChart ticker={ticker} width={80} height={28} />
+      </td>
+      <td className="py-1 pr-1 w-4 text-right">
+        {onRemove && (
+          <button
+            type="button"
+            data-testid={`watchlist-remove-${ticker}`}
+            aria-label={`Remove ${ticker} from watchlist`}
+            title={`Remove ${ticker}`}
+            onClick={(e) => {
+              e.stopPropagation(); // don't trigger row selection
+              onRemove();
+            }}
+            className="opacity-0 group-hover:opacity-100 focus:opacity-100 text-terminal-muted hover:text-terminal-down text-sm leading-none px-0.5 transition-opacity"
+          >
+            ×
+          </button>
+        )}
       </td>
     </tr>
   );

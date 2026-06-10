@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { createChart, LineSeries } from 'lightweight-charts';
-import type { ISeriesApi, IChartApi, UTCTimestamp } from 'lightweight-charts';
+import type { ISeriesApi, IChartApi, UTCTimestamp, LineData } from 'lightweight-charts';
 import { useTicker } from '@/stores/priceStore';
 
 interface Props {
@@ -9,11 +9,18 @@ interface Props {
   height?: number;
 }
 
+// Rolling buffer cap — keeps memory bounded over long sessions. Trim happens in
+// batches (only once the buffer exceeds the cap by 20%) to avoid a setData()
+// call on every tick.
+const MAX_POINTS = 120;
+const TRIM_THRESHOLD = Math.floor(MAX_POINTS * 1.2); // 144
+
 export default function SparklineChart({ ticker, width = 80, height = 28 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<'Line'> | null>(null);
   const tickCountRef = useRef<number>(0);
+  const bufferRef = useRef<LineData<UTCTimestamp>[]>([]);
 
   const priceUpdate = useTicker(ticker);
 
@@ -60,14 +67,24 @@ export default function SparklineChart({ ticker, width = 80, height = 28 }: Prop
     chartRef.current?.applyOptions({ width, height });
   }, [width, height]);
 
-  // Update: append price point on each SSE tick using monotonic counter (WR-04)
+  // Update: append price point on each SSE tick using monotonic counter (WR-04).
+  // The counter is never reset, so times stay strictly ascending across trims.
   useEffect(() => {
     if (!seriesRef.current || !priceUpdate) return;
     tickCountRef.current += 1;
-    seriesRef.current.update({
+    const point: LineData<UTCTimestamp> = {
       time: tickCountRef.current as UTCTimestamp,
       value: priceUpdate.price,
-    });
+    };
+    bufferRef.current.push(point);
+
+    if (bufferRef.current.length > TRIM_THRESHOLD) {
+      // Batched trim: drop oldest points, rebase the series on the capped buffer
+      bufferRef.current = bufferRef.current.slice(-MAX_POINTS);
+      seriesRef.current.setData(bufferRef.current);
+    } else {
+      seriesRef.current.update(point);
+    }
   }, [priceUpdate]);
 
   return <div ref={containerRef} style={{ width, height }} />;

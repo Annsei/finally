@@ -20,34 +20,62 @@ export function usePriceStream() {
   useEffect(() => {
     // EventSource MUST be inside useEffect — not at module or render scope.
     // Next.js pre-renders pages in Node.js where EventSource is undefined (Pitfall 3).
-    const es = new EventSource('/api/stream/prices');
+    let es: EventSource;
+    let lastEventAt = Date.now();
 
-    es.onopen = () => {
-      setConnectionStatus('connected');
+    const connect = () => {
+      es = new EventSource('/api/stream/prices');
+
+      es.onopen = () => {
+        lastEventAt = Date.now();
+        setConnectionStatus('connected');
+      };
+
+      es.onmessage = (event) => {
+        lastEventAt = Date.now();
+        try {
+          const data = JSON.parse(event.data);
+          // data is PriceMap: { AAPL: PriceUpdate, GOOGL: PriceUpdate, ... }
+          setPrices(data);
+        } catch {
+          // Silently ignore malformed events — T-03-PP mitigation.
+          // Do NOT rethrow; a bad SSE frame must never crash the UI.
+        }
+      };
+
+      es.onerror = () => {
+        // EventSource auto-reconnects; CONNECTING state occurs during reconnect interval.
+        if (es.readyState === EventSource.CONNECTING) {
+          setConnectionStatus('reconnecting');
+        } else {
+          setConnectionStatus('disconnected');
+        }
+      };
     };
 
-    es.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        // data is PriceMap: { AAPL: PriceUpdate, GOOGL: PriceUpdate, ... }
-        setPrices(data);
-      } catch {
-        // Silently ignore malformed events — T-03-PP mitigation.
-        // Do NOT rethrow; a bad SSE frame must never crash the UI.
+    connect();
+
+    // Staleness watchdog. The server pushes ~every 500ms, so a multi-second
+    // silent gap means the connection is dead even if EventSource never fired
+    // an error (e.g. network loss without a TCP reset leaves readyState OPEN
+    // forever). Recreate the connection: on a dead network the new EventSource
+    // errors immediately and keeps auto-retrying (status stays "reconnecting")
+    // until the network returns and onopen flips it back to "connected".
+    const STALE_MS = 5_000;
+    const watchdog = setInterval(() => {
+      if (Date.now() - lastEventAt <= STALE_MS) return;
+      lastEventAt = Date.now(); // back off one full window before re-checking
+      setConnectionStatus('reconnecting');
+      // CONNECTING means EventSource is already retrying on its own — leave it.
+      if (es.readyState !== EventSource.CONNECTING) {
+        es.close();
+        connect();
       }
-    };
-
-    es.onerror = () => {
-      // EventSource auto-reconnects; CONNECTING state occurs during reconnect interval.
-      if (es.readyState === EventSource.CONNECTING) {
-        setConnectionStatus('reconnecting');
-      } else {
-        setConnectionStatus('disconnected');
-      }
-    };
+    }, 2_000);
 
     return () => {
       // Always close on unmount — T-03-DoS mitigation, prevents resource leak.
+      clearInterval(watchdog);
       es.close();
       setConnectionStatus('disconnected');
     };

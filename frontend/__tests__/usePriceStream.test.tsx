@@ -144,6 +144,39 @@ describe('usePriceStream', () => {
     expect(usePriceStore.getState().connectionStatus).toBe('disconnected');
   });
 
+  test('Test 7: staleness watchdog recreates a silent OPEN connection and sets reconnecting', () => {
+    jest.useFakeTimers();
+    try {
+      renderHook(() => usePriceStream());
+      expect(mockInstance).not.toBeNull();
+      const first = mockInstance!;
+
+      act(() => {
+        first.readyState = MockEventSource.OPEN;
+        first.onopen!(new Event('open'));
+      });
+      expect(usePriceStore.getState().connectionStatus).toBe('connected');
+
+      // Server pushes every ~500ms; simulate >5s of silence on an OPEN
+      // connection (network died without a TCP reset — no error event fires).
+      act(() => {
+        jest.advanceTimersByTime(8_000);
+      });
+
+      expect(usePriceStore.getState().connectionStatus).toBe('reconnecting');
+      expect(first.close).toHaveBeenCalled();
+      expect(global.EventSource).toHaveBeenCalledTimes(2);
+
+      // The replacement connection succeeding flips the status back.
+      act(() => {
+        mockInstance!.onopen!(new Event('open'));
+      });
+      expect(usePriceStore.getState().connectionStatus).toBe('connected');
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   test('Test 6: unmounting the hook calls es.close() exactly once', () => {
     const { unmount } = renderHook(() => usePriceStream());
     expect(mockInstance).not.toBeNull();

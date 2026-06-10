@@ -202,6 +202,106 @@ describe('ChatPanel', () => {
   });
 
   // -------------------------------------------------------------------------
+  // Test 4b (FIX 2): HTTP error response surfaces an inline error message
+  // -------------------------------------------------------------------------
+  it('Test 4b: POST /api/chat/ returning 5xx surfaces inline error and clears loading', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      status: 500,
+      ok: false,
+      json: async () => ({ error: 'LLM backend unavailable' }),
+    } as unknown as Response);
+
+    renderPanel();
+
+    const input = screen.getByPlaceholderText('Ask FinAlly about your portfolio…');
+    fireEvent.change(input, { target: { value: 'analyze my portfolio' } });
+    fireEvent.click(screen.getByRole('button', { name: /send/i }));
+
+    // Inline error appears in the history area with the backend detail
+    await waitFor(() => {
+      expect(screen.getByTestId('chat-error')).toBeTruthy();
+      expect(screen.getByText('LLM backend unavailable')).toBeTruthy();
+    });
+
+    // Loading indicator must be gone (finally ran)
+    expect(document.querySelector('[data-testid="chat-loading"]')).toBeFalsy();
+    // History was NOT revalidated on failure
+    expect(mockMutateHistory).not.toHaveBeenCalled();
+  });
+
+  // -------------------------------------------------------------------------
+  // Test 4c (FIX 2): network failure (fetch rejects) surfaces an inline error
+  // -------------------------------------------------------------------------
+  it('Test 4c: network failure surfaces inline error and clears loading', async () => {
+    global.fetch = jest.fn().mockRejectedValue(new Error('Failed to fetch'));
+
+    renderPanel();
+
+    const input = screen.getByPlaceholderText('Ask FinAlly about your portfolio…');
+    fireEvent.change(input, { target: { value: 'hello' } });
+    fireEvent.click(screen.getByRole('button', { name: /send/i }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('chat-error')).toBeTruthy();
+      expect(screen.getByText('Failed to fetch')).toBeTruthy();
+    });
+    expect(document.querySelector('[data-testid="chat-loading"]')).toBeFalsy();
+  });
+
+  // -------------------------------------------------------------------------
+  // Test 4d (FIX 2): error clears on the next successful send
+  // -------------------------------------------------------------------------
+  it('Test 4d: inline error clears when the next message is sent successfully', async () => {
+    global.fetch = jest
+      .fn()
+      .mockRejectedValueOnce(new Error('Failed to fetch'))
+      .mockResolvedValueOnce({
+        status: 200,
+        ok: true,
+        json: async () => ({ message: 'Done!', trades: [], watchlist_changes: [] }),
+      } as unknown as Response);
+
+    renderPanel();
+
+    const input = screen.getByPlaceholderText('Ask FinAlly about your portfolio…');
+    fireEvent.change(input, { target: { value: 'first' } });
+    fireEvent.click(screen.getByRole('button', { name: /send/i }));
+
+    await waitFor(() => expect(screen.getByTestId('chat-error')).toBeTruthy());
+
+    fireEvent.change(input, { target: { value: 'second' } });
+    fireEvent.click(screen.getByRole('button', { name: /send/i }));
+
+    await waitFor(() => {
+      expect(document.querySelector('[data-testid="chat-error"]')).toBeFalsy();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Test 4e (FIX 3): onNewTrade callback fires for watchlist_changes too
+  // -------------------------------------------------------------------------
+  it('Test 4e: onNewTrade fires when the response contains only watchlist_changes', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      status: 200,
+      ok: true,
+      json: async () => ({
+        message: 'Added PYPL to your watchlist.',
+        trades: [],
+        watchlist_changes: [{ status: 'added', ticker: 'PYPL', action: 'add' }],
+      }),
+    } as unknown as Response);
+
+    const onNewTrade = jest.fn();
+    renderPanel({ onNewTrade });
+
+    const input = screen.getByPlaceholderText('Ask FinAlly about your portfolio…');
+    fireEvent.change(input, { target: { value: 'watch PYPL' } });
+    fireEvent.click(screen.getByRole('button', { name: /send/i }));
+
+    await waitFor(() => expect(onNewTrade).toHaveBeenCalledTimes(1));
+  });
+
+  // -------------------------------------------------------------------------
   // Test 5 (T-4-02): message content rendered as text, not HTML
   // -------------------------------------------------------------------------
   it('Test 5 (T-4-02): XSS content rendered as escaped text child, not injected HTML', () => {

@@ -104,4 +104,18 @@ describe('PortfolioHeatmap', () => {
       screen.getByText('No positions yet. Use the trade bar to buy shares.')
     ).toBeInTheDocument();
   });
+
+  it('Test 4 (FIX 7): total_value of 0 → tile widths are 0%, never NaN', () => {
+    mockUseSWR.mockReturnValue({
+      data: { cash: 0, total_value: 0, positions: mockPositions },
+    } as any);
+    const { container } = render(<PortfolioHeatmap />);
+
+    const aaplTile = screen.getByText('AAPL').closest('div[style]') as HTMLElement;
+    const tslaTile = screen.getByText('TSLA').closest('div[style]') as HTMLElement;
+
+    expect(aaplTile?.style.width).toBe('0%');
+    expect(tslaTile?.style.width).toBe('0%');
+    expect(container.innerHTML).not.toContain('NaN');
+  });
 });

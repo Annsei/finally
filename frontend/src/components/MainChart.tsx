@@ -1,17 +1,24 @@
 import { useEffect, useRef } from 'react';
 import { createChart, LineSeries } from 'lightweight-charts';
-import type { ISeriesApi, IChartApi, UTCTimestamp } from 'lightweight-charts';
+import type { ISeriesApi, IChartApi, UTCTimestamp, LineData } from 'lightweight-charts';
 import { useTicker } from '@/stores/priceStore';
 
 interface Props {
   ticker: string;
 }
 
+// Rolling buffer cap — keeps memory bounded over long sessions. Trim happens in
+// batches (only once the buffer exceeds the cap by 20%) to avoid a setData()
+// call on every tick.
+const MAX_POINTS = 600;
+const TRIM_THRESHOLD = Math.floor(MAX_POINTS * 1.2); // 720
+
 export default function MainChart({ ticker }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<'Line'> | null>(null);
   const tickCountRef = useRef<number>(0);
+  const bufferRef = useRef<LineData<UTCTimestamp>[]>([]);
 
   const priceUpdate = useTicker(ticker);
 
@@ -53,20 +60,32 @@ export default function MainChart({ ticker }: Props) {
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Ticker change: reset series data and counter (Pitfall 1 — prevents discontinuous jump)
+  // Ticker change: reset series data, buffer, and counter (Pitfall 1 — prevents discontinuous jump)
   useEffect(() => {
     seriesRef.current?.setData([]);
+    bufferRef.current = [];
     tickCountRef.current = 0;
   }, [ticker]);
 
-  // Update: append price point on each SSE tick using monotonic counter
+  // Update: append price point on each SSE tick using monotonic counter.
+  // The counter is only reset alongside the buffer (ticker change), so times
+  // stay strictly ascending across trims.
   useEffect(() => {
     if (!seriesRef.current || !priceUpdate) return;
     tickCountRef.current += 1;
-    seriesRef.current.update({
+    const point: LineData<UTCTimestamp> = {
       time: tickCountRef.current as UTCTimestamp,
       value: priceUpdate.price,
-    });
+    };
+    bufferRef.current.push(point);
+
+    if (bufferRef.current.length > TRIM_THRESHOLD) {
+      // Batched trim: drop oldest points, rebase the series on the capped buffer
+      bufferRef.current = bufferRef.current.slice(-MAX_POINTS);
+      seriesRef.current.setData(bufferRef.current);
+    } else {
+      seriesRef.current.update(point);
+    }
   }, [priceUpdate]);
 
   return (

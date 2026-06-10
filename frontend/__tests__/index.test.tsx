@@ -57,8 +57,12 @@ jest.mock('@/components/TradeBar', () => ({
 
 jest.mock('@/components/ChatPanel', () => ({
   __esModule: true,
-  default: ({ open, onToggle }: { open: boolean; onToggle: () => void; onNewTrade?: () => void }) => (
-    <div data-testid="chat-panel" data-open={String(open)} />
+  default: ({ open, onToggle, onNewTrade }: { open: boolean; onToggle: () => void; onNewTrade?: () => void }) => (
+    <div
+      data-testid="chat-panel"
+      data-open={String(open)}
+      onClick={() => onNewTrade?.()}
+    />
   ),
 }));
 
@@ -79,7 +83,15 @@ describe('Dashboard index page', () => {
     expect(root.className).toContain('bg-terminal-bg');
   });
 
-  it('Test 6: all 6 Phase 4 panels mount', () => {
+  it('Test 6: all 6 Phase 4 panels mount once a ticker is auto-selected', () => {
+    // MainChart only renders when a ticker is selected (FIX 7) — provide watchlist data
+    mockUseSWR.mockImplementation((key: any) => {
+      if (key === '/api/watchlist/') {
+        return { data: { tickers: [{ ticker: 'AAPL' }] }, mutate: jest.fn() } as any;
+      }
+      return { data: undefined, mutate: jest.fn() } as any;
+    });
+
     const { getByTestId } = render(<Dashboard />);
     expect(getByTestId('main-chart')).toBeTruthy();
     expect(getByTestId('portfolio-heatmap')).toBeTruthy();
@@ -87,6 +99,17 @@ describe('Dashboard index page', () => {
     expect(getByTestId('positions-table')).toBeTruthy();
     expect(getByTestId('trade-bar')).toBeTruthy();
     expect(getByTestId('chat-panel')).toBeTruthy();
+  });
+
+  it('Test 6b (FIX 7): before any ticker is selected, a stable placeholder renders instead of MainChart', () => {
+    // Default mock: no watchlist data → no auto-select → selectedTicker stays null
+    const { queryByTestId, getByTestId } = render(<Dashboard />);
+
+    expect(queryByTestId('main-chart')).toBeNull();
+    const placeholder = getByTestId('main-chart-placeholder');
+    expect(placeholder).toBeTruthy();
+    // Fixed height keeps the column layout stable while data loads
+    expect(placeholder.style.height).toBe('264px');
   });
 
   it('Test 7 (D-03): first watchlist ticker is auto-selected when no ticker is selected', () => {
@@ -121,5 +144,30 @@ describe('Dashboard index page', () => {
     // Chat column: shrink-0 with w-80 or w-8
     const chatCol = container.querySelector('[class*="shrink-0"]');
     expect(chatCol).toBeTruthy();
+  });
+
+  it('Test 10 (FIX 3): ChatPanel callback revalidates BOTH portfolio and watchlist SWR keys', () => {
+    const mutatePortfolio = jest.fn();
+    const mutateWatchlist = jest.fn();
+    mockUseSWR.mockImplementation((key: any) => {
+      if (key === '/api/portfolio/') {
+        return { data: undefined, mutate: mutatePortfolio } as any;
+      }
+      if (key === '/api/watchlist/') {
+        return { data: { tickers: [{ ticker: 'AAPL' }] }, mutate: mutateWatchlist } as any;
+      }
+      return { data: undefined, mutate: jest.fn() } as any;
+    });
+
+    const { getByTestId } = render(<Dashboard />);
+
+    // The ChatPanel stub invokes onNewTrade on click — simulates an AI response
+    // containing trades and/or watchlist_changes
+    act(() => {
+      getByTestId('chat-panel').click();
+    });
+
+    expect(mutatePortfolio).toHaveBeenCalledTimes(1);
+    expect(mutateWatchlist).toHaveBeenCalledTimes(1);
   });
 });
