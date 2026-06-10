@@ -24,3 +24,9 @@ __pycache__
 
 test-results
 tmp-*.spec.js
+
+test
+db
+scripts
+docker-compose.yml
+.env.example

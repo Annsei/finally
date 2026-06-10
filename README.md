@@ -37,6 +37,22 @@ docker run -v finally-data:/app/db -p 8000:8000 --env-file .env finally
 # Open http://localhost:8000
 ```
 
+### Quick start with scripts
+
+```bash
+# macOS/Linux — builds the image if needed, starts the container, waits for health
+./scripts/start_mac.sh --open
+./scripts/stop_mac.sh        # stop (data volume preserved)
+```
+
+```powershell
+# Windows PowerShell
+.\scripts\start_windows.ps1 -Open
+.\scripts\stop_windows.ps1
+```
+
+Or with Docker Compose: `docker compose up --build -d`
+
 ## Environment Variables
 
 | Variable | Required | Description |
@@ -52,10 +68,25 @@ finally/
 ├── frontend/    # Next.js static export
 ├── backend/     # FastAPI uv project
 ├── planning/    # Project documentation and agent contracts
-├── test/        # Playwright E2E tests
-├── db/          # SQLite volume mount (runtime)
-└── scripts/     # Start/stop helpers
+├── test/        # Playwright E2E tests + docker-compose.test.yml
+├── db/          # SQLite volume mount target (finally.db created at runtime)
+└── scripts/     # Start/stop helpers (macOS/Linux + Windows)
 ```
+
+## Testing
+
+```bash
+# Backend unit tests (pytest)
+cd backend && uv sync --extra dev && uv run pytest
+
+# Frontend unit tests (Jest)
+cd frontend && npm test
+
+# E2E tests (Playwright; runs the app with LLM_MOCK=true and a fresh DB)
+cd test && docker compose -f docker-compose.test.yml up --build --abort-on-container-exit
+```
+
+See [test/README.md](test/README.md) for running the E2E suite against a local instance.
 
 ## License
 

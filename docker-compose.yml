@@ -1,0 +1,23 @@
+# Optional convenience wrapper around `docker run` (PLAN.md §4/§11).
+# Usage:  docker compose up --build -d
+# Equivalent to: docker run -v finally-data:/app/db -p 8000:8000 --env-file .env finally
+services:
+  app:
+    build: .
+    image: finally
+    ports:
+      - "8000:8000"
+    volumes:
+      - finally-data:/app/db
+    env_file:
+      # Optional — without it the app still runs with the built-in market
+      # simulator; AI chat needs OPENROUTER_API_KEY (or LLM_MOCK=true).
+      - path: .env
+        required: false
+    restart: unless-stopped
+
+volumes:
+  finally-data:
+    # Fixed name so the volume is shared with scripts/start_mac.sh and
+    # scripts/start_windows.ps1 (which use `-v finally-data:/app/db`).
+    name: finally-data
