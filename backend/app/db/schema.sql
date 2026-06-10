@@ -57,3 +57,11 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     actions    TEXT,
     created_at TEXT NOT NULL
 );
+
+-- Indexes for the hot query paths (chat history and P&L chart both filter by
+-- user_id and order by timestamp). init_db() executes this script on every
+-- startup, so existing databases pick these up idempotently via IF NOT EXISTS.
+CREATE INDEX IF NOT EXISTS idx_chat_messages_user_created
+    ON chat_messages (user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_portfolio_snapshots_user_recorded
+    ON portfolio_snapshots (user_id, recorded_at);

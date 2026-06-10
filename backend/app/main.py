@@ -44,6 +44,9 @@ async def _snapshot_loop(price_cache: PriceCache, db_path: str, interval: int = 
             try:
                 from app.routes.portfolio import _record_snapshot
                 _record_snapshot(conn, price_cache)
+                # _record_snapshot does not commit (caller owns the
+                # transaction) — commit our own snapshot here.
+                conn.commit()
             finally:
                 conn.close()
         except asyncio.CancelledError:

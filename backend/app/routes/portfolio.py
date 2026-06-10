@@ -35,8 +35,11 @@ class TradeRequest(BaseModel):
 def _record_snapshot(conn: sqlite3.Connection, price_cache: PriceCache) -> None:
     """Compute current total portfolio value and insert a snapshot row.
 
+    Does NOT commit — the caller owns the transaction boundary and must
+    commit (or roll back) the inserted row.
+
     Args:
-        conn: An open SQLite connection (caller manages lifecycle).
+        conn: An open SQLite connection (caller manages lifecycle and commit).
         price_cache: Live price cache for current market prices.
     """
     row = conn.execute(
@@ -57,7 +60,6 @@ def _record_snapshot(conn: sqlite3.Connection, price_cache: PriceCache) -> None:
         "INSERT INTO portfolio_snapshots (id, user_id, total_value, recorded_at) VALUES (?, 'default', ?, ?)",
         (str(uuid.uuid4()), total_value, datetime.now(timezone.utc).isoformat()),
     )
-    conn.commit()
 
 
 def execute_trade_on_conn(
@@ -73,8 +75,18 @@ def execute_trade_on_conn(
     All validation failures return a dict with status="failed" and an "error" key
     — this function never raises on validation errors.
 
+    Transaction semantics: this function does NOT commit. The caller owns the
+    transaction boundary and must commit on success (or roll back on error).
+    This allows callers to execute several trades plus related writes
+    (snapshots, chat messages) atomically in a single transaction. If no
+    transaction is already open, a ``BEGIN IMMEDIATE`` is issued before the
+    cash/shares check so the check and the subsequent balance update are
+    serialized against concurrent writers (prevents a TOCTOU race on the cash
+    balance). When the caller already opened a transaction (e.g. the
+    multi-trade chat flow), the existing transaction provides that guarantee.
+
     Args:
-        conn: An open SQLite connection (caller manages lifecycle and rollback).
+        conn: An open SQLite connection (caller manages lifecycle, commit, rollback).
         price_cache: Live price cache for current market prices.
         ticker: Ticker symbol (normalized to uppercase internally).
         side: "buy" or "sell" (normalized to lowercase internally).
@@ -99,6 +111,12 @@ def execute_trade_on_conn(
     # Validate quantity
     if quantity <= 0:
         return {"status": "failed", "ticker": ticker, "error": "Quantity must be greater than 0"}
+
+    # Serialize the cash/shares check with the subsequent debit/credit by taking
+    # SQLite's write lock up front (TOCTOU protection). Skipped when the caller
+    # already opened a transaction — its writes are already serialized.
+    if not conn.in_transaction:
+        conn.execute("BEGIN IMMEDIATE")
 
     user_row = conn.execute(
         "SELECT cash_balance FROM users_profile WHERE id = 'default'"
@@ -151,7 +169,10 @@ def execute_trade_on_conn(
         )
 
         new_qty = current_qty - quantity
-        if new_qty <= 0:
+        # Float subtraction can leave a ~1e-16 residue when selling the full
+        # position (e.g. 0.1+0.1+0.1 bought, 0.3 sold). Treat anything below
+        # epsilon as fully closed so no ghost position row lingers.
+        if new_qty <= 1e-9:
             conn.execute(
                 "DELETE FROM positions WHERE user_id = 'default' AND ticker = ?",
                 (ticker,),
@@ -167,11 +188,6 @@ def execute_trade_on_conn(
         "INSERT INTO trades (id, user_id, ticker, side, quantity, price, executed_at) VALUES (?, 'default', ?, ?, ?, ?, ?)",
         (trade_id, ticker, side, quantity, current_price, now),
     )
-
-    conn.commit()
-
-    # Record portfolio snapshot immediately after trade
-    _record_snapshot(conn, price_cache)
 
     return {
         "status": "executed",
@@ -245,8 +261,10 @@ def create_portfolio_router(price_cache: PriceCache, db_path: str) -> APIRouter:
     async def execute_trade(body: TradeRequest, request: Request) -> dict:
         """Execute a market order (buy or sell).
 
-        Thin wrapper over ``execute_trade_on_conn``.
-        Validation errors return HTTP 400 with ``{"error": "message"}``.
+        Thin wrapper over ``execute_trade_on_conn``. On success the trade and
+        its post-trade portfolio snapshot are committed together in a single
+        transaction. Validation errors return HTTP 400 with
+        ``{"error": "message"}``; nothing is committed in that case.
         On success returns trade confirmation with status="ok" and trade_id.
         """
         conn = get_conn(db_path)
@@ -254,6 +272,15 @@ def create_portfolio_router(price_cache: PriceCache, db_path: str) -> APIRouter:
             outcome = execute_trade_on_conn(
                 conn, price_cache, body.ticker, body.side, body.quantity
             )
+            if outcome["status"] == "executed":
+                # Record portfolio snapshot immediately after the trade and
+                # commit both atomically (spec §7).
+                _record_snapshot(conn, price_cache)
+                conn.commit()
+            else:
+                # Validation failures write nothing; rollback releases any
+                # write lock taken by BEGIN IMMEDIATE before the failure.
+                conn.rollback()
         except Exception:
             conn.rollback()
             logger.exception(

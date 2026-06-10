@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import inspect
 import sqlite3
+from types import SimpleNamespace
 
 import pytest
 
@@ -27,6 +28,15 @@ def _post_chat_handler(router):
         if hasattr(route, "endpoint") and "POST" in getattr(route, "methods", set()):
             return route.endpoint
     raise AssertionError("Router must expose a POST route endpoint")
+
+
+def _stub_request():
+    """Minimal Request stand-in exposing .app.state for direct handler calls.
+
+    The handler looks up app.state.market_source (absent here, so the
+    market-source sync is skipped — matching apps without a live source).
+    """
+    return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
 
 
 class TestHandlerStructure:
@@ -121,7 +131,7 @@ class TestHandlerMockPathIntegration:
         router = create_chat_router(cache, db_path)
         handler = _post_chat_handler(router)
 
-        result = await handler(body=ChatRequest(message="hello"), request=None)
+        result = await handler(body=ChatRequest(message="hello"), request=_stub_request())
         assert result["message"] == (
             "I've added PYPL to your watchlist and bought 5 shares of AAPL for you."
         )
@@ -134,7 +144,7 @@ class TestHandlerMockPathIntegration:
         router = create_chat_router(cache, db_path)
         handler = _post_chat_handler(router)
 
-        result = await handler(body=ChatRequest(message="hello"), request=None)
+        result = await handler(body=ChatRequest(message="hello"), request=_stub_request())
         assert "trades" in result
 
     @pytest.mark.asyncio
@@ -145,7 +155,7 @@ class TestHandlerMockPathIntegration:
         router = create_chat_router(cache, db_path)
         handler = _post_chat_handler(router)
 
-        result = await handler(body=ChatRequest(message="hello"), request=None)
+        result = await handler(body=ChatRequest(message="hello"), request=_stub_request())
         assert "watchlist_changes" in result
 
     @pytest.mark.asyncio
@@ -157,7 +167,7 @@ class TestHandlerMockPathIntegration:
         router = create_chat_router(cache, db_path)
         handler = _post_chat_handler(router)
 
-        result = await handler(body=ChatRequest(message="hello"), request=None)
+        result = await handler(body=ChatRequest(message="hello"), request=_stub_request())
         assert len(result["trades"]) == 1
         trade = result["trades"][0]
         assert trade["status"] == "executed"
@@ -173,7 +183,7 @@ class TestHandlerMockPathIntegration:
         router = create_chat_router(cache, db_path)
         handler = _post_chat_handler(router)
 
-        await handler(body=ChatRequest(message="hello"), request=None)
+        await handler(body=ChatRequest(message="hello"), request=_stub_request())
 
         conn = get_conn(db_path)
         try:
@@ -194,7 +204,7 @@ class TestHandlerMockPathIntegration:
         router = create_chat_router(cache, db_path)
         handler = _post_chat_handler(router)
 
-        await handler(body=ChatRequest(message="hello"), request=None)
+        await handler(body=ChatRequest(message="hello"), request=_stub_request())
 
         conn = get_conn(db_path)
         try:
@@ -217,7 +227,7 @@ class TestHandlerMockPathIntegration:
         router = create_chat_router(cache, db_path)
         handler = _post_chat_handler(router)
 
-        await handler(body=ChatRequest(message="hello"), request=None)
+        await handler(body=ChatRequest(message="hello"), request=_stub_request())
 
         conn = get_conn(db_path)
         try:
@@ -243,9 +253,9 @@ class TestHandlerMockPathIntegration:
         handler = _post_chat_handler(router)
 
         # First request
-        await handler(body=ChatRequest(message="first message"), request=None)
+        await handler(body=ChatRequest(message="first message"), request=_stub_request())
         # Second request
-        await handler(body=ChatRequest(message="second message"), request=None)
+        await handler(body=ChatRequest(message="second message"), request=_stub_request())
 
         conn = get_conn(db_path)
         try:

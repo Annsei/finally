@@ -27,8 +27,8 @@ from pydantic import BaseModel
 
 from app.db.connection import get_conn
 from app.market.cache import PriceCache
-from app.routes.portfolio import execute_trade_on_conn
-from app.routes.watchlist import apply_watchlist_change_on_conn
+from app.routes.portfolio import _record_snapshot, execute_trade_on_conn
+from app.routes.watchlist import apply_watchlist_change_on_conn, sync_market_source
 
 logger = logging.getLogger(__name__)
 
@@ -74,14 +74,16 @@ def _assemble_portfolio_context(
     """Build a compact portfolio context string for injection into the system prompt.
 
     Reads current cash, positions, and watchlist from the open connection and
-    enriches positions with live prices from the price cache.
+    enriches both positions and watchlist tickers with live prices from the
+    price cache (spec §9: "watchlist with live prices").
 
     Args:
         conn: An open SQLite connection (caller manages lifecycle).
         price_cache: Live price cache for current market prices.
 
     Returns:
-        Multi-line string with cash, total value, positions table, and watchlist.
+        Multi-line string with cash, total value, positions table, and
+        watchlist with current prices.
     """
     # Cash balance
     user_row = conn.execute(
@@ -112,11 +114,18 @@ def _assemble_portfolio_context(
     total = cash + market_value
     positions_block = "\n".join(lines) if lines else "(no open positions)"
 
-    # Watchlist tickers (names only — no prices per D-01/D-02)
+    # Watchlist tickers enriched with live prices from the cache (spec §9)
     watchlist_rows = conn.execute(
         "SELECT ticker FROM watchlist WHERE user_id = 'default' ORDER BY added_at ASC"
     ).fetchall()
-    watchlist_tickers = ", ".join(r["ticker"] for r in watchlist_rows)
+    watchlist_parts: list[str] = []
+    for r in watchlist_rows:
+        wl_ticker: str = r["ticker"]
+        wl_price = price_cache.get_price(wl_ticker)
+        watchlist_parts.append(
+            f"{wl_ticker} ${wl_price:.2f}" if wl_price is not None else f"{wl_ticker} (no price)"
+        )
+    watchlist_tickers = ", ".join(watchlist_parts)
 
     return (
         f"Cash: ${cash:.2f}\n"
@@ -183,8 +192,16 @@ def create_chat_router(price_cache: PriceCache, db_path: str) -> APIRouter:
         """Process a chat message: call LLM (or mock), auto-execute actions, persist.
 
         Returns structured JSON with the assistant message, trade outcomes, and
-        watchlist change outcomes. All trade/watchlist failures are returned as
-        outcome dicts (status=failed) — they do NOT raise HTTP errors.
+        watchlist change outcomes. Per-action validation failures are returned as
+        outcome dicts (status=failed) — they do NOT raise HTTP errors and do not
+        abort the remaining actions.
+
+        Transaction boundary: all executed trades, applied watchlist changes,
+        and both chat_messages rows are committed atomically in ONE commit. An
+        unexpected error anywhere before that commit rolls back everything —
+        no half-applied chat turns. After the commit, a portfolio snapshot is
+        recorded (own commit) and applied watchlist changes are synced to the
+        live market data source (best-effort; DB is the source of truth).
 
         LLM errors (when LLM_MOCK=false) return HTTP 500 with
         ``{"error": "LLM unavailable"}``.
@@ -248,7 +265,10 @@ def create_chat_router(price_cache: PriceCache, db_path: str) -> APIRouter:
                         status_code=500, content={"error": "LLM unavailable"}
                     )
 
-            # Step 5: Auto-execute trades (T-02-05/T-02-06 — ticker normalized in helper)
+            # Step 5: Auto-execute trades (T-02-05/T-02-06 — ticker normalized in
+            # helper). Helpers do NOT commit — everything joins one transaction
+            # committed in Step 7. Per-trade validation failures return outcome
+            # dicts and never abort the batch.
             trade_outcomes = [
                 execute_trade_on_conn(
                     conn,
@@ -260,7 +280,8 @@ def create_chat_router(price_cache: PriceCache, db_path: str) -> APIRouter:
                 for t in parsed.trades
             ]
 
-            # Step 6: Auto-execute watchlist changes (DB-only per Pitfall 6)
+            # Step 6: Auto-execute watchlist changes (DB writes only here;
+            # market source sync happens in Step 9 after the commit)
             watch_outcomes = [
                 apply_watchlist_change_on_conn(conn, w.ticker, w.action)
                 for w in parsed.watchlist_changes
@@ -282,9 +303,32 @@ def create_chat_router(price_cache: PriceCache, db_path: str) -> APIRouter:
                 "VALUES (?, 'default', 'assistant', ?, ?, ?)",
                 (str(uuid.uuid4()), parsed.message, json.dumps(actions), asst_ts),
             )
+            # Single atomic commit: all trades + watchlist changes + both
+            # chat messages succeed or fail together.
             conn.commit()
 
-            # Step 8: Return structured response
+            # Step 8: Record a portfolio snapshot if any trade executed
+            # (spec §7: snapshot immediately after trade execution). Runs after
+            # the main commit; best-effort — a snapshot failure must not fail
+            # the already-committed chat turn.
+            if any(t["status"] == "executed" for t in trade_outcomes):
+                try:
+                    _record_snapshot(conn, price_cache)
+                    conn.commit()
+                except Exception:
+                    logger.exception("Post-trade snapshot failed (chat turn already committed)")
+
+            # Step 9: Sync applied watchlist changes to the live market data
+            # source so new tickers start streaming prices and removed tickers
+            # stop. Runs after the commit — DB is the source of truth and the
+            # sync is best-effort (failures logged inside the helper).
+            for outcome in watch_outcomes:
+                if outcome["status"] == "added":
+                    await sync_market_source(request, outcome["ticker"], "add")
+                elif outcome["status"] == "removed":
+                    await sync_market_source(request, outcome["ticker"], "remove")
+
+            # Step 10: Return structured response
             return {
                 "message": parsed.message,
                 "trades": trade_outcomes,
