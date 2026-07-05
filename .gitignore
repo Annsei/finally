@@ -193,8 +193,9 @@ cython_debug/
 
 # Project build and test artifacts
 backend/static/
-test-results/
-tmp-*.spec.js
+
+# macOS Finder metadata
+.DS_Store
 
 # FinAlly runtime SQLite database (db/ is the Docker volume mount target;
 # only .gitkeep is committed)
