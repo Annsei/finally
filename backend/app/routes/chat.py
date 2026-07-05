@@ -82,8 +82,9 @@ def _assemble_portfolio_context(
         price_cache: Live price cache for current market prices.
 
     Returns:
-        Multi-line string with cash, total value, positions table, and
-        watchlist with current prices.
+        Multi-line string with cash, total value, positions table, watchlist
+        with current prices, and (when any exist) the newest market events so
+        the assistant can reference sudden moves.
     """
     # Cash balance
     user_row = conn.execute(
@@ -127,13 +128,26 @@ def _assemble_portfolio_context(
         )
     watchlist_tickers = ", ".join(watchlist_parts)
 
-    return (
+    context = (
         f"Cash: ${cash:.2f}\n"
         f"Total portfolio value: ${total:.2f}\n"
         f"Positions (ticker | qty | avg_cost | current_price | pnl | pnl%):\n"
         f"{positions_block}\n"
         f"Watchlist: {watchlist_tickers}"
     )
+
+    # Recent market events (sudden >=1% tick moves detected in the cache
+    # funnel). Appended only when events exist so quiet markets add nothing
+    # to the prompt.
+    events = price_cache.get_events(limit=5)
+    if events:
+        event_lines = "\n".join(
+            f"{datetime.fromtimestamp(e.timestamp, tz=timezone.utc):%H:%M:%S} UTC - {e.headline}"
+            for e in events
+        )
+        context += f"\nRecent market events:\n{event_lines}"
+
+    return context
 
 
 # ---------------------------------------------------------------------------

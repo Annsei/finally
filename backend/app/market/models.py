@@ -7,6 +7,34 @@ from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True, slots=True)
+class MarketEvent:
+    """Immutable record of a sudden single-tick price move ("market event").
+
+    Recorded centrally by ``PriceCache.update()`` whenever a tick's move
+    exceeds the event threshold (see ``app.market.cache``), regardless of
+    whether the simulator or the Massive source produced the tick.
+    """
+
+    id: str  # uuid4 string
+    ticker: str
+    headline: str  # e.g. "NVDA surges +3.4% in sudden move"
+    change_percent: float  # signed tick move, rounded to 2 decimals
+    direction: str  # "up" | "down"
+    timestamp: float  # Unix seconds (the update timestamp)
+
+    def to_dict(self) -> dict:
+        """Serialize for JSON transmission."""
+        return {
+            "id": self.id,
+            "ticker": self.ticker,
+            "headline": self.headline,
+            "change_percent": self.change_percent,
+            "direction": self.direction,
+            "timestamp": self.timestamp,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class PriceUpdate:
     """Immutable snapshot of a single ticker's price at a point in time.
 

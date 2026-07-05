@@ -231,3 +231,66 @@ class TestChatMalformedLLMResponse:
         portfolio = (await chat_client.get("/api/portfolio/")).json()
         assert portfolio["cash"] == 10000.0
         assert portfolio["positions"] == []
+
+
+def _capturing_completion_factory(captured: dict):
+    """Build a litellm.completion stand-in that records kwargs and returns valid JSON."""
+
+    def fake_completion(*args, **kwargs):
+        captured.update(kwargs)
+        content = json.dumps({"message": "ok", "trades": [], "watchlist_changes": []})
+        message = SimpleNamespace(content=content)
+        return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+    return fake_completion
+
+
+@pytest.mark.asyncio
+class TestChatMarketEventContext:
+    """The LLM prompt gains a 'Recent market events' section only when events exist.
+
+    Extends the litellm.completion monkeypatch pattern to capture the
+    ``messages`` argument and inspect the system prompt's portfolio context.
+    """
+
+    async def test_events_appear_in_llm_context(
+        self, chat_client, fake_market_source, monkeypatch
+    ):
+        import litellm
+
+        # Fire a market event through the cache funnel: AAPL +3% in one tick.
+        cache = fake_market_source.price_cache
+        price = cache.get_price("AAPL")
+        cache.update("AAPL", price * 1.03)
+        newest = cache.get_events(limit=1)[0]
+        assert "surges" in newest.headline  # sanity: event actually recorded
+
+        captured: dict = {}
+        monkeypatch.setenv("LLM_MOCK", "false")
+        monkeypatch.setattr(litellm, "completion", _capturing_completion_factory(captured))
+
+        resp = await chat_client.post("/api/chat/", json={"message": "anything happening?"})
+        assert resp.status_code == 200
+
+        system_content = captured["messages"][0]["content"]
+        assert captured["messages"][0]["role"] == "system"
+        assert "Recent market events:" in system_content
+        assert newest.headline in system_content
+        assert " UTC" in system_content  # HH:MM:SS UTC timestamp prefix
+
+    async def test_no_events_no_section(self, chat_client, monkeypatch):
+        """Seed prices are first ticks (flat) — no events, so no section."""
+        import litellm
+
+        captured: dict = {}
+        monkeypatch.setenv("LLM_MOCK", "false")
+        monkeypatch.setattr(litellm, "completion", _capturing_completion_factory(captured))
+
+        resp = await chat_client.post("/api/chat/", json={"message": "hello"})
+        assert resp.status_code == 200
+
+        system_content = captured["messages"][0]["content"]
+        assert "Recent market events" not in system_content
+        # The rest of the portfolio context is still present
+        assert "Cash: $" in system_content
+        assert "Watchlist:" in system_content

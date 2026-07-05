@@ -1,6 +1,11 @@
 """Tests for PriceCache."""
 
-from app.market.cache import PriceCache
+from app.market.cache import (
+    EVENT_BUFFER_SIZE,
+    EVENT_COOLDOWN_SECONDS,
+    EVENT_THRESHOLD_PERCENT,
+    PriceCache,
+)
 
 
 class TestPriceCache:
@@ -319,3 +324,138 @@ class TestPriceCacheHistoryBuffer:
         cache.update("AAPL", 190.00, timestamp=1000.1)
         cache.update("AAPL", 191.00, timestamp=1000.6)
         assert cache.get_history("AAPL")[0]["volume"] == 0.0
+
+
+class TestPriceCacheMarketEvents:
+    """Market-event detection in the update() funnel (news feed, §3.1)."""
+
+    def test_up_move_records_event(self):
+        """A >=1% up tick records an event with correct fields and headline."""
+        cache = PriceCache()
+        cache.update("NVDA", 100.00, timestamp=1000.0)
+        cache.update("NVDA", 102.50, timestamp=1001.0)  # +2.5%
+
+        events = cache.get_events()
+        assert len(events) == 1
+        event = events[0]
+        assert event.ticker == "NVDA"
+        assert event.headline == "NVDA surges +2.5% in sudden move"
+        assert event.change_percent == 2.5
+        assert event.direction == "up"
+        assert event.timestamp == 1001.0
+        assert isinstance(event.id, str) and event.id
+
+    def test_down_move_records_event(self):
+        """A >=1% down tick records a 'plunges' event with a negative sign."""
+        cache = PriceCache()
+        cache.update("TSLA", 100.00, timestamp=1000.0)
+        cache.update("TSLA", 98.40, timestamp=1001.0)  # -1.6%
+
+        events = cache.get_events()
+        assert len(events) == 1
+        event = events[0]
+        assert event.headline == "TSLA plunges -1.6% in sudden move"
+        assert event.change_percent == -1.6
+        assert event.direction == "down"
+
+    def test_move_at_exact_threshold_records_event(self):
+        """A move of exactly EVENT_THRESHOLD_PERCENT fires (>= semantics)."""
+        cache = PriceCache()
+        cache.update("AAPL", 100.00, timestamp=1000.0)
+        cache.update("AAPL", 100.00 * (1 + EVENT_THRESHOLD_PERCENT / 100), timestamp=1001.0)
+        assert len(cache.get_events()) == 1
+
+    def test_small_move_records_nothing(self):
+        """A 0.9% move stays below the threshold — no event."""
+        cache = PriceCache()
+        cache.update("AAPL", 100.00, timestamp=1000.0)
+        cache.update("AAPL", 100.90, timestamp=1001.0)  # +0.9%
+        assert cache.get_events() == []
+
+    def test_first_update_is_flat_no_event(self):
+        """The first tick for a ticker (direction flat) never fires an event."""
+        cache = PriceCache()
+        cache.update("AAPL", 190.00, timestamp=1000.0)
+        assert cache.get_events() == []
+
+    def test_event_serializes_with_contract_keys(self):
+        """to_dict() emits exactly the fixed contract keys."""
+        cache = PriceCache()
+        cache.update("NVDA", 100.00, timestamp=1000.0)
+        cache.update("NVDA", 103.00, timestamp=1001.0)
+        payload = cache.get_events()[0].to_dict()
+        assert set(payload.keys()) == {
+            "id", "ticker", "headline", "change_percent", "direction", "timestamp",
+        }
+
+    def test_cooldown_suppresses_within_window(self):
+        """A second qualifying move within 30s of update-timestamp is suppressed."""
+        cache = PriceCache()
+        cache.update("NVDA", 100.00, timestamp=1000.0)
+        cache.update("NVDA", 102.00, timestamp=1001.0)  # +2.0% -> event
+        cache.update("NVDA", 104.50, timestamp=1001.0 + EVENT_COOLDOWN_SECONDS - 0.5)  # suppressed
+
+        events = cache.get_events()
+        assert len(events) == 1
+        assert events[0].timestamp == 1001.0
+
+    def test_cooldown_allows_after_window(self):
+        """A qualifying move >=30s (update-timestamp time) after the last event fires."""
+        cache = PriceCache()
+        cache.update("NVDA", 100.00, timestamp=1000.0)
+        cache.update("NVDA", 102.00, timestamp=1001.0)  # +2.0% -> event
+        cache.update("NVDA", 104.50, timestamp=1001.0 + EVENT_COOLDOWN_SECONDS)  # allowed
+
+        events = cache.get_events()
+        assert len(events) == 2
+        assert events[0].timestamp == 1001.0 + EVENT_COOLDOWN_SECONDS  # newest first
+
+    def test_cooldown_is_per_ticker(self):
+        """A cooldown on one ticker does not suppress events on another."""
+        cache = PriceCache()
+        cache.update("NVDA", 100.00, timestamp=1000.0)
+        cache.update("GOOGL", 100.00, timestamp=1000.0)
+        cache.update("NVDA", 102.00, timestamp=1001.0)
+        cache.update("GOOGL", 102.00, timestamp=1002.0)  # within NVDA's cooldown; own ticker OK
+        assert len(cache.get_events()) == 2
+
+    def test_buffer_caps_at_100(self):
+        """The event ring buffer holds at most EVENT_BUFFER_SIZE events."""
+        cache = PriceCache()
+        cache.update("AAPL", 100.00, timestamp=1000.0)
+        price_low = True
+        for i in range(1, EVENT_BUFFER_SIZE + 6):  # 105 qualifying moves
+            price = 102.00 if price_low else 100.00  # +2.0% / -1.96% alternating
+            price_low = not price_low
+            cache.update("AAPL", price, timestamp=1000.0 + i * EVENT_COOLDOWN_SECONDS)
+
+        events = cache.get_events()
+        assert len(events) == EVENT_BUFFER_SIZE == 100
+        # Oldest events were evicted: the newest survives, the earliest does not
+        timestamps = [e.timestamp for e in events]
+        assert max(timestamps) == 1000.0 + (EVENT_BUFFER_SIZE + 5) * EVENT_COOLDOWN_SECONDS
+        assert 1000.0 + 1 * EVENT_COOLDOWN_SECONDS not in timestamps
+
+    def test_get_events_newest_first_and_limit(self):
+        """get_events returns newest-first; limit slices the newest N."""
+        cache = PriceCache()
+        for i, ticker in enumerate(["AAPL", "GOOGL", "MSFT"]):
+            cache.update(ticker, 100.00, timestamp=1000.0 + i)
+            cache.update(ticker, 102.00, timestamp=2000.0 + i)
+
+        events = cache.get_events()
+        assert [e.ticker for e in events] == ["MSFT", "GOOGL", "AAPL"]
+
+        limited = cache.get_events(limit=2)
+        assert [e.ticker for e in limited] == ["MSFT", "GOOGL"]
+
+    def test_events_survive_ticker_removal(self):
+        """Removing a ticker keeps its already-recorded events (history)."""
+        cache = PriceCache()
+        cache.update("NVDA", 100.00, timestamp=1000.0)
+        cache.update("NVDA", 103.00, timestamp=1001.0)
+        cache.remove("NVDA")
+
+        events = cache.get_events()
+        assert len(events) == 1
+        assert events[0].ticker == "NVDA"

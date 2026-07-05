@@ -3,13 +3,24 @@
 from __future__ import annotations
 
 import time
+import uuid
 from collections import deque
 from threading import Lock
 
-from .models import PriceUpdate
+from .models import MarketEvent, PriceUpdate
 
 # ~2 hours of 1-second bars per ticker.
 DEFAULT_HISTORY_CAPACITY = 7200
+
+# Market-event detection (news feed): a single-tick move of at least this
+# magnitude (percent, absolute) records a MarketEvent.
+EVENT_THRESHOLD_PERCENT = 1.0
+# After an event fires for a ticker, further events for that ticker are
+# suppressed until this much update-timestamp time has elapsed (not wall
+# clock, so detection is deterministic under injected timestamps).
+EVENT_COOLDOWN_SECONDS = 30.0
+# Ring buffer size for recent events across all tickers.
+EVENT_BUFFER_SIZE = 100
 
 
 class PriceCache:
@@ -29,6 +40,10 @@ class PriceCache:
         # Bars are plain dicts (time/open/high/low/close/volume) so the
         # history endpoint can serialize them directly.
         self._bars: dict[str, deque[dict]] = {}
+        # Recent market events across all tickers, oldest -> newest.
+        self._events: deque[MarketEvent] = deque(maxlen=EVENT_BUFFER_SIZE)
+        # Per-ticker update-timestamp of the last recorded event (cooldown).
+        self._last_event_ts: dict[str, float] = {}
 
     def update(
         self,
@@ -110,7 +125,55 @@ class PriceCache:
             self._prices[ticker] = update
             self._version += 1
             self._record_bar(ticker, rounded_price, ts, tick_volume)
+            self._maybe_record_event(update)
             return update
+
+    def _maybe_record_event(self, update: PriceUpdate) -> None:
+        """Record a MarketEvent when a tick's move crosses the event threshold.
+
+        Detection lives here — the single funnel every market source writes
+        through — so both the simulator's random "events" and real Massive
+        data produce news-feed entries. A per-ticker cooldown (measured in
+        update-timestamp time, not wall clock) prevents a volatile ticker
+        from flooding the feed.
+
+        Must be called with self._lock held.
+        """
+        change_percent = update.change_percent
+        if abs(change_percent) < EVENT_THRESHOLD_PERCENT:
+            return
+
+        last_ts = self._last_event_ts.get(update.ticker)
+        if last_ts is not None and update.timestamp - last_ts < EVENT_COOLDOWN_SECONDS:
+            return
+
+        direction = "up" if change_percent > 0 else "down"
+        verb = "surges" if direction == "up" else "plunges"
+        event = MarketEvent(
+            id=str(uuid.uuid4()),
+            ticker=update.ticker,
+            headline=f"{update.ticker} {verb} {change_percent:+.1f}% in sudden move",
+            change_percent=round(change_percent, 2),
+            direction=direction,
+            timestamp=update.timestamp,
+        )
+        self._events.append(event)
+        self._last_event_ts[update.ticker] = update.timestamp
+
+    def get_events(self, limit: int | None = None) -> list[MarketEvent]:
+        """Return recent market events, newest first.
+
+        At most ``limit`` newest events when limit is given. Returns a new
+        list of immutable MarketEvent records, so callers cannot mutate the
+        ring buffer. Events for tickers since removed from the cache may
+        still appear (they are history).
+        """
+        with self._lock:
+            items = list(self._events)
+        items.reverse()
+        if limit is not None:
+            items = items[:limit]
+        return items
 
     def _record_bar(self, ticker: str, price: float, ts: float, volume: float) -> None:
         """Merge a tick into the ticker's 1-second OHLCV ring buffer.
@@ -179,11 +242,14 @@ class PriceCache:
     def remove(self, ticker: str) -> None:
         """Remove a ticker from the cache (e.g., when removed from watchlist).
 
-        Also clears the ticker's OHLCV history ring buffer.
+        Also clears the ticker's OHLCV history ring buffer and its event
+        cooldown state (a re-added ticker starts a fresh session). Already
+        recorded events remain in the event buffer — they are history.
         """
         with self._lock:
             self._prices.pop(ticker, None)
             self._bars.pop(ticker, None)
+            self._last_event_ts.pop(ticker, None)
 
     @property
     def version(self) -> int:
