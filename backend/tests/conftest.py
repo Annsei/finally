@@ -7,7 +7,7 @@ import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
-from app.market import MarketDataSource
+from app.market import MarketDataSource, PriceCache
 
 
 class FakeMarketSource(MarketDataSource):
@@ -16,12 +16,21 @@ class FakeMarketSource(MarketDataSource):
     Installed on ``app.state.market_source`` by the client fixtures (mirroring
     main.py's lifespan wiring) so tests can assert that routes sync watchlist
     changes to the market data source.
+
+    When a ``price_cache`` is attached (the client fixtures attach the app's
+    cache), the fake mirrors the real sources' cache semantics: ``add_ticker``
+    seeds a price for a brand-new ticker immediately (the behavior the chat
+    add-then-trade flow relies on) and ``remove_ticker`` evicts the ticker
+    from the cache.
     """
 
-    def __init__(self) -> None:
+    SEED_PRICE = 100.0
+
+    def __init__(self, price_cache: PriceCache | None = None) -> None:
         self.added: list[str] = []
         self.removed: list[str] = []
         self._tickers: list[str] = []
+        self.price_cache = price_cache
 
     async def start(self, tickers: list[str]) -> None:
         self._tickers = list(tickers)
@@ -33,11 +42,15 @@ class FakeMarketSource(MarketDataSource):
         self.added.append(ticker)
         if ticker not in self._tickers:
             self._tickers.append(ticker)
+        if self.price_cache is not None and self.price_cache.get(ticker) is None:
+            self.price_cache.update(ticker, self.SEED_PRICE)
 
     async def remove_ticker(self, ticker: str) -> None:
         self.removed.append(ticker)
         if ticker in self._tickers:
             self._tickers.remove(ticker)
+        if self.price_cache is not None:
+            self.price_cache.remove(ticker)
 
     def get_tickers(self) -> list[str]:
         return list(self._tickers)
@@ -74,6 +87,10 @@ async def app_client(tmp_path, monkeypatch, fake_market_source):
     # Seed test prices for all default tickers so trade tests can get prices
     for ticker, price in SEED_PRICES.items():
         price_cache.update(ticker, price)
+
+    # Attach the app's cache so the fake source seeds prices on add_ticker
+    # (mirrors SimulatorDataSource/MassiveDataSource behavior).
+    fake_market_source.price_cache = price_cache
 
     test_app = FastAPI()
     test_app.state.market_source = fake_market_source
@@ -113,6 +130,10 @@ async def chat_client(tmp_path, monkeypatch, fake_market_source):
     # Seed test prices for all default tickers so mock AAPL buy has a price
     for ticker, price in SEED_PRICES.items():
         price_cache.update(ticker, price)
+
+    # Attach the app's cache so the fake source seeds prices on add_ticker
+    # (mirrors SimulatorDataSource/MassiveDataSource behavior).
+    fake_market_source.price_cache = price_cache
 
     test_app = FastAPI()
     test_app.state.market_source = fake_market_source

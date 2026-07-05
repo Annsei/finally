@@ -170,3 +170,60 @@ class TestExecuteTradeOnConnSuccessPaths:
             "SELECT cash_balance FROM users_profile WHERE id = 'default'"
         ).fetchone()["cash_balance"]
         assert after < before
+
+
+class TestSellAtALossAccounting:
+    """Spec §12 edge case: selling at a loss must realize the loss exactly."""
+
+    def test_sell_all_shares_at_a_loss(self, fresh_db):
+        """Buy 10 @ $200, price drops to $150, sell all 10.
+
+        Cash must equal initial_cash - buy_cost + sell_proceeds exactly, the
+        position row must be deleted, and both trade rows must record the
+        price at their respective execution times.
+        """
+        from app.routes.portfolio import execute_trade_on_conn
+
+        cache = PriceCache()
+        cache.update("AAPL", 200.0)
+
+        initial_cash: float = fresh_db.execute(
+            "SELECT cash_balance FROM users_profile WHERE id = 'default'"
+        ).fetchone()["cash_balance"]
+
+        buy = execute_trade_on_conn(fresh_db, cache, "AAPL", "buy", 10.0)
+        assert buy["status"] == "executed"
+        assert buy["price"] == 200.0
+
+        # Price drops 25% — the position is now underwater
+        cache.update("AAPL", 150.0)
+
+        sell = execute_trade_on_conn(fresh_db, cache, "AAPL", "sell", 10.0)
+        assert sell["status"] == "executed"
+        assert sell["price"] == 150.0
+        fresh_db.commit()
+
+        # Cash reflects the realized loss exactly: -$2000 buy, +$1500 sell
+        cash: float = fresh_db.execute(
+            "SELECT cash_balance FROM users_profile WHERE id = 'default'"
+        ).fetchone()["cash_balance"]
+        assert cash == pytest.approx(initial_cash - 10.0 * 200.0 + 10.0 * 150.0)
+        assert cash == pytest.approx(initial_cash - 500.0)  # $500 realized loss
+
+        # Position fully closed — row deleted
+        pos_row = fresh_db.execute(
+            "SELECT quantity FROM positions WHERE user_id = 'default' AND ticker = 'AAPL'"
+        ).fetchone()
+        assert pos_row is None
+
+        # Both trades logged with the correct execution prices
+        trade_rows = fresh_db.execute(
+            "SELECT side, quantity, price FROM trades "
+            "WHERE user_id = 'default' AND ticker = 'AAPL'"
+        ).fetchall()
+        assert len(trade_rows) == 2
+        by_side = {row["side"]: row for row in trade_rows}
+        assert by_side["buy"]["quantity"] == 10.0
+        assert by_side["buy"]["price"] == 200.0
+        assert by_side["sell"]["quantity"] == 10.0
+        assert by_side["sell"]["price"] == 150.0

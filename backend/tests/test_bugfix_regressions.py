@@ -233,3 +233,51 @@ class TestChatTransactionBoundary:
 
         history = await chat_client.get("/api/portfolio/history")
         assert len(history.json()["snapshots"]) >= 1
+
+
+@pytest.mark.asyncio
+class TestChatAddThenTradeOrdering:
+    """FIX 4: watchlist adds must reach the market source (seeding the price
+    cache) BEFORE LLM-requested trades execute, so a single chat turn like
+    "add PYPL to my watchlist and buy 5 shares" succeeds."""
+
+    async def test_add_and_buy_same_new_ticker_in_one_turn(
+        self, chat_client, fake_market_source, monkeypatch
+    ):
+        """Watchlist add of a brand-new ticker + trade on it in ONE turn: trade executes."""
+        import litellm
+
+        payload = {
+            "message": "Added PYPL to your watchlist and bought 5 shares.",
+            "trades": [{"ticker": "PYPL", "side": "buy", "quantity": 5}],
+            "watchlist_changes": [{"ticker": "PYPL", "action": "add"}],
+        }
+        monkeypatch.setenv("LLM_MOCK", "false")
+        monkeypatch.setattr(litellm, "completion", _fake_completion_factory(payload))
+
+        resp = await chat_client.post(
+            "/api/chat/", json={"message": "Add PYPL to my watchlist and buy 5 shares"}
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+
+        # The watchlist add was applied and synced to the market source ...
+        assert data["watchlist_changes"][0]["status"] == "added"
+        assert data["watchlist_changes"][0]["ticker"] == "PYPL"
+        assert "PYPL" in fake_market_source.added
+
+        # ... BEFORE the trade ran, so the trade found a price and executed
+        # (the pre-fix behavior was status=failed / "Ticker not found in price cache").
+        trade = data["trades"][0]
+        assert trade["status"] == "executed", trade
+        assert trade["ticker"] == "PYPL"
+        assert trade["price"] > 0
+
+        # Cash decreased by exactly quantity * fill price and the position row exists
+        portfolio = (await chat_client.get("/api/portfolio/")).json()
+        assert portfolio["cash"] == pytest.approx(10000.0 - 5 * trade["price"])
+        assert "PYPL" in [p["ticker"] for p in portfolio["positions"]]
+
+        # And PYPL is persisted in the watchlist
+        watchlist = (await chat_client.get("/api/watchlist/")).json()
+        assert "PYPL" in [t["ticker"] for t in watchlist["tickers"]]

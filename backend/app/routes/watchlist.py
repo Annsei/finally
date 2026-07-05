@@ -45,7 +45,7 @@ def apply_watchlist_change_on_conn(
     (or roll back). This allows callers to batch watchlist changes with other
     writes (trades, chat messages) atomically in a single transaction. This
     helper also does not touch the live market data source; callers must sync
-    applied changes via ``sync_market_source`` after committing.
+    applied changes via ``sync_market_source`` (see its docstring for timing).
 
     Args:
         conn: An open SQLite connection (caller manages lifecycle and commit).
@@ -91,11 +91,15 @@ async def sync_market_source(request: Request, ticker: str, action: str) -> None
     watched tickers start producing prices (SSE, trades) and removed tickers stop
     simulating/streaming.
 
-    Consistency model: the database is the source of truth. Call this AFTER the
-    DB change is committed. If the source is absent (e.g. unit tests without a
-    market source on app.state) or the source call raises, the DB change stands,
-    the error is logged, and the source re-syncs from the DB watchlist on the
-    next app startup — divergence self-heals.
+    Consistency model: the database is the source of truth. Removals must be
+    called AFTER the DB change is committed. Adds are normally synced after
+    the commit too, but the chat flow deliberately syncs adds BEFORE its
+    commit (add_ticker seeds the price cache so same-turn trades on a
+    just-added ticker can execute) and reconciles the source on rollback. If
+    the source is absent (e.g. unit tests without a market source on
+    app.state) or the source call raises, the DB change stands, the error is
+    logged, and the source re-syncs from the DB watchlist on the next app
+    startup — divergence self-heals.
 
     Args:
         request: Current request (used to reach ``app.state.market_source``).

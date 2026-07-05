@@ -9,6 +9,9 @@ prefix="/api/chat" + @router.post("/") so the full path is /api/chat/).
 
 from __future__ import annotations
 
+import json
+from types import SimpleNamespace
+
 import pytest
 
 
@@ -174,3 +177,57 @@ class TestChat:
             assert isinstance(asst_msg["actions"], dict), (
                 f"actions must be a parsed dict, not {type(asst_msg['actions'])}"
             )
+
+
+def _raw_completion_factory(content: str):
+    """Build a litellm.completion stand-in returning raw (possibly invalid) content."""
+
+    def fake_completion(*args, **kwargs):
+        message = SimpleNamespace(content=content)
+        return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+    return fake_completion
+
+
+@pytest.mark.asyncio
+class TestChatMalformedLLMResponse:
+    """Malformed LLM output must hit the graceful 500 path with zero side effects.
+
+    Spec §12: "graceful handling of malformed responses". The except handler in
+    chat.py catches parse/validation failures and returns HTTP 500 with
+    {"error": "LLM unavailable"} — nothing may be persisted or executed.
+    """
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            pytest.param(
+                "Sure! I'd buy 5 shares of AAPL. (not JSON at all)",
+                id="non-json-garbage",
+            ),
+            pytest.param(
+                json.dumps({"trades": [], "watchlist_changes": []}),
+                id="valid-json-missing-required-message",
+            ),
+        ],
+    )
+    async def test_malformed_llm_response_returns_500_and_writes_nothing(
+        self, chat_client, monkeypatch, content
+    ):
+        import litellm
+
+        monkeypatch.setenv("LLM_MOCK", "false")
+        monkeypatch.setattr(litellm, "completion", _raw_completion_factory(content))
+
+        resp = await chat_client.post("/api/chat/", json={"message": "hello"})
+        assert resp.status_code == 500
+        assert resp.json() == {"error": "LLM unavailable"}
+
+        # No partial chat_messages rows were written
+        history = await chat_client.get("/api/chat/")
+        assert history.json()["messages"] == []
+
+        # No trades executed, cash untouched, no positions created
+        portfolio = (await chat_client.get("/api/portfolio/")).json()
+        assert portfolio["cash"] == 10000.0
+        assert portfolio["positions"] == []

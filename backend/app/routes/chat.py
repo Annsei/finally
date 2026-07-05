@@ -196,17 +196,29 @@ def create_chat_router(price_cache: PriceCache, db_path: str) -> APIRouter:
         outcome dicts (status=failed) — they do NOT raise HTTP errors and do not
         abort the remaining actions.
 
+        Ordering: watchlist changes are applied BEFORE trades, and each
+        successful "add" is registered with the live market source
+        immediately (add_ticker seeds the price cache) so a single turn like
+        "add PYPL and buy 5 shares" finds a price at trade time. Market
+        source removals stay AFTER the commit so an in-flight turn cannot
+        lose prices and a rollback cannot orphan the source state.
+
         Transaction boundary: all executed trades, applied watchlist changes,
         and both chat_messages rows are committed atomically in ONE commit. An
         unexpected error anywhere before that commit rolls back everything —
-        no half-applied chat turns. After the commit, a portfolio snapshot is
-        recorded (own commit) and applied watchlist changes are synced to the
-        live market data source (best-effort; DB is the source of truth).
+        no half-applied chat turns — and any pre-commit market source adds are
+        reconciled back to match the DB (best-effort). After the commit, a
+        portfolio snapshot is recorded (own commit) and watchlist removals are
+        synced to the live market data source (best-effort; DB is the source
+        of truth).
 
         LLM errors (when LLM_MOCK=false) return HTTP 500 with
         ``{"error": "LLM unavailable"}``.
         """
         conn = get_conn(db_path)
+        # Tickers registered with the market source before the commit this
+        # turn — used to reconcile the source if the transaction rolls back.
+        source_adds: list[str] = []
         try:
             # Step 1: Load conversation history (D-04)
             rows = conn.execute(
@@ -265,7 +277,23 @@ def create_chat_router(price_cache: PriceCache, db_path: str) -> APIRouter:
                         status_code=500, content={"error": "LLM unavailable"}
                     )
 
-            # Step 5: Auto-execute trades (T-02-05/T-02-06 — ticker normalized in
+            # Step 5: Auto-execute watchlist changes FIRST (DB writes join the
+            # single transaction committed in Step 7). Each successful "add"
+            # is registered with the live market source immediately —
+            # add_ticker seeds the price cache, so a same-turn trade on a
+            # brand-new ticker (e.g. "add PYPL and buy 5 shares") finds a
+            # price in Step 6. Market source REMOVALS are deferred to Step 9
+            # (post-commit) so an in-flight turn keeps its prices and a
+            # rollback cannot orphan the source state.
+            watch_outcomes: list[dict] = []
+            for w in parsed.watchlist_changes:
+                outcome = apply_watchlist_change_on_conn(conn, w.ticker, w.action)
+                watch_outcomes.append(outcome)
+                if outcome["status"] == "added":
+                    source_adds.append(outcome["ticker"])
+                    await sync_market_source(request, outcome["ticker"], "add")
+
+            # Step 6: Auto-execute trades (T-02-05/T-02-06 — ticker normalized in
             # helper). Helpers do NOT commit — everything joins one transaction
             # committed in Step 7. Per-trade validation failures return outcome
             # dicts and never abort the batch.
@@ -278,13 +306,6 @@ def create_chat_router(price_cache: PriceCache, db_path: str) -> APIRouter:
                     t.quantity,
                 )
                 for t in parsed.trades
-            ]
-
-            # Step 6: Auto-execute watchlist changes (DB writes only here;
-            # market source sync happens in Step 9 after the commit)
-            watch_outcomes = [
-                apply_watchlist_change_on_conn(conn, w.ticker, w.action)
-                for w in parsed.watchlist_changes
             ]
 
             # Step 7: Persist both messages (T-02-12 — parameterized SQL)
@@ -318,14 +339,13 @@ def create_chat_router(price_cache: PriceCache, db_path: str) -> APIRouter:
                 except Exception:
                     logger.exception("Post-trade snapshot failed (chat turn already committed)")
 
-            # Step 9: Sync applied watchlist changes to the live market data
-            # source so new tickers start streaming prices and removed tickers
-            # stop. Runs after the commit — DB is the source of truth and the
-            # sync is best-effort (failures logged inside the helper).
+            # Step 9: Sync watchlist REMOVALS to the live market data source
+            # so removed tickers stop simulating/streaming. Adds were already
+            # synced in Step 5 (pre-trade). Runs after the commit — DB is the
+            # source of truth and the sync is best-effort (failures logged
+            # inside the helper).
             for outcome in watch_outcomes:
-                if outcome["status"] == "added":
-                    await sync_market_source(request, outcome["ticker"], "add")
-                elif outcome["status"] == "removed":
+                if outcome["status"] == "removed":
                     await sync_market_source(request, outcome["ticker"], "remove")
 
             # Step 10: Return structured response
@@ -337,6 +357,25 @@ def create_chat_router(price_cache: PriceCache, db_path: str) -> APIRouter:
 
         except Exception:
             conn.rollback()
+            # Best-effort reconcile: successful adds were registered with the
+            # market source BEFORE the commit (Step 5). After a rollback the
+            # DB may no longer contain those tickers — remove any such ticker
+            # from the source so it matches the DB again. Tickers still in the
+            # watchlist (idempotent re-adds of already-watched tickers) keep
+            # streaming.
+            for added_ticker in source_adds:
+                try:
+                    row = conn.execute(
+                        "SELECT 1 FROM watchlist WHERE user_id = 'default' AND ticker = ?",
+                        (added_ticker,),
+                    ).fetchone()
+                    if row is None:
+                        await sync_market_source(request, added_ticker, "remove")
+                except Exception:
+                    logger.exception(
+                        "Market source reconcile failed for %s after rollback",
+                        added_ticker,
+                    )
             raise
         finally:
             conn.close()

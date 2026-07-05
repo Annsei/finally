@@ -1,23 +1,13 @@
-"""Tests for POST /api/chat handler internals (Task 2 RED).
+"""Tests for POST /api/chat handler internals.
 
-These tests verify the handler's core behaviors that can be exercised
-without the full ASGI client fixture (deferred to plan 02-03):
-- Handler function exists inside create_chat_router (not a stub)
-- Handler has the correct async signature
-- Handler contains mock-branch logic (os.getenv check)
-- Handler contains the asyncio.to_thread LLM wrap
+These tests exercise the handler's mock path directly (DB setup + calling the
+inner coroutine), bypassing the ASGI layer which tests/test_chat.py covers:
 - Handler persists two chat_messages rows per request
-- litellm import is lazy (inside else block, not at module top level)
-
-Full ASGI end-to-end tests (POST /api/chat via httpx AsyncClient) are
-intentionally deferred to 02-03 which creates tests/test_chat.py with
-the complete app fixture including the chat router.
+- Mock response structure and auto-execution (trades, watchlist changes)
 """
 
 from __future__ import annotations
 
-import inspect
-import sqlite3
 from types import SimpleNamespace
 
 import pytest
@@ -37,63 +27,6 @@ def _stub_request():
     market-source sync is skipped — matching apps without a live source).
     """
     return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
-
-
-class TestHandlerStructure:
-    """Handler function is present and has correct structure."""
-
-    def test_chat_handler_is_async(self):
-        """The inner chat function is an async coroutine function."""
-        from app.market import PriceCache
-        from app.routes.chat import create_chat_router
-
-        cache = PriceCache()
-        router = create_chat_router(cache, ":memory:")
-
-        post_handler = _post_chat_handler(router)
-        assert inspect.iscoroutinefunction(post_handler), "chat handler must be async"
-
-    def test_litellm_not_imported_at_module_level(self):
-        """from litellm import completion must not appear in first 20 lines."""
-        import pathlib
-
-        chat_path = pathlib.Path(__file__).parent.parent / "app" / "routes" / "chat.py"
-        lines = chat_path.read_text().splitlines()
-        first_20 = "\n".join(lines[:20])
-        assert "from litellm" not in first_20, (
-            "litellm must be imported lazily inside the else block, not at module top"
-        )
-
-    def test_mock_env_check_present_in_source(self):
-        """Source contains os.getenv('LLM_MOCK') check."""
-        import pathlib
-
-        chat_path = pathlib.Path(__file__).parent.parent / "app" / "routes" / "chat.py"
-        source = chat_path.read_text()
-        assert 'os.getenv("LLM_MOCK"' in source, (
-            "Handler must check os.getenv('LLM_MOCK') for mock branch"
-        )
-
-    def test_asyncio_to_thread_present_in_source(self):
-        """Source contains asyncio.to_thread wrapping the LLM call."""
-        import pathlib
-
-        chat_path = pathlib.Path(__file__).parent.parent / "app" / "routes" / "chat.py"
-        source = chat_path.read_text()
-        assert "asyncio.to_thread(" in source, (
-            "LLM completion call must be wrapped in asyncio.to_thread"
-        )
-
-    def test_two_insert_statements_in_source(self):
-        """Source contains two INSERT INTO chat_messages statements."""
-        import pathlib
-
-        chat_path = pathlib.Path(__file__).parent.parent / "app" / "routes" / "chat.py"
-        source = chat_path.read_text()
-        count = source.count("INSERT INTO chat_messages")
-        assert count == 2, (
-            f"Expected 2 INSERT INTO chat_messages statements, found {count}"
-        )
 
 
 class TestHandlerMockPathIntegration:
