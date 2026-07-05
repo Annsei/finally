@@ -16,6 +16,11 @@ class PriceUpdate:
     compare against the previous session close and track running extremes.
     When session fields are omitted at construction they default to the
     current price (first-tick-of-session semantics).
+
+    Quote/volume fields: `volume` is the volume traded since the previous
+    update for this ticker (0.0 when the source supplies none). `bid`/`ask`
+    are the best bid/ask; when a source supplies neither they default to the
+    current price (zero spread), so both are always present in `to_dict()`.
     """
 
     ticker: str
@@ -25,6 +30,9 @@ class PriceUpdate:
     prev_close: float | None = None  # Previous session close reference price
     day_high: float | None = None  # Running session high
     day_low: float | None = None  # Running session low
+    volume: float = 0.0  # Volume traded since the previous update
+    bid: float | None = None  # Best bid (defaults to price)
+    ask: float | None = None  # Best ask (defaults to price)
 
     def __post_init__(self) -> None:
         # Normalize omitted session fields to the current price.
@@ -36,6 +44,11 @@ class PriceUpdate:
             object.__setattr__(self, "day_high", self.price)
         if self.day_low is None:
             object.__setattr__(self, "day_low", self.price)
+        # Omitted quote fields default to the price (zero spread).
+        if self.bid is None:
+            object.__setattr__(self, "bid", self.price)
+        if self.ask is None:
+            object.__setattr__(self, "ask", self.price)
 
     @property
     def change(self) -> float:
@@ -85,4 +98,7 @@ class PriceUpdate:
             "day_change_percent": self.day_change_percent,
             "day_high": self.day_high,
             "day_low": self.day_low,
+            "volume": self.volume,
+            "bid": self.bid,
+            "ask": self.ask,
         }

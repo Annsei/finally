@@ -139,3 +139,48 @@ class TestPriceUpdate:
 
         with pytest.raises(AttributeError):
             update.price = 200.00  # Should raise error
+
+
+class TestPriceUpdateQuoteFields:
+    """Volume and bid/ask fields (Batch 2 §2.2/§2.3)."""
+
+    def test_defaults_bid_ask_price_volume_zero(self):
+        """Omitted quote fields normalize to bid=ask=price and volume=0.0."""
+        update = PriceUpdate(ticker="AAPL", price=190.50, previous_price=190.00, timestamp=1234567890.0)
+        assert update.volume == 0.0
+        assert update.bid == 190.50
+        assert update.ask == 190.50
+
+    def test_explicit_quote_fields(self):
+        """Explicit volume/bid/ask are used verbatim."""
+        update = PriceUpdate(
+            ticker="AAPL",
+            price=190.50,
+            previous_price=190.00,
+            timestamp=1234567890.0,
+            volume=12345.0,
+            bid=190.48,
+            ask=190.52,
+        )
+        assert update.volume == 12345.0
+        assert update.bid == 190.48
+        assert update.ask == 190.52
+
+    def test_to_dict_always_emits_quote_keys(self):
+        """to_dict() carries volume/bid/ask even when defaulted."""
+        defaulted = PriceUpdate(ticker="AAPL", price=190.50, previous_price=190.00).to_dict()
+        assert defaulted["volume"] == 0.0
+        assert defaulted["bid"] == 190.50
+        assert defaulted["ask"] == 190.50
+
+        explicit = PriceUpdate(
+            ticker="AAPL",
+            price=190.50,
+            previous_price=190.00,
+            volume=5000.0,
+            bid=190.45,
+            ask=190.55,
+        ).to_dict()
+        assert explicit["volume"] == 5000.0
+        assert explicit["bid"] == 190.45
+        assert explicit["ask"] == 190.55

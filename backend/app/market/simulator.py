@@ -6,6 +6,7 @@ import asyncio
 import logging
 import math
 import random
+import zlib
 
 import numpy as np
 
@@ -23,6 +24,51 @@ from .seed_prices import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Per-tick volume: lognormal draw shared by all tickers.
+# median = e^9.2 ~= 9,900 shares; sigma 0.8 puts the 2-sigma range at roughly
+# 2k-49k, so typical values land in the 1k-100k band and vary tick to tick.
+VOLUME_LOG_MEAN = 9.2
+VOLUME_LOG_SIGMA = 0.8
+
+# Quoted spread bounds in basis points (deterministic per ticker).
+MIN_SPREAD_BPS = 1
+MAX_SPREAD_BPS = 5
+
+
+def spread_bps_for(ticker: str) -> float:
+    """Deterministic per-ticker quoted spread in basis points (1-5 bp).
+
+    Derived from a stable CRC32 hash of the ticker so the spread is fixed for
+    the life of the process (and across processes — CRC32 is not seed-salted
+    like Python's built-in hash()).
+    """
+    span = MAX_SPREAD_BPS - MIN_SPREAD_BPS + 1
+    return float(MIN_SPREAD_BPS + zlib.crc32(ticker.encode("utf-8")) % span)
+
+
+def compute_quote(ticker: str, price: float) -> tuple[float, float]:
+    """Best bid/ask for a price using the ticker's fixed spread.
+
+    bid = price * (1 - spread/2), ask = price * (1 + spread/2), both rounded
+    to 2dp. After rounding, a half-spread smaller than half a cent would
+    collapse onto the price, so each side is pushed at least one cent away —
+    guaranteeing bid < price < ask for prices >= $1.
+    """
+    half_spread = price * spread_bps_for(ticker) / 2.0 / 10_000.0
+    bid = round(price - half_spread, 2)
+    ask = round(price + half_spread, 2)
+    rounded_price = round(price, 2)
+    if bid >= rounded_price:
+        bid = round(rounded_price - 0.01, 2)
+    if ask <= rounded_price:
+        ask = round(rounded_price + 0.01, 2)
+    return bid, ask
+
+
+def draw_volume() -> float:
+    """Per-tick traded volume: a lognormal draw (whole shares, > 0)."""
+    return float(max(1, round(random.lognormvariate(VOLUME_LOG_MEAN, VOLUME_LOG_SIGMA))))
 
 
 class GBMSimulator:
@@ -227,7 +273,7 @@ class SimulatorDataSource(MarketDataSource):
         for ticker in tickers:
             price = self._sim.get_price(ticker)
             if price is not None:
-                self._cache.update(ticker=ticker, price=price)
+                self._write_tick(ticker, price)
         self._task = asyncio.create_task(self._run_loop(), name="simulator-loop")
         logger.info("Simulator started with %d tickers", len(tickers))
 
@@ -249,7 +295,7 @@ class SimulatorDataSource(MarketDataSource):
             # GBM starting price (constant thereafter).
             price = self._sim.get_price(ticker)
             if price is not None:
-                self._cache.update(ticker=ticker, price=price)
+                self._write_tick(ticker, price)
             logger.info("Simulator: added ticker %s", ticker)
 
     async def remove_ticker(self, ticker: str) -> None:
@@ -261,6 +307,17 @@ class SimulatorDataSource(MarketDataSource):
     def get_tickers(self) -> list[str]:
         return self._sim.get_tickers() if self._sim else []
 
+    def _write_tick(self, ticker: str, price: float) -> None:
+        """Write one simulated tick (price + volume + bid/ask quote) to the cache."""
+        bid, ask = compute_quote(ticker, price)
+        self._cache.update(
+            ticker=ticker,
+            price=price,
+            volume=draw_volume(),
+            bid=bid,
+            ask=ask,
+        )
+
     async def _run_loop(self) -> None:
         """Core loop: step the simulation, write to cache, sleep."""
         while True:
@@ -268,7 +325,7 @@ class SimulatorDataSource(MarketDataSource):
                 if self._sim:
                     prices = self._sim.step()
                     for ticker, price in prices.items():
-                        self._cache.update(ticker=ticker, price=price)
+                        self._write_tick(ticker, price)
             except Exception:
                 logger.exception("Simulator step failed")
             await asyncio.sleep(self._interval)

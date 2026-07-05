@@ -100,6 +100,11 @@ async def lifespan(app: FastAPI):
     chat_router = create_chat_router(price_cache, db_path)
     app.include_router(chat_router)
 
+    # Market data router (history backfill)
+    from app.routes.market import create_market_router
+    market_router = create_market_router(price_cache)
+    app.include_router(market_router)
+
     # Mount static files LAST — must not shadow /api/* routes.
     _mount_static_files(app)
 

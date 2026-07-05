@@ -172,6 +172,88 @@ class TestExecuteTradeOnConnSuccessPaths:
         assert after < before
 
 
+class TestFillsAtBidAsk:
+    """Batch 2 §2.3: buys fill at the cached ask, sells at the cached bid."""
+
+    BID = 189.90
+    ASK = 190.10
+    LAST = 190.00
+
+    @pytest.fixture
+    def quoted_cache(self):
+        """Cache with a distinct bid/ask around the last price for AAPL."""
+        cache = PriceCache()
+        cache.update("AAPL", self.LAST, bid=self.BID, ask=self.ASK)
+        return cache
+
+    def test_buy_fills_at_ask(self, fresh_db, quoted_cache):
+        from app.routes.portfolio import execute_trade_on_conn
+        result = execute_trade_on_conn(fresh_db, quoted_cache, "AAPL", "buy", 2.0)
+        assert result["status"] == "executed"
+        assert result["price"] == self.ASK
+
+        # Cash debit, position avg_cost, and trade log all use the ask
+        cash = fresh_db.execute(
+            "SELECT cash_balance FROM users_profile WHERE id = 'default'"
+        ).fetchone()["cash_balance"]
+        assert cash == pytest.approx(10_000.0 - 2.0 * self.ASK)
+        pos = fresh_db.execute(
+            "SELECT avg_cost FROM positions WHERE user_id = 'default' AND ticker = 'AAPL'"
+        ).fetchone()
+        assert pos["avg_cost"] == self.ASK
+        trade = fresh_db.execute(
+            "SELECT price FROM trades WHERE user_id = 'default' AND ticker = 'AAPL'"
+        ).fetchone()
+        assert trade["price"] == self.ASK
+
+    def test_sell_fills_at_bid(self, fresh_db, quoted_cache):
+        from app.routes.portfolio import execute_trade_on_conn
+        buy = execute_trade_on_conn(fresh_db, quoted_cache, "AAPL", "buy", 2.0)
+        assert buy["status"] == "executed"
+
+        sell = execute_trade_on_conn(fresh_db, quoted_cache, "AAPL", "sell", 1.0)
+        assert sell["status"] == "executed"
+        assert sell["price"] == self.BID
+
+        cash = fresh_db.execute(
+            "SELECT cash_balance FROM users_profile WHERE id = 'default'"
+        ).fetchone()["cash_balance"]
+        assert cash == pytest.approx(10_000.0 - 2.0 * self.ASK + 1.0 * self.BID)
+
+    def test_fallback_to_price_when_bid_equals_ask(self, fresh_db):
+        """bid == ask (zero spread / defaulted quote) fills at the last price."""
+        from app.routes.portfolio import execute_trade_on_conn
+        cache = PriceCache()
+        cache.update("AAPL", 190.00)  # No quote → bid = ask = price
+        result = execute_trade_on_conn(fresh_db, cache, "AAPL", "buy", 1.0)
+        assert result["status"] == "executed"
+        assert result["price"] == 190.00
+
+    def test_insufficient_cash_checked_against_ask(self, fresh_db):
+        """A buy affordable at the last price but not at the ask must fail."""
+        from app.routes.portfolio import execute_trade_on_conn
+        cache = PriceCache()
+        # 100 shares * $100.00 = exactly $10,000 — affordable at the price,
+        # but the ask ($100.50) puts the cost at $10,050.
+        cache.update("AAPL", 100.00, bid=99.50, ask=100.50)
+        result = execute_trade_on_conn(fresh_db, cache, "AAPL", "buy", 100.0)
+        assert result["status"] == "failed"
+        assert result["error"] == "Insufficient cash"
+
+    def test_insufficient_shares_still_validated(self, fresh_db, quoted_cache):
+        from app.routes.portfolio import execute_trade_on_conn
+        result = execute_trade_on_conn(fresh_db, quoted_cache, "AAPL", "sell", 1.0)
+        assert result["status"] == "failed"
+        assert result["error"] == "Insufficient shares to sell"
+
+    def test_ticker_not_in_cache_unchanged(self, fresh_db, empty_cache):
+        """The 'Ticker not found in price cache' path is untouched."""
+        from app.routes.portfolio import execute_trade_on_conn
+        result = execute_trade_on_conn(fresh_db, empty_cache, "AAPL", "buy", 1.0)
+        assert result["status"] == "failed"
+        assert "Ticker not found in price cache" in result["error"]
+
+
 class TestSellAtALossAccounting:
     """Spec §12 edge case: selling at a loss must realize the loss exactly."""
 

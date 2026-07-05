@@ -15,11 +15,14 @@ def _make_snapshot(
     prev_close: float | None = None,
     day_high: float | None = None,
     day_low: float | None = None,
+    day_volume: float | None = None,
+    bid: float | None = None,
+    ask: float | None = None,
 ) -> MagicMock:
     """Create a mock Massive snapshot object.
 
-    prev_day/day default to None (absent in the API response) so tests
-    exercise the fallback path unless values are provided explicitly.
+    prev_day/day/last_quote default to None (absent in the API response) so
+    tests exercise the fallback paths unless values are provided explicitly.
     """
     snap = MagicMock()
     snap.ticker = ticker
@@ -28,13 +31,19 @@ def _make_snapshot(
     snap.last_trade.timestamp = timestamp_ms
     snap.prev_day = None
     snap.day = None
+    snap.last_quote = None
     if prev_close is not None:
         snap.prev_day = MagicMock()
         snap.prev_day.close = prev_close
-    if day_high is not None or day_low is not None:
+    if day_high is not None or day_low is not None or day_volume is not None:
         snap.day = MagicMock()
         snap.day.high = day_high
         snap.day.low = day_low
+        snap.day.volume = day_volume
+    if bid is not None or ask is not None:
+        snap.last_quote = MagicMock()
+        snap.last_quote.bid_price = bid
+        snap.last_quote.ask_price = ask
     return snap
 
 
@@ -311,3 +320,107 @@ class TestMassiveDataSource:
         update = cache.get("NVDA")
         assert update is not None
         assert update.prev_close == 805.00
+
+
+@pytest.mark.asyncio
+class TestMassiveQuoteAndVolume:
+    """Batch 2: lastQuote bid/ask mapping and day-volume deltas."""
+
+    @staticmethod
+    def _make_source() -> tuple[PriceCache, MassiveDataSource]:
+        cache = PriceCache()
+        source = MassiveDataSource(api_key="test-key", price_cache=cache, poll_interval=60.0)
+        source._tickers = ["AAPL"]
+        source._client = MagicMock()
+        return cache, source
+
+    @staticmethod
+    async def _poll(source: MassiveDataSource, snapshots: list) -> None:
+        with patch.object(source, "_fetch_snapshots", return_value=snapshots):
+            await source._poll_once()
+
+    async def test_last_quote_bid_ask_mapped(self):
+        """lastQuote.p / lastQuote.P become bid / ask."""
+        cache, source = self._make_source()
+        snap = _make_snapshot("AAPL", 190.50, 1707580800000, bid=190.45, ask=190.55)
+        await self._poll(source, [snap])
+
+        update = cache.get("AAPL")
+        assert update.bid == 190.45
+        assert update.ask == 190.55
+
+    async def test_absent_quote_falls_back_to_price(self):
+        """No lastQuote → bid = ask = price (zero spread)."""
+        cache, source = self._make_source()
+        snap = _make_snapshot("AAPL", 190.50, 1707580800000)
+        await self._poll(source, [snap])
+
+        update = cache.get("AAPL")
+        assert update.bid == 190.50
+        assert update.ask == 190.50
+
+    async def test_non_positive_quote_falls_back_to_price(self):
+        """Zero/negative quote sides are ignored in favor of the price."""
+        cache, source = self._make_source()
+        snap = _make_snapshot("AAPL", 190.50, 1707580800000, bid=0.0, ask=-1.0)
+        await self._poll(source, [snap])
+
+        update = cache.get("AAPL")
+        assert update.bid == 190.50
+        assert update.ask == 190.50
+
+    async def test_day_volume_delta_across_two_polls(self):
+        """Volume is the delta of cumulative day.v between consecutive polls."""
+        cache, source = self._make_source()
+        await self._poll(
+            source, [_make_snapshot("AAPL", 190.00, 1707580800000, day_volume=10_000.0)]
+        )
+        # First poll: no previous cumulative to diff against
+        assert cache.get("AAPL").volume == 0.0
+
+        await self._poll(
+            source, [_make_snapshot("AAPL", 190.50, 1707580815000, day_volume=12_500.0)]
+        )
+        assert cache.get("AAPL").volume == 2_500.0
+
+    async def test_day_volume_decrease_clamped_to_zero(self):
+        """A cumulative decrease (session reset) clamps the delta at 0."""
+        cache, source = self._make_source()
+        await self._poll(
+            source, [_make_snapshot("AAPL", 190.00, 1707580800000, day_volume=10_000.0)]
+        )
+        await self._poll(
+            source, [_make_snapshot("AAPL", 190.50, 1707580815000, day_volume=4_000.0)]
+        )
+        assert cache.get("AAPL").volume == 0.0
+
+        # The lower cumulative becomes the new baseline
+        await self._poll(
+            source, [_make_snapshot("AAPL", 191.00, 1707580830000, day_volume=4_300.0)]
+        )
+        assert cache.get("AAPL").volume == 300.0
+
+    async def test_absent_day_volume_yields_zero(self):
+        """Snapshots without day.v report volume 0.0 (and bid=ask=price)."""
+        cache, source = self._make_source()
+        snap = _make_snapshot("AAPL", 190.50, 1707580800000)
+        await self._poll(source, [snap])
+
+        update = cache.get("AAPL")
+        assert update.volume == 0.0
+        assert update.bid == update.ask == 190.50
+
+    async def test_remove_ticker_resets_volume_baseline(self):
+        """Removing a ticker clears its cumulative-volume baseline."""
+        cache, source = self._make_source()
+        await self._poll(
+            source, [_make_snapshot("AAPL", 190.00, 1707580800000, day_volume=10_000.0)]
+        )
+        await source.remove_ticker("AAPL")
+
+        source._tickers = ["AAPL"]
+        await self._poll(
+            source, [_make_snapshot("AAPL", 190.50, 1707580815000, day_volume=12_000.0)]
+        )
+        # Treated as a first poll again — no delta
+        assert cache.get("AAPL").volume == 0.0

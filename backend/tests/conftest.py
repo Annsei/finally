@@ -78,6 +78,7 @@ async def app_client(tmp_path, monkeypatch, fake_market_source):
     from app.market import PriceCache, create_stream_router
     from app.market.seed_prices import SEED_PRICES
     from app.routes.health import router as health_router
+    from app.routes.market import create_market_router
     from app.routes.portfolio import create_portfolio_router
     from app.routes.watchlist import create_watchlist_router
 
@@ -98,6 +99,7 @@ async def app_client(tmp_path, monkeypatch, fake_market_source):
     test_app.include_router(create_stream_router(price_cache))
     test_app.include_router(create_portfolio_router(price_cache, db_file))
     test_app.include_router(create_watchlist_router(price_cache, db_file))
+    test_app.include_router(create_market_router(price_cache))
 
     async with AsyncClient(transport=ASGITransport(app=test_app), base_url="http://test") as client:
         yield client

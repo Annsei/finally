@@ -191,3 +191,70 @@ class TestSimulatorDataSource:
         # Just verify it starts and stops cleanly
         await asyncio.sleep(0.2)
         await source.stop()
+
+    async def test_ticks_carry_positive_varying_volume(self):
+        """Every simulated tick has volume > 0, and volume varies tick to tick."""
+        cache = PriceCache()
+        source = SimulatorDataSource(price_cache=cache, update_interval=0.02)
+        await source.start(["AAPL"])
+
+        volumes: list[float] = []
+        for _ in range(10):
+            await asyncio.sleep(0.03)
+            update = cache.get("AAPL")
+            assert update.volume > 0
+            volumes.append(update.volume)
+
+        assert len(set(volumes)) > 1  # Lognormal draws vary
+        await source.stop()
+
+    async def test_bid_price_ask_ordering_with_1_to_5_bp_spread(self):
+        """bid < price < ask and the quoted spread is within 1-5 bp (+rounding)."""
+        cache = PriceCache()
+        source = SimulatorDataSource(price_cache=cache, update_interval=0.02)
+        await source.start(["AAPL", "GOOGL"])
+        await asyncio.sleep(0.1)
+
+        for ticker in ("AAPL", "GOOGL"):
+            update = cache.get(ticker)
+            assert update.bid < update.price < update.ask
+            measured_bps = (update.ask - update.bid) / update.price * 10_000
+            # Rounding to cents can shift each side by up to a cent
+            slop_bps = 2 * 0.01 / update.price * 10_000
+            assert 1 - slop_bps <= measured_bps <= 5 + slop_bps
+
+        await source.stop()
+
+    async def test_spread_stable_per_ticker(self):
+        """A ticker's quoted spread (in bp) stays fixed across ticks."""
+        from app.market.simulator import spread_bps_for
+
+        cache = PriceCache()
+        source = SimulatorDataSource(price_cache=cache, update_interval=0.02)
+        await source.start(["AAPL"])
+
+        expected_bps = spread_bps_for("AAPL")
+        for _ in range(5):
+            await asyncio.sleep(0.04)
+            update = cache.get("AAPL")
+            measured_bps = (update.ask - update.bid) / update.price * 10_000
+            slop_bps = 2 * 0.01 / update.price * 10_000
+            assert abs(measured_bps - expected_bps) <= slop_bps
+
+        await source.stop()
+
+    async def test_ticks_populate_history_buffer(self):
+        """Simulator ticks flow into the cache's OHLCV ring buffer."""
+        cache = PriceCache()
+        source = SimulatorDataSource(price_cache=cache, update_interval=0.02)
+        await source.start(["AAPL"])
+        await asyncio.sleep(0.1)
+
+        bars = cache.get_history("AAPL")
+        assert len(bars) >= 1
+        bar = bars[-1]
+        assert bar["low"] <= bar["open"] <= bar["high"]
+        assert bar["low"] <= bar["close"] <= bar["high"]
+        assert bar["volume"] > 0
+
+        await source.stop()

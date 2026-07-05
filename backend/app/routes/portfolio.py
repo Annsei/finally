@@ -93,6 +93,10 @@ def execute_trade_on_conn(
         side: "buy" or "sell" (normalized to lowercase internally).
         quantity: Number of shares to trade (must be > 0).
 
+    Fill price: buys fill at the cached ask, sells at the cached bid, falling
+    back to the last price when bid/ask are absent or equal (zero spread).
+    The "price" in the returned dict and the trades table is that fill price.
+
     Returns:
         On success: {"status": "executed", "ticker", "side", "quantity", "price", "trade_id"}
         On failure: {"status": "failed", "ticker", "error"}
@@ -101,8 +105,8 @@ def execute_trade_on_conn(
     side = side.lower()
 
     # Validate price availability
-    current_price = price_cache.get_price(ticker)
-    if current_price is None:
+    quote = price_cache.get(ticker)
+    if quote is None:
         return {"status": "failed", "ticker": ticker, "error": "Ticker not found in price cache"}
 
     # Validate side
@@ -112,6 +116,13 @@ def execute_trade_on_conn(
     # Validate quantity
     if quantity <= 0:
         return {"status": "failed", "ticker": ticker, "error": "Quantity must be greater than 0"}
+
+    # Fill at the quote: buy at ask, sell at bid. When the source supplies no
+    # quote, bid == ask == price (model default) and the fill is at the price.
+    if quote.bid is not None and quote.ask is not None and quote.bid != quote.ask:
+        current_price = quote.ask if side == "buy" else quote.bid
+    else:
+        current_price = quote.price
 
     # Serialize the cash/shares check with the subsequent debit/credit by taking
     # SQLite's write lock up front (TOCTOU protection). Skipped when the caller

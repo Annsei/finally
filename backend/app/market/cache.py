@@ -3,22 +3,32 @@
 from __future__ import annotations
 
 import time
+from collections import deque
 from threading import Lock
 
 from .models import PriceUpdate
+
+# ~2 hours of 1-second bars per ticker.
+DEFAULT_HISTORY_CAPACITY = 7200
 
 
 class PriceCache:
     """Thread-safe in-memory cache of the latest price for each ticker.
 
     Writers: SimulatorDataSource or MassiveDataSource (one at a time).
-    Readers: SSE streaming endpoint, portfolio valuation, trade execution.
+    Readers: SSE streaming endpoint, portfolio valuation, trade execution,
+    and the market history endpoint (1-second OHLCV ring buffer).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, history_capacity: int = DEFAULT_HISTORY_CAPACITY) -> None:
         self._prices: dict[str, PriceUpdate] = {}
         self._lock = Lock()
         self._version: int = 0  # Monotonically increasing; bumped on every update
+        self._history_capacity = history_capacity
+        # Per-ticker ring buffer of 1-second OHLCV bars, ascending by time.
+        # Bars are plain dicts (time/open/high/low/close/volume) so the
+        # history endpoint can serialize them directly.
+        self._bars: dict[str, deque[dict]] = {}
 
     def update(
         self,
@@ -28,6 +38,9 @@ class PriceCache:
         prev_close: float | None = None,
         day_high: float | None = None,
         day_low: float | None = None,
+        volume: float = 0.0,
+        bid: float | None = None,
+        ask: float | None = None,
     ) -> PriceUpdate:
         """Record a new price for a ticker. Returns the created PriceUpdate.
 
@@ -42,12 +55,24 @@ class PriceCache:
             price the GBM walk starts from, written by start()/add_ticker()).
           - day_high / day_low: running session extremes, initialized to the
             first price and updated on every tick.
+
+        Quote/volume fields:
+          - volume: volume traded since the previous update (clamped >= 0;
+            defaults to 0.0 when the source supplies none).
+          - bid / ask: best bid/ask; when omitted they default to the price
+            (zero spread), preserving pre-quote behavior for test fakes.
+
+        Every update also feeds the ticker's 1-second OHLCV ring buffer:
+        updates in the same Unix second merge into one bar, a new second
+        appends a bar, and updates older than the newest bar are ignored
+        (for the buffer only — the latest-price record still updates).
         """
         with self._lock:
             ts = timestamp if timestamp is not None else time.time()
             prev = self._prices.get(ticker)
             previous_price = prev.price if prev else price
             rounded_price = round(price, 2)
+            tick_volume = max(0.0, float(volume))
 
             if prev_close is not None:
                 session_prev_close = round(prev_close, 2)
@@ -78,10 +103,63 @@ class PriceCache:
                 prev_close=session_prev_close,
                 day_high=session_high,
                 day_low=session_low,
+                volume=tick_volume,
+                bid=round(bid, 2) if bid is not None else None,
+                ask=round(ask, 2) if ask is not None else None,
             )
             self._prices[ticker] = update
             self._version += 1
+            self._record_bar(ticker, rounded_price, ts, tick_volume)
             return update
+
+    def _record_bar(self, ticker: str, price: float, ts: float, volume: float) -> None:
+        """Merge a tick into the ticker's 1-second OHLCV ring buffer.
+
+        Must be called with self._lock held.
+        """
+        bucket = int(ts)
+        bars = self._bars.get(ticker)
+        if bars is None:
+            bars = deque(maxlen=self._history_capacity)
+            self._bars[ticker] = bars
+
+        if bars:
+            newest = bars[-1]
+            if bucket < newest["time"]:
+                return  # Older than the newest bar — ignore (buffer only)
+            if bucket == newest["time"]:
+                newest["high"] = max(newest["high"], price)
+                newest["low"] = min(newest["low"], price)
+                newest["close"] = price
+                newest["volume"] += volume
+                return
+
+        bars.append(
+            {
+                "time": bucket,
+                "open": price,
+                "high": price,
+                "low": price,
+                "close": price,
+                "volume": volume,
+            }
+        )
+
+    def get_history(self, ticker: str, limit: int | None = None) -> list[dict]:
+        """Return the ticker's 1-second OHLCV bars, ascending by time.
+
+        At most ``limit`` most-recent bars when limit is given. Unknown
+        tickers return an empty list. Bars are returned as copies so callers
+        can't mutate the ring buffer.
+        """
+        with self._lock:
+            bars = self._bars.get(ticker)
+            if not bars:
+                return []
+            items = list(bars)
+            if limit is not None:
+                items = items[-limit:]
+            return [dict(bar) for bar in items]
 
     def get(self, ticker: str) -> PriceUpdate | None:
         """Get the latest price for a single ticker, or None if unknown."""
@@ -99,9 +177,13 @@ class PriceCache:
         return update.price if update else None
 
     def remove(self, ticker: str) -> None:
-        """Remove a ticker from the cache (e.g., when removed from watchlist)."""
+        """Remove a ticker from the cache (e.g., when removed from watchlist).
+
+        Also clears the ticker's OHLCV history ring buffer.
+        """
         with self._lock:
             self._prices.pop(ticker, None)
+            self._bars.pop(ticker, None)
 
     @property
     def version(self) -> int:
