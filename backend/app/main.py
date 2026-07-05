@@ -90,6 +90,11 @@ async def lifespan(app: FastAPI):
     portfolio_router = create_portfolio_router(price_cache, db_path)
     app.include_router(portfolio_router)
 
+    # Limit orders router
+    from app.routes.orders import create_orders_router, orders_fill_loop
+    orders_router = create_orders_router(price_cache, db_path)
+    app.include_router(orders_router)
+
     # Watchlist router
     from app.routes.watchlist import create_watchlist_router
     watchlist_router = create_watchlist_router(price_cache, db_path)
@@ -113,14 +118,20 @@ async def lifespan(app: FastAPI):
     app.state.snapshot_task = snapshot_task
     logger.info("FinAlly startup: portfolio snapshot background task started")
 
+    # Start background limit-order fill task (every ~1 second)
+    orders_fill_task = asyncio.create_task(orders_fill_loop(price_cache, db_path))
+    app.state.orders_fill_task = orders_fill_task
+    logger.info("FinAlly startup: limit-order fill background task started")
+
     yield
 
-    logger.info("FinAlly shutdown: cancelling snapshot task")
-    snapshot_task.cancel()
-    try:
-        await snapshot_task
-    except asyncio.CancelledError:
-        pass
+    logger.info("FinAlly shutdown: cancelling background tasks")
+    for task in (snapshot_task, orders_fill_task):
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
     logger.info("FinAlly shutdown: stopping market data source")
     await source.stop()

@@ -58,10 +58,33 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     created_at TEXT NOT NULL
 );
 
+-- Limit orders: resting orders filled by the background fill loop when the
+-- market crosses the limit price. status is one of 'open', 'filled',
+-- 'cancelled', 'rejected'. init_db() executes this script on every startup
+-- (even for pre-existing database files), so old deployments pick this table
+-- up idempotently via IF NOT EXISTS.
+CREATE TABLE IF NOT EXISTS orders (
+    id            TEXT PRIMARY KEY,
+    user_id       TEXT NOT NULL DEFAULT 'default',
+    ticker        TEXT NOT NULL,
+    side          TEXT NOT NULL,
+    quantity      REAL NOT NULL,
+    limit_price   REAL NOT NULL,
+    status        TEXT NOT NULL DEFAULT 'open',
+    reject_reason TEXT,
+    created_at    TEXT NOT NULL,
+    filled_at     TEXT,
+    fill_price    REAL,
+    fill_trade_id TEXT
+);
+
 -- Indexes for the hot query paths (chat history and P&L chart both filter by
--- user_id and order by timestamp). init_db() executes this script on every
+-- user_id and order by timestamp; the fill loop scans open orders every
+-- second). init_db() executes this script on every
 -- startup, so existing databases pick these up idempotently via IF NOT EXISTS.
 CREATE INDEX IF NOT EXISTS idx_chat_messages_user_created
     ON chat_messages (user_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_portfolio_snapshots_user_recorded
     ON portfolio_snapshots (user_id, recorded_at);
+CREATE INDEX IF NOT EXISTS idx_orders_user_status
+    ON orders (user_id, status);
