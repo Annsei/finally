@@ -27,11 +27,12 @@ export default function Dashboard() {
   // SWR for portfolio (bound mutate passed to TradeBar + ChatPanel for revalidation)
   const { mutate: mutatePortfolio } = useSWR<PortfolioResponse>('/api/portfolio/', fetcher);
 
-  // Global mutate — refreshes the Orders blotter after any trade
+  // Global mutate — refreshes the fills blotter and open orders after any trade
   const { mutate: globalMutate } = useSWRConfig();
   const refreshAfterTrade = () => {
     void mutatePortfolio();
     void globalMutate('/api/portfolio/trades');
+    void globalMutate('/api/portfolio/orders?status=open');
   };
 
   // SWR for watchlist (needed for auto-select D-03; mutate revalidates after AI watchlist changes)

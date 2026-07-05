@@ -1,14 +1,23 @@
 /**
- * PortfolioTabs.tsx — Positions | Orders tab strip (FRONTEND_REALISM.md §1.3)
+ * PortfolioTabs.tsx — Positions | Orders | Fills tab strip
+ * (FRONTEND_REALISM.md §1.3/§3.2)
  *
  * Positions stays the default tab so the existing E2E data-testid contract
- * (positions-table, position-row-<TICKER>) holds on page load.
+ * (positions-table, position-row-<TICKER>) holds on page load. Orders shows
+ * resting limit orders (cancellable); Fills is the executed-trade blotter.
  */
 import { useState } from 'react';
 import PositionsTable from './PositionsTable';
+import OpenOrdersTable from './OpenOrdersTable';
 import OrdersTable from './OrdersTable';
 
-type Tab = 'positions' | 'orders';
+type Tab = 'positions' | 'orders' | 'fills';
+
+const TABS: { key: Tab; label: string; testid: string }[] = [
+  { key: 'positions', label: 'Positions', testid: 'tab-positions' },
+  { key: 'orders', label: 'Orders', testid: 'tab-orders' },
+  { key: 'fills', label: 'Fills', testid: 'tab-fills' },
+];
 
 export default function PortfolioTabs() {
   const [tab, setTab] = useState<Tab>('positions');
@@ -23,24 +32,21 @@ export default function PortfolioTabs() {
   return (
     <div>
       <div className="flex border-b border-terminal-border">
-        <button
-          type="button"
-          data-testid="tab-positions"
-          className={tabClass('positions')}
-          onClick={() => setTab('positions')}
-        >
-          Positions
-        </button>
-        <button
-          type="button"
-          data-testid="tab-orders"
-          className={tabClass('orders')}
-          onClick={() => setTab('orders')}
-        >
-          Orders
-        </button>
+        {TABS.map((t) => (
+          <button
+            key={t.key}
+            type="button"
+            data-testid={t.testid}
+            className={tabClass(t.key)}
+            onClick={() => setTab(t.key)}
+          >
+            {t.label}
+          </button>
+        ))}
       </div>
-      {tab === 'positions' ? <PositionsTable /> : <OrdersTable />}
+      {tab === 'positions' && <PositionsTable />}
+      {tab === 'orders' && <OpenOrdersTable />}
+      {tab === 'fills' && <OrdersTable />}
     </div>
   );
 }

@@ -297,6 +297,86 @@ describe('TradeBar', () => {
     expect(getByTestId('trade-bid-ask').textContent).toBe('Bid 189.98 × Ask 190.02');
   });
 
+  // ---------------------------------------------------------------------------
+  // Batch-3.2: limit orders
+  // ---------------------------------------------------------------------------
+  it('Test T-4-lmt: switching to Lmt reveals the limit price input; invalid limit blocks fetch', () => {
+    const { getByTestId, getByLabelText, getByText, queryByLabelText } = render(
+      <TradeBar selectedTicker="AAPL" />
+    );
+
+    expect(queryByLabelText('Limit price')).toBeNull();
+    fireEvent.click(getByTestId('order-type-limit'));
+    expect(getByLabelText('Limit price')).toBeTruthy();
+
+    fireEvent.change(getByLabelText('Qty'), { target: { value: '5' } });
+    fireEvent.click(getByText('Buy'));
+
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(getByText('Enter a valid limit price.')).toBeTruthy();
+  });
+
+  it('Test T-4-lmt-open: a resting limit order POSTs to /api/portfolio/orders and toasts placement', async () => {
+    (global.fetch as jest.Mock).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        order: {
+          id: 'o1', ticker: 'AAPL', side: 'buy', quantity: 5, limit_price: 185,
+          status: 'open', reject_reason: null, created_at: '2026-07-06T00:00:00Z',
+          filled_at: null, fill_price: null,
+        },
+      }),
+    });
+
+    const { getByTestId, getByLabelText, getByText } = render(<TradeBar selectedTicker="AAPL" />);
+
+    fireEvent.click(getByTestId('order-type-limit'));
+    fireEvent.change(getByLabelText('Qty'), { target: { value: '5' } });
+    fireEvent.change(getByLabelText('Limit price'), { target: { value: '185' } });
+
+    await act(async () => {
+      fireEvent.click(getByText('Buy'));
+    });
+
+    expect(global.fetch).toHaveBeenCalledWith(
+      '/api/portfolio/orders',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ ticker: 'AAPL', quantity: 5, side: 'buy', limit_price: 185 }),
+      })
+    );
+    await waitFor(() => {
+      expect(getByTestId('trade-toast').textContent).toContain('Order placed: Buy 5 AAPL @ ≤$185.00');
+    });
+  });
+
+  it('Test T-4-lmt-fill: an immediately-filled (marketable) limit order toasts the fill', async () => {
+    (global.fetch as jest.Mock).mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        order: {
+          id: 'o2', ticker: 'AAPL', side: 'sell', quantity: 3, limit_price: 150,
+          status: 'filled', reject_reason: null, created_at: '2026-07-06T00:00:00Z',
+          filled_at: '2026-07-06T00:00:00Z', fill_price: 189.95,
+        },
+      }),
+    });
+
+    const { getByTestId, getByLabelText, getByText } = render(<TradeBar selectedTicker="AAPL" />);
+
+    fireEvent.click(getByTestId('order-type-limit'));
+    fireEvent.change(getByLabelText('Qty'), { target: { value: '3' } });
+    fireEvent.change(getByLabelText('Limit price'), { target: { value: '150' } });
+
+    await act(async () => {
+      fireEvent.click(getByText('Sell'));
+    });
+
+    await waitFor(() => {
+      expect(getByTestId('trade-toast').textContent).toContain('Sold 3 AAPL @ $189.95');
+    });
+  });
+
   it('Test T-4-toast: successful fill shows a toast with side, qty, ticker and price', async () => {
     (global.fetch as jest.Mock).mockImplementation(async (url: string) => {
       if (url === '/api/portfolio/trade') {

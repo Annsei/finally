@@ -98,13 +98,16 @@ describe('PortfolioTabs', () => {
     mockUseSWR.mockReturnValue({ data: undefined } as any);
   });
 
-  it('Test 4: defaults to Positions and switches to Orders on click', () => {
+  it('Test 4: defaults to Positions and switches between Orders (open) and Fills (blotter)', () => {
     render(<PortfolioTabs />);
 
     // Positions tab content is the default (E2E data-testid contract)
     expect(screen.getByText(/No positions yet/i)).toBeInTheDocument();
 
     fireEvent.click(screen.getByTestId('tab-orders'));
+    expect(screen.getByText(/No open orders/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId('tab-fills'));
     expect(screen.getByText(/No trades yet/i)).toBeInTheDocument();
 
     fireEvent.click(screen.getByTestId('tab-positions'));

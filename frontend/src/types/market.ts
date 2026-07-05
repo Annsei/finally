@@ -91,6 +91,30 @@ export interface MarketEventsResponse {
   events: MarketEvent[];
 }
 
+// Limit orders (POST/GET /api/portfolio/orders, DELETE /api/portfolio/orders/{id}):
+export type OrderStatus = 'open' | 'filled' | 'cancelled' | 'rejected';
+
+export interface LimitOrder {
+  id: string;
+  ticker: string;
+  side: 'buy' | 'sell';
+  quantity: number;
+  limit_price: number;
+  status: OrderStatus;
+  reject_reason: string | null;
+  created_at: string;      // ISO timestamp string
+  filled_at: string | null;
+  fill_price: number | null;
+}
+
+export interface OrdersResponse {
+  orders: LimitOrder[];
+}
+
+export interface OrderPostResponse {
+  order: LimitOrder;
+}
+
 // GET /api/portfolio/trades response (newest first):
 export interface TradeRecord {
   id: string;

@@ -1,21 +1,16 @@
 /**
- * TradeBar.tsx — Manual trade entry form (FE-13, Batch-1 realism upgrade)
+ * TradeBar.tsx — order ticket (FE-13; realism Batches 1-3)
  *
- * Inputs:
- *   - Ticker text input (auto-filled from selectedTicker prop via useEffect)
- *   - Qty number input
- *   - Buy button (green #22c55e)
- *   - Sell button (red #ef4444)
+ * Order types (FRONTEND_REALISM.md §3.2):
+ *   - Market: POST /api/portfolio/trade — instant fill at ask (buy) / bid (sell)
+ *   - Limit:  POST /api/portfolio/orders — marketable limits fill immediately,
+ *     otherwise the order rests and the backend fill loop executes it when the
+ *     quote crosses the limit; open orders appear in the Orders tab.
  *
- * Realism affordances (FRONTEND_REALISM.md §1.2):
- *   - Live estimated notional (qty × live price) while typing
- *   - Max-buyable (cash ÷ price) and held quantity, clickable to fill qty
- *   - Fill toast ("Bought 5 AAPL @ $190.02") after execution
- *
- * Trade execution:
- *   - Client-side validation before any network call (T-4-01, T-4-03)
- *   - POST /api/portfolio/trade with optimistic SWR mutate
- *   - Inline error display below inputs (D-14)
+ * Realism affordances (§1.2/§2.3):
+ *   - Live estimated notional (limit price when set, else live price)
+ *   - Live Bid × Ask; "Max buy" sized against the ask (or the limit in limit mode)
+ *   - Held quantity shortcut; fill/placement toast
  *
  * SWR key '/api/portfolio/' — exact match with Header.tsx so a trade
  * revalidates the header cash/portfolio total at the same time.
@@ -24,7 +19,7 @@
 
 import { useState, useEffect, useRef } from 'react';
 import useSWR from 'swr';
-import type { PortfolioResponse } from '@/types/market';
+import type { PortfolioResponse, OrderPostResponse } from '@/types/market';
 import { fetcher } from '@/lib/fetcher';
 import { formatQuantity } from '@/lib/format';
 import { usePriceStore, useTicker } from '@/stores/priceStore';
@@ -41,9 +36,13 @@ interface TradeFill {
   price: number;
 }
 
+type OrderType = 'market' | 'limit';
+
 export default function TradeBar({ selectedTicker, onTradeComplete }: TradeBarProps) {
+  const [orderType, setOrderType] = useState<OrderType>('market');
   const [ticker, setTicker] = useState('');
   const [qty, setQty] = useState('');
+  const [limitPrice, setLimitPrice] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
@@ -73,80 +72,131 @@ export default function TradeBar({ selectedTicker, onTradeComplete }: TradeBarPr
   const livePrice = liveUpdate?.price ?? position?.current_price ?? null;
   const qtyNum = Number(qty);
   const qtyValid = isFinite(qtyNum) && qtyNum > 0;
-  const estimate = livePrice != null && qtyValid ? qtyNum * livePrice : null;
-  // Buys fill at the ask — size the max-buy shortcut against it when quoted
-  const askPrice = liveUpdate?.ask ?? livePrice;
+  const limitNum = Number(limitPrice);
+  const limitValid = isFinite(limitNum) && limitNum > 0;
+
+  // In limit mode a valid limit price is the basis for cost math
+  const basisPrice = orderType === 'limit' && limitValid ? limitNum : livePrice;
+  const estimate = basisPrice != null && qtyValid ? qtyNum * basisPrice : null;
+  // Buys fill at the ask — size the max-buy shortcut against it (or the limit)
+  const askPrice =
+    orderType === 'limit' && limitValid ? limitNum : (liveUpdate?.ask ?? livePrice);
   const maxBuy =
     askPrice != null && askPrice > 0 && portfolio
       ? Math.floor((portfolio.cash / askPrice) * 10000) / 10000
       : null;
   const held = position?.quantity ?? null;
 
+  const validateCommon = (side: 'buy' | 'sell'): boolean => {
+    void side;
+    if (!normalizedTicker || !/^[A-Z]+$/.test(normalizedTicker)) {
+      setError('Enter a valid ticker and quantity.');
+      return false;
+    }
+    if (!qtyValid) {
+      setError('Enter a valid ticker and quantity.');
+      return false;
+    }
+    if (orderType === 'limit' && !limitValid) {
+      setError('Enter a valid limit price.');
+      return false;
+    }
+    return true;
+  };
+
+  const placeLimitOrder = async (side: 'buy' | 'sell') => {
+    const res = await fetch('/api/portfolio/orders', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ticker: normalizedTicker,
+        quantity: qtyNum,
+        side,
+        limit_price: limitNum,
+      }),
+    });
+    if (!res.ok) {
+      const data = await res.json();
+      throw new Error(data.error ?? 'Order failed');
+    }
+    const { order } = (await res.json()) as OrderPostResponse;
+    if (order.status === 'filled' && order.fill_price != null) {
+      setToast(
+        `${side === 'buy' ? 'Bought' : 'Sold'} ${formatQuantity(order.quantity)} ${order.ticker} @ $${order.fill_price.toFixed(2)}`
+      );
+      await mutate(); // filled immediately — refresh cash/positions
+    } else {
+      setToast(
+        `Order placed: ${side === 'buy' ? 'Buy' : 'Sell'} ${formatQuantity(order.quantity)} ${order.ticker} @ ${side === 'buy' ? '≤' : '≥'}$${order.limit_price.toFixed(2)}`
+      );
+    }
+  };
+
+  const executeMarketOrder = async (side: 'buy' | 'sell') => {
+    let fill: TradeFill | null = null;
+    await mutate(
+      async () => {
+        const res = await fetch('/api/portfolio/trade', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            ticker: normalizedTicker,
+            quantity: Number(qty),
+            side,
+          }),
+        });
+        if (!res.ok) {
+          const data = await res.json();
+          throw new Error(data.error ?? 'Trade failed');
+        }
+        fill = (await res.json()) as TradeFill;
+        // Return a FRESH snapshot: the committed cache passed in here is the
+        // pre-optimistic value, so returning it would revert the optimistic
+        // update and flash stale cash until revalidation.
+        return await fetcher('/api/portfolio/');
+      },
+      {
+        optimisticData: portfolio
+          ? (current) => {
+              const base = current ?? portfolio;
+              // Look up price from current positions or fall back to Zustand price store
+              const price =
+                base.positions.find((p) => p.ticker === normalizedTicker)?.current_price ??
+                usePriceStore.getState().prices[normalizedTicker]?.price ??
+                0;
+              const cost = Number(qty) * price;
+              return {
+                ...base,
+                cash: base.cash + (side === 'sell' ? cost : -cost),
+              };
+            }
+          : undefined,
+        rollbackOnError: true,
+        // The mutator already returns a fresh post-trade snapshot
+        revalidate: false,
+      }
+    );
+    if (fill) {
+      const f: TradeFill = fill;
+      setToast(
+        `${f.side === 'buy' ? 'Bought' : 'Sold'} ${formatQuantity(f.quantity)} ${f.ticker} @ $${f.price.toFixed(2)}`
+      );
+    }
+  };
+
   const handleTrade = async (side: 'buy' | 'sell') => {
     // Clear prior error on each new attempt (D-14)
     setError(null);
 
     // Client-side validation BEFORE any network call (T-4-01, T-4-03)
-    const trimmedTicker = normalizedTicker;
-    if (!trimmedTicker || !/^[A-Z]+$/.test(trimmedTicker)) {
-      setError('Enter a valid ticker and quantity.');
-      return;
-    }
-    if (!qtyValid) {
-      setError('Enter a valid ticker and quantity.');
-      return;
-    }
+    if (!validateCommon(side)) return;
 
     setPending(true);
-    let fill: TradeFill | null = null;
     try {
-      await mutate(
-        async () => {
-          const res = await fetch('/api/portfolio/trade', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              ticker: trimmedTicker,
-              quantity: Number(qty),
-              side,
-            }),
-          });
-          if (!res.ok) {
-            const data = await res.json();
-            throw new Error(data.error ?? 'Trade failed');
-          }
-          fill = (await res.json()) as TradeFill;
-          // Return a FRESH snapshot: the committed cache passed in here is the
-          // pre-optimistic value, so returning it would revert the optimistic
-          // update and flash stale cash until revalidation.
-          return await fetcher('/api/portfolio/');
-        },
-        {
-          optimisticData: portfolio
-            ? (current) => {
-                const base = current ?? portfolio;
-                // Look up price from current positions or fall back to Zustand price store
-                const price =
-                  base.positions.find((p) => p.ticker === trimmedTicker)?.current_price ??
-                  usePriceStore.getState().prices[trimmedTicker]?.price ??
-                  0;
-                const cost = Number(qty) * price;
-                return {
-                  ...base,
-                  cash: base.cash + (side === 'sell' ? cost : -cost),
-                };
-              }
-            : undefined,
-          rollbackOnError: true,
-          // The mutator already returns a fresh post-trade snapshot
-          revalidate: false,
-        }
-      );
-      if (fill) {
-        const f: TradeFill = fill;
-        setToast(
-          `${f.side === 'buy' ? 'Bought' : 'Sold'} ${formatQuantity(f.quantity)} ${f.ticker} @ $${f.price.toFixed(2)}`
-        );
+      if (orderType === 'limit') {
+        await placeLimitOrder(side);
+      } else {
+        await executeMarketOrder(side);
       }
       onTradeComplete?.();
     } catch (e) {
@@ -156,9 +206,43 @@ export default function TradeBar({ selectedTicker, onTradeComplete }: TradeBarPr
     }
   };
 
+  const typeButtonClass = (t: OrderType) =>
+    `px-2 py-1.5 text-xs font-semibold rounded transition-colors ${
+      orderType === t
+        ? 'bg-terminal-bg text-terminal-text border border-terminal-blue'
+        : 'text-terminal-muted border border-terminal-border hover:text-terminal-text'
+    }`;
+
   return (
     <div className="p-3 bg-terminal-surface border-t border-terminal-border">
-      <div className="flex items-end gap-2">
+      <div className="flex items-end gap-2 flex-wrap">
+        {/* Order type — market or limit */}
+        <div className="flex flex-col gap-1">
+          <span className="text-xs font-semibold text-terminal-muted uppercase tracking-wider">
+            Type
+          </span>
+          <div className="flex gap-1">
+            <button
+              type="button"
+              data-testid="order-type-market"
+              onClick={() => setOrderType('market')}
+              disabled={pending}
+              className={typeButtonClass('market')}
+            >
+              Mkt
+            </button>
+            <button
+              type="button"
+              data-testid="order-type-limit"
+              onClick={() => setOrderType('limit')}
+              disabled={pending}
+              className={typeButtonClass('limit')}
+            >
+              Lmt
+            </button>
+          </div>
+        </div>
+
         {/* Ticker input */}
         <div className="flex flex-col gap-1">
           <label
@@ -202,6 +286,30 @@ export default function TradeBar({ selectedTicker, onTradeComplete }: TradeBarPr
           />
         </div>
 
+        {/* Limit price — only in limit mode */}
+        {orderType === 'limit' && (
+          <div className="flex flex-col gap-1">
+            <label
+              htmlFor="trade-limit-price"
+              className="text-xs font-semibold text-terminal-muted uppercase tracking-wider"
+            >
+              Limit $
+            </label>
+            <input
+              id="trade-limit-price"
+              aria-label="Limit price"
+              type="number"
+              value={limitPrice}
+              onChange={(e) => setLimitPrice(e.target.value)}
+              placeholder="0.00"
+              min="0"
+              step="any"
+              disabled={pending}
+              className="w-24 px-2 py-1.5 text-xs font-mono bg-terminal-bg border border-terminal-border text-terminal-text rounded focus:outline-none focus:border-terminal-blue tabular-nums placeholder:text-terminal-muted disabled:opacity-50"
+            />
+          </div>
+        )}
+
         {/* Buy button — green semantic (profit/long direction) */}
         <button
           data-testid="trade-buy-button"
@@ -224,7 +332,7 @@ export default function TradeBar({ selectedTicker, onTradeComplete }: TradeBarPr
           Sell
         </button>
 
-        {/* Live estimate row — notional preview, max-buy and held shortcuts */}
+        {/* Live estimate row — notional preview, quote, max-buy and held shortcuts */}
         <div
           data-testid="trade-estimate"
           className="flex items-baseline gap-3 pb-1.5 text-xs text-terminal-muted tabular-nums"

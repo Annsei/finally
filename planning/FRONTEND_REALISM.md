@@ -76,9 +76,17 @@ Implementation notes: PriceUpdate additionally carries `volume`, `bid`, `ask`
   `GET /api/market/events`; frontend renders a CSS-marquee NewsTicker under
   the header (5s polling); the newest 5 events are injected into the AI chat
   context so the assistant can reference them.
-- **3.2 Limit orders** (flagship, own phase — REMAINING): order-type selector,
-  pending orders panel, cancel; backend orders table + fill loop on price
-  cross + fill events.
+- **3.2 Limit orders** (DONE — 2026-07-06): orders table (idempotent
+  CREATE IF NOT EXISTS migration), POST/GET/DELETE /api/portfolio/orders,
+  marketable limits fill immediately at ask/bid, resting orders executed by a
+  1s asyncio fill loop (per-order transactions, reject-on-insufficient-funds,
+  cancel-vs-fill races serialized via BEGIN IMMEDIATE); frontend Mkt/Lmt
+  order-type toggle with limit-price input, Orders tab (3s polling, cancel ×),
+  Fills tab is the executed-trade blotter.
+
+**The roadmap is complete.** Remaining nice-to-haves parked: resizable panels,
+AI-placed limit orders (extend the chat structured-output schema), candlestick
+timeframes beyond 1m.
 - **3.3 Interaction polish** (DONE — 2026-07-06, except resizable panels):
   keyboard shortcuts (`/` focus search, ↑↓ watchlist navigation, B/S trade),
   ticker autocomplete via a shared 30-symbol datalist directory, bottom

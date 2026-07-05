@@ -15,7 +15,10 @@ function formatTime(iso: string): string {
 }
 
 export default function OrdersTable() {
-  const { data } = useSWR<TradesResponse>('/api/portfolio/trades', fetcher);
+  // 10s polling — background limit-order fills appear without user action
+  const { data } = useSWR<TradesResponse>('/api/portfolio/trades', fetcher, {
+    refreshInterval: 10_000,
+  });
   const trades = data?.trades;
 
   if (!trades || trades.length === 0) {
