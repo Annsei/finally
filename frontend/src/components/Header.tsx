@@ -32,6 +32,10 @@ export default function Header() {
   // Single-atom selector — avoids Zustand v5 "Maximum update depth exceeded" (RESEARCH Pitfall 2)
   const connectionStatus = usePriceStore((s) => s.connectionStatus);
 
+  // Live prices for the Day P&L computation (re-renders per tick — the header
+  // is small and every watchlist row already updates at the same cadence)
+  const prices = usePriceStore((s) => s.prices);
+
   // SWR polling every 5s — satisfies FE-02 "live updating" for portfolio numbers (D-04)
   const { data } = useSWR<PortfolioResponse>('/api/portfolio/', fetcher, {
     refreshInterval: 5000,
@@ -42,6 +46,24 @@ export default function Header() {
     n !== undefined
       ? n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
       : '—';
+
+  // Day P&L = Σ qty × (price − prev_close) over positions (FRONTEND_REALISM §2.4).
+  // undefined until portfolio AND a prev_close-bearing price exist for ≥1 position.
+  const dayPnl = data?.positions?.length
+    ? data.positions.reduce<number | undefined>((sum, p) => {
+        const u = prices[p.ticker];
+        if (!u || u.prev_close == null) return sum;
+        return (sum ?? 0) + p.quantity * (u.price - u.prev_close);
+      }, undefined)
+    : data
+      ? 0
+      : undefined;
+  const dayPnlColor =
+    dayPnl === undefined || dayPnl === 0
+      ? 'text-terminal-muted'
+      : dayPnl > 0
+        ? 'text-terminal-up'
+        : 'text-terminal-down';
 
   return (
     <header className="flex items-center justify-between px-4 py-2 border-b border-terminal-border bg-terminal-surface">
@@ -59,6 +81,21 @@ export default function Header() {
           </span>
           <span className="text-sm font-normal text-terminal-text tabular-nums">
             ${fmt(data?.cash)}
+          </span>
+        </div>
+
+        {/* Day P&L — positions only, vs previous close */}
+        <div className="flex flex-col items-end">
+          <span className="text-xs font-semibold text-terminal-muted uppercase tracking-wider">
+            Day P&L
+          </span>
+          <span
+            data-testid="day-pnl"
+            className={`text-sm font-normal tabular-nums ${dayPnlColor}`}
+          >
+            {dayPnl !== undefined
+              ? `${dayPnl > 0 ? '+' : dayPnl < 0 ? '-' : ''}$${fmt(Math.abs(dayPnl))}`
+              : '—'}
           </span>
         </div>
 

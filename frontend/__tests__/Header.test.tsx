@@ -85,4 +85,76 @@ describe('Header component', () => {
     const dashes = screen.getAllByText(/—/);
     expect(dashes.length).toBeGreaterThanOrEqual(2);
   });
+
+  // ---------------------------------------------------------------------------
+  // Batch-2 realism: Day P&L = Σ qty × (price − prev_close) over positions
+  // ---------------------------------------------------------------------------
+  it('Test 6: Day P&L computes from live prices vs prev_close, colored by sign', () => {
+    mockUseSWR.mockReturnValue({
+      data: {
+        cash: 5000,
+        total_value: 8810,
+        positions: [
+          { ticker: 'AAPL', quantity: 10, avg_cost: 185, current_price: 190.5, unrealized_pnl: 55, pnl_pct: 2.97 },
+          { ticker: 'NVDA', quantity: 2, avg_cost: 900, current_price: 880, unrealized_pnl: -40, pnl_pct: -2.2 },
+        ],
+      },
+    } as any);
+    usePriceStore.setState({
+      prices: {
+        AAPL: {
+          ticker: 'AAPL', price: 190.5, previous_price: 190.4, timestamp: 1, change: 0.1,
+          change_percent: 0.05, direction: 'up', prev_close: 188.0,
+        },
+        NVDA: {
+          ticker: 'NVDA', price: 880.0, previous_price: 881.0, timestamp: 1, change: -1,
+          change_percent: -0.11, direction: 'down', prev_close: 890.0,
+        },
+      } as any,
+    });
+
+    render(<Header />);
+
+    // AAPL: 10 × (190.5 − 188) = +25; NVDA: 2 × (880 − 890) = −20 → +$5.00
+    const dayPnl = screen.getByTestId('day-pnl');
+    expect(dayPnl.textContent).toBe('+$5.00');
+    expect(dayPnl.className).toContain('text-terminal-up');
+  });
+
+  it('Test 6b: negative Day P&L renders -$ with down coloring', () => {
+    mockUseSWR.mockReturnValue({
+      data: {
+        cash: 5000,
+        total_value: 6760,
+        positions: [
+          { ticker: 'NVDA', quantity: 2, avg_cost: 900, current_price: 880, unrealized_pnl: -40, pnl_pct: -2.2 },
+        ],
+      },
+    } as any);
+    usePriceStore.setState({
+      prices: {
+        NVDA: {
+          ticker: 'NVDA', price: 880.0, previous_price: 881.0, timestamp: 1, change: -1,
+          change_percent: -0.11, direction: 'down', prev_close: 890.0,
+        },
+      } as any,
+    });
+
+    render(<Header />);
+
+    const dayPnl = screen.getByTestId('day-pnl');
+    expect(dayPnl.textContent).toBe('-$20.00');
+    expect(dayPnl.className).toContain('text-terminal-down');
+  });
+
+  it('Test 6c: Day P&L shows $0.00 with no positions and — before portfolio loads', () => {
+    mockUseSWR.mockReturnValue({ data: { cash: 10000, total_value: 10000, positions: [] } } as any);
+    const { unmount } = render(<Header />);
+    expect(screen.getByTestId('day-pnl').textContent).toBe('$0.00');
+    unmount();
+
+    mockUseSWR.mockReturnValue({ data: undefined } as any);
+    render(<Header />);
+    expect(screen.getByTestId('day-pnl').textContent).toBe('—');
+  });
 });

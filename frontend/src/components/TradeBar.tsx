@@ -74,9 +74,11 @@ export default function TradeBar({ selectedTicker, onTradeComplete }: TradeBarPr
   const qtyNum = Number(qty);
   const qtyValid = isFinite(qtyNum) && qtyNum > 0;
   const estimate = livePrice != null && qtyValid ? qtyNum * livePrice : null;
+  // Buys fill at the ask — size the max-buy shortcut against it when quoted
+  const askPrice = liveUpdate?.ask ?? livePrice;
   const maxBuy =
-    livePrice != null && livePrice > 0 && portfolio
-      ? Math.floor((portfolio.cash / livePrice) * 10000) / 10000
+    askPrice != null && askPrice > 0 && portfolio
+      ? Math.floor((portfolio.cash / askPrice) * 10000) / 10000
       : null;
   const held = position?.quantity ?? null;
 
@@ -232,6 +234,13 @@ export default function TradeBar({ selectedTicker, onTradeComplete }: TradeBarPr
                 : '—'}
             </span>
           </span>
+          {liveUpdate?.bid != null && liveUpdate?.ask != null && (
+            <span data-testid="trade-bid-ask">
+              Bid <span className="text-terminal-text">{liveUpdate.bid.toFixed(2)}</span>
+              {' × '}
+              Ask <span className="text-terminal-text">{liveUpdate.ask.toFixed(2)}</span>
+            </span>
+          )}
           {maxBuy != null && (
             <button
               type="button"

@@ -9,7 +9,7 @@ Batches are ordered by realism-gained ÷ effort. Each batch is one phase.
 
 ---
 
-## Batch 1 — Data semantics (IN PROGRESS)
+## Batch 1 — Data semantics (DONE — 2e5373c/763e8a7, 2026-07-05)
 
 ### 1.1 Day change vs previous close (the single most important item)
 Today `change_percent` is tick-over-tick (±0.0x%, meaningless). Real platforms
@@ -46,7 +46,13 @@ price + colored day change.
 
 ---
 
-## Batch 2 — Chart professionalization
+## Batch 2 — Chart professionalization (DONE — 2026-07-05)
+
+Implementation notes: PriceUpdate additionally carries `volume`, `bid`, `ask`
+(defaults bid=ask=price in the cache funnel); buys fill at ask, sells at bid;
+1s OHLCV ring buffer (7200 bars) lives in PriceCache, served by
+`GET /api/market/history?ticker=&limit=`; frontend aggregation is pure
+(`src/lib/candles.ts`), MainChart re-aggregates locally on timeframe switch.
 
 - **2.1 History backfill**: backend keeps an in-memory ring buffer per ticker
   (e.g. last 2h of 1s aggregates); `GET /api/market/history?ticker=X`.

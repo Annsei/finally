@@ -110,7 +110,7 @@ describe('Dashboard index page', () => {
     const placeholder = getByTestId('main-chart-placeholder');
     expect(placeholder).toBeTruthy();
     // Fixed height keeps the column layout stable while data loads
-    expect(placeholder.style.height).toBe('264px');
+    expect(placeholder.style.height).toBe('304px');
   });
 
   it('Test 7 (D-03): first watchlist ticker is auto-selected when no ticker is selected', () => {

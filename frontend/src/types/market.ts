@@ -16,6 +16,25 @@ export interface PriceUpdate {
   day_change_percent?: number; // vs prev_close, what real platforms quote
   day_high?: number;
   day_low?: number;
+  // Microstructure fields (Batch 2) — backend always sends them
+  bid?: number;                // best bid (sells fill here)
+  ask?: number;                // best ask (buys fill here)
+  volume?: number;             // volume traded since the previous update
+}
+
+// GET /api/market/history response — 1-second OHLCV bars, ascending by time:
+export interface HistoryBar {
+  time: number;   // bucket start, Unix seconds (int)
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+}
+
+export interface MarketHistoryResponse {
+  ticker: string;
+  bars: HistoryBar[];
 }
 
 // SSE event.data is a JSON object keyed by ticker symbol:

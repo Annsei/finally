@@ -55,7 +55,7 @@ describe('TradeBar', () => {
     jest.mocked(useSWR).mockReturnValue({
       data: mockPortfolio,
       mutate: mockMutate,
-    } as ReturnType<typeof useSWR>);
+    } as unknown as ReturnType<typeof useSWR>);
   });
 
   it('Test T-4-01: empty ticker blocks fetch and shows inline error', async () => {
@@ -277,6 +277,24 @@ describe('TradeBar', () => {
 
     fireEvent.click(getByTestId('trade-held'));
     expect((getByLabelText('Qty') as HTMLInputElement).value).toBe('10');
+  });
+
+  it('Test T-4-quote: bid × ask renders when the live update carries a quote', () => {
+    const { usePriceStore } = jest.requireActual('@/stores/priceStore');
+    const { getByTestId } = render(<TradeBar selectedTicker="AAPL" />);
+
+    act(() => {
+      usePriceStore.setState({
+        prices: {
+          AAPL: {
+            ticker: 'AAPL', price: 190.0, previous_price: 189.9, timestamp: 1, change: 0.1,
+            change_percent: 0.05, direction: 'up', bid: 189.98, ask: 190.02,
+          },
+        },
+      });
+    });
+
+    expect(getByTestId('trade-bid-ask').textContent).toBe('Bid 189.98 × Ask 190.02');
   });
 
   it('Test T-4-toast: successful fill shows a toast with side, qty, ticker and price', async () => {

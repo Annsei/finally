@@ -69,7 +69,7 @@ export default function Dashboard() {
             <div
               data-testid="main-chart-placeholder"
               className="flex items-center justify-center text-terminal-muted text-xs"
-              style={{ height: '264px' }}
+              style={{ height: '304px' }}
             >
               Waiting for market data…
             </div>
