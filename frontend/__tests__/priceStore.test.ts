@@ -1,3 +1,4 @@
+import { renderHook, act } from '@testing-library/react';
 import { usePriceStore, useTicker } from '@/stores/priceStore';
 import type { PriceUpdate } from '@/types/market';
 
@@ -36,15 +37,19 @@ describe('usePriceStore', () => {
     expect(usePriceStore.getState().connectionStatus).toBe('connected');
   });
 
-  test('Test 4: useTicker returns AAPL PriceUpdate after setPrices, undefined for unknown ticker', () => {
-    // Set prices in store
-    usePriceStore.setState({ prices: { AAPL: aaplUpdate } });
+  test('Test 4: useTicker hook returns the ticker PriceUpdate, undefined for unknown, and tracks updates', () => {
+    const { result: aapl } = renderHook(() => useTicker('AAPL'));
+    const { result: unknown } = renderHook(() => useTicker('UNKNOWN'));
 
-    // useTicker reads from the store state directly
-    const aaplData = usePriceStore.getState().prices['AAPL'];
-    const unknownData = usePriceStore.getState().prices['UNKNOWN'];
+    // Nothing in the store yet
+    expect(aapl.current).toBeUndefined();
+    expect(unknown.current).toBeUndefined();
 
-    expect(aaplData).toEqual(aaplUpdate);
-    expect(unknownData).toBeUndefined();
+    act(() => {
+      usePriceStore.setState({ prices: { AAPL: aaplUpdate } });
+    });
+
+    expect(aapl.current).toEqual(aaplUpdate);
+    expect(unknown.current).toBeUndefined();
   });
 });

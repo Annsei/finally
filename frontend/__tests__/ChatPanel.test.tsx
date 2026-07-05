@@ -202,6 +202,67 @@ describe('ChatPanel', () => {
   });
 
   // -------------------------------------------------------------------------
+  // Test 3b/4f: FAILED outcomes must render failure badges, never fake success
+  // Backend failure shapes: trades {status:"failed", ticker, error} (no side/
+  // quantity/price); watchlist {status:"failed", ticker, error} (no action).
+  // -------------------------------------------------------------------------
+  it('Test 3b: a failed trade outcome renders a failure badge, not a "Sold undefined" success badge', () => {
+    const msgWithFailedTrade: ChatMessage = {
+      role: 'assistant',
+      content: 'I could not complete that trade.',
+      actions: {
+        trades: [
+          { status: 'failed', ticker: 'AAPL', error: 'Insufficient cash' },
+        ],
+        watchlist_changes: [],
+      },
+      created_at: '2026-06-07T00:00:04Z',
+    };
+
+    (useSWR as jest.Mock).mockReturnValue({
+      data: { messages: [msgWithFailedTrade] },
+      mutate: mockMutateHistory,
+    });
+
+    renderPanel();
+
+    const badge = screen.getByTestId('trade-badge-failed');
+    expect(badge.textContent).toContain('Trade failed: AAPL');
+    expect(badge.textContent).toContain('Insufficient cash');
+
+    // Regression: must NOT render as a success badge with undefined fields
+    expect(screen.queryByText(/Sold undefined/i)).toBeNull();
+    expect(screen.queryByText(/Bought undefined/i)).toBeNull();
+  });
+
+  it('Test 4f: a failed watchlist outcome renders a failure badge, not "Removed TICKER"', () => {
+    const msgWithFailedChange: ChatMessage = {
+      role: 'assistant',
+      content: 'I could not update the watchlist.',
+      actions: {
+        trades: [],
+        watchlist_changes: [
+          { status: 'failed', ticker: 'PYPL', error: 'Ticker must be 10 characters or fewer' },
+        ],
+      },
+      created_at: '2026-06-07T00:00:05Z',
+    };
+
+    (useSWR as jest.Mock).mockReturnValue({
+      data: { messages: [msgWithFailedChange] },
+      mutate: mockMutateHistory,
+    });
+
+    renderPanel();
+
+    const badge = screen.getByTestId('watchlist-badge-failed');
+    expect(badge.textContent).toContain('Watchlist change failed: PYPL');
+
+    // Regression: a failed change has no action field and must not read as a removal
+    expect(screen.queryByText(/Removed PYPL/i)).toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
   // Test 4b (FIX 2): HTTP error response surfaces an inline error message
   // -------------------------------------------------------------------------
   it('Test 4b: POST /api/chat/ returning 5xx surfaces inline error and clears loading', async () => {

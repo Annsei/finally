@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import useSWR from 'swr';
 import { fetcher } from '@/lib/fetcher';
+import { formatQuantity } from '@/lib/format';
 import type { ChatHistoryResponse, ChatPostResponse, TradeOutcome, WatchlistOutcome } from '@/types/market';
 
 interface Props {
@@ -13,12 +14,25 @@ interface Props {
 // Action badge components — text built only from structured fields (T-4-04)
 // ---------------------------------------------------------------------------
 function TradeBadge({ trade }: { trade: TradeOutcome }) {
+  // Failed outcomes carry only {status, ticker, error} — no side/quantity/price
+  if (trade.status === 'failed') {
+    return (
+      <span
+        data-testid="trade-badge-failed"
+        className="inline-block px-2 py-0.5 rounded text-xs mr-1 mt-1 bg-terminal-surface"
+        style={{ border: '1px solid #ef4444', color: '#ef4444' }}
+      >
+        {`Trade failed: ${trade.ticker} — ${trade.error ?? 'rejected'}`}
+      </span>
+    );
+  }
+
   const isBuy = trade.side?.toLowerCase() === 'buy';
   const borderColor = isBuy ? '#ecad0a' : '#ef4444';
   const textColor = isBuy ? '#ecad0a' : '#ef4444';
   const label = isBuy
-    ? `Bought ${trade.quantity} ${trade.ticker} @ $${trade.price?.toFixed(2) ?? '—'}`
-    : `Sold ${trade.quantity} ${trade.ticker} @ $${trade.price?.toFixed(2) ?? '—'}`;
+    ? `Bought ${formatQuantity(trade.quantity)} ${trade.ticker} @ $${trade.price?.toFixed(2) ?? '—'}`
+    : `Sold ${formatQuantity(trade.quantity)} ${trade.ticker} @ $${trade.price?.toFixed(2) ?? '—'}`;
 
   return (
     <span
@@ -31,6 +45,19 @@ function TradeBadge({ trade }: { trade: TradeOutcome }) {
 }
 
 function WatchlistBadge({ change }: { change: WatchlistOutcome }) {
+  // Failed outcomes carry only {status, ticker, error} — no action
+  if (change.status === 'failed') {
+    return (
+      <span
+        data-testid="watchlist-badge-failed"
+        className="inline-block px-2 py-0.5 rounded text-xs mr-1 mt-1 bg-terminal-surface"
+        style={{ border: '1px solid #ef4444', color: '#ef4444' }}
+      >
+        {`Watchlist change failed: ${change.ticker} — ${change.error ?? 'rejected'}`}
+      </span>
+    );
+  }
+
   const isAdd = change.action?.toLowerCase() === 'add';
   const label = isAdd ? `Added ${change.ticker}` : `Removed ${change.ticker}`;
 

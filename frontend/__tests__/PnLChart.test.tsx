@@ -56,7 +56,7 @@ describe('PnLChart', () => {
     expect(chart.addSeries).toHaveBeenCalledWith(AreaSeries, expect.any(Object));
   });
 
-  it('Test 2: When useSWR returns snapshot data, series.setData is called with index-based time points', () => {
+  it('Test 2: When useSWR returns snapshot data, series.setData is called with real recorded_at timestamps', () => {
     const snapshots = [
       { total_value: 10000, recorded_at: '2026-06-07T00:00:00Z' },
       { total_value: 10500, recorded_at: '2026-06-07T00:00:30Z' },
@@ -70,10 +70,35 @@ describe('PnLChart', () => {
     const chart = mc.mock.results[0].value as { addSeries: jest.Mock };
     const series = (chart.addSeries.mock.results[0] as jest.MockResult<{ setData: jest.Mock }>).value;
 
+    const t = (iso: string) => Math.floor(Date.parse(iso) / 1000);
     expect(series.setData).toHaveBeenCalledWith([
-      { time: 1, value: 10000 },
-      { time: 2, value: 10500 },
-      { time: 3, value: 10250 },
+      { time: t('2026-06-07T00:00:00Z'), value: 10000 },
+      { time: t('2026-06-07T00:00:30Z'), value: 10500 },
+      { time: t('2026-06-07T00:01:00Z'), value: 10250 },
+    ]);
+  });
+
+  it('Test 2b: same-second snapshots (30s tick + post-trade) are deduped keeping the LAST value', () => {
+    const snapshots = [
+      { total_value: 10000, recorded_at: '2026-06-07T00:00:00Z' },
+      // Two snapshots in the same second: periodic tick then post-trade — keep 10800
+      { total_value: 10500, recorded_at: '2026-06-07T00:00:30Z' },
+      { total_value: 10800, recorded_at: '2026-06-07T00:00:30.400Z' },
+      { total_value: 10250, recorded_at: '2026-06-07T00:01:00Z' },
+    ];
+    mockUseSWR.mockReturnValue({ data: { snapshots } } as any);
+
+    render(<PnLChart />);
+
+    const mc = jest.mocked(createChart);
+    const chart = mc.mock.results[0].value as { addSeries: jest.Mock };
+    const series = (chart.addSeries.mock.results[0] as jest.MockResult<{ setData: jest.Mock }>).value;
+
+    const t = (iso: string) => Math.floor(Date.parse(iso) / 1000);
+    expect(series.setData).toHaveBeenCalledWith([
+      { time: t('2026-06-07T00:00:00Z'), value: 10000 },
+      { time: t('2026-06-07T00:00:30Z'), value: 10800 },
+      { time: t('2026-06-07T00:01:00Z'), value: 10250 },
     ]);
   });
 

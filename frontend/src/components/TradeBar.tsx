@@ -74,8 +74,10 @@ export default function TradeBar({ selectedTicker, onTradeComplete }: TradeBarPr
             const data = await res.json();
             throw new Error(data.error ?? 'Trade failed');
           }
-          // Return current state; if SWR had no cache yet, fetch a valid snapshot.
-          return current ?? (await fetcher('/api/portfolio/'));
+          // Return a FRESH snapshot: `current` here is the pre-optimistic
+          // committed cache, so returning it would revert the optimistic
+          // update and flash stale cash until revalidation.
+          return await fetcher('/api/portfolio/');
         },
         {
           optimisticData: portfolio
@@ -94,7 +96,8 @@ export default function TradeBar({ selectedTicker, onTradeComplete }: TradeBarPr
               }
             : undefined,
           rollbackOnError: true,
-          revalidate: true,
+          // The mutator already returns a fresh post-trade snapshot
+          revalidate: false,
         }
       );
       onTradeComplete?.();

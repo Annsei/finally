@@ -30,10 +30,15 @@ export default function Dashboard() {
     fetcher
   );
 
-  // Auto-select first ticker on load when none is selected (D-03)
+  // Auto-select first ticker on load (D-03), and re-select when the current
+  // selection is removed from the watchlist (manually or via AI) — otherwise
+  // MainChart freezes and TradeBar stays pre-filled with an untracked ticker
   useEffect(() => {
-    if (!selectedTicker && watchlistData?.tickers?.length) {
-      setSelectedTicker(watchlistData.tickers[0].ticker);
+    const tickers = watchlistData?.tickers;
+    if (!tickers) return;
+    const stillWatched = selectedTicker !== null && tickers.some((t) => t.ticker === selectedTicker);
+    if (!stillWatched) {
+      setSelectedTicker(tickers.length ? tickers[0].ticker : null);
     }
   }, [watchlistData, selectedTicker]);
 

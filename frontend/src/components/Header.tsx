@@ -39,7 +39,9 @@ export default function Header() {
 
   // Format number with US locale and 2 decimal places; fall back to '—' when undefined
   const fmt = (n: number | undefined) =>
-    n !== undefined ? n.toLocaleString('en-US', { minimumFractionDigits: 2 }) : '—';
+    n !== undefined
+      ? n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+      : '—';
 
   return (
     <header className="flex items-center justify-between px-4 py-2 border-b border-terminal-border bg-terminal-surface">

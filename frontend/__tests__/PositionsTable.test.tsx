@@ -72,6 +72,44 @@ describe('PositionsTable', () => {
     expect(screen.getByText('AAPL')).toBeInTheDocument();
   });
 
+  it('Test 1b: unrealized P&L and % are computed from SWR data when no live price exists', () => {
+    render(<PositionsTable />);
+
+    // (188.25 − 185.50) × 10 = +$27.50; 2.75 / 185.50 = +1.48%
+    expect(screen.getByText('10')).toBeInTheDocument();
+    expect(screen.getByText('$185.50')).toBeInTheDocument();
+    expect(screen.getByText('$188.25')).toBeInTheDocument();
+    expect(screen.getByText('+$27.50')).toBeInTheDocument();
+    expect(screen.getByText('+1.48%')).toBeInTheDocument();
+  });
+
+  it('Test 1c: live price from the store overrides SWR price in P&L math', () => {
+    render(<PositionsTable />);
+
+    act(() => {
+      usePriceStore.setState({ prices: { AAPL: mkPrice('up') } });
+    });
+
+    // live 190.00: (190.00 − 185.50) × 10 = +$45.00; 4.50 / 185.50 = +2.43%
+    expect(screen.getByText('$190.00')).toBeInTheDocument();
+    expect(screen.getByText('+$45.00')).toBeInTheDocument();
+    expect(screen.getByText('+2.43%')).toBeInTheDocument();
+  });
+
+  it('Test 1d: fractional quantity renders without float residue', () => {
+    mockUseSWR.mockReturnValue({
+      data: {
+        ...mockPortfolio,
+        positions: [{ ...mockPosition, quantity: 0.30000000000000004 }],
+      },
+    } as any);
+
+    render(<PositionsTable />);
+
+    expect(screen.getByText('0.3')).toBeInTheDocument();
+    expect(screen.queryByText('0.30000000000000004')).not.toBeInTheDocument();
+  });
+
   it('Test 2: Price update direction up → current-price cell gains animate-flash-up; removed after 500ms', () => {
     const { container } = render(<PositionsTable />);
 

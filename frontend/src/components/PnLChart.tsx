@@ -33,6 +33,9 @@ export default function PnLChart() {
       },
       timeScale: {
         borderColor: '#30363d',
+        // Real snapshot timestamps — show intraday time instead of dates
+        timeVisible: true,
+        secondsVisible: false,
       },
     });
 
@@ -54,14 +57,23 @@ export default function PnLChart() {
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Data: update chart when SWR data arrives or refreshes
-  // Use array index + 1 as time value (Pitfall 4 — avoids timestamp parsing gaps)
+  // Data: update chart when SWR data arrives or refreshes.
+  // Use the real recorded_at timestamps; snapshots are taken every 30s plus
+  // after each trade, so two can share a second — sort ascending and keep the
+  // LAST value per second (lightweight-charts requires strictly ascending times).
   useEffect(() => {
     if (!data?.snapshots?.length || !seriesRef.current) return;
-    const points = data.snapshots.map((s, i) => ({
-      time: (i + 1) as UTCTimestamp,
-      value: s.total_value,
-    }));
+    const sorted = data.snapshots
+      .map((s) => ({
+        time: Math.floor(Date.parse(s.recorded_at) / 1000) as UTCTimestamp,
+        value: s.total_value,
+      }))
+      .filter((p) => Number.isFinite(p.time as number))
+      .sort((a, b) => (a.time as number) - (b.time as number));
+    const points = sorted.filter(
+      (p, i) => i === sorted.length - 1 || (sorted[i + 1].time as number) !== (p.time as number)
+    );
+    if (!points.length) return;
     seriesRef.current.setData(points);
   }, [data]);
 

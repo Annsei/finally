@@ -48,7 +48,7 @@ describe('MainChart', () => {
     expect(chart.addSeries).toHaveBeenCalledWith(LineSeries, expect.any(Object));
   });
 
-  it('Test 2: When the store ticker price updates, series.update called with { time: 1, value: price }', () => {
+  it('Test 2: When the store ticker price updates, series.update called with the floored real timestamp', () => {
     render(<MainChart ticker="AAPL" />);
 
     const mc = jest.mocked(createChart);
@@ -72,8 +72,41 @@ describe('MainChart', () => {
     });
 
     expect(series.update).toHaveBeenCalledWith(
-      expect.objectContaining({ time: 1, value: 190.5 })
+      expect.objectContaining({ time: 1717700000, value: 190.5 })
     );
+  });
+
+  it('Test 2b: a tick landing in the same second replaces the previous point instead of appending', () => {
+    render(<MainChart ticker="AAPL" />);
+
+    const mc = jest.mocked(createChart);
+    const chart = mc.mock.results[0].value as { addSeries: jest.Mock };
+    const series = (chart.addSeries.mock.results[0] as jest.MockResult<{ update: jest.Mock; setData: jest.Mock }>).value;
+
+    const tick = (price: number, timestamp: number) =>
+      act(() => {
+        usePriceStore.setState({
+          prices: {
+            AAPL: {
+              ticker: 'AAPL',
+              price,
+              previous_price: price - 1,
+              timestamp,
+              change: 1,
+              change_percent: 0.5,
+              direction: 'up',
+            },
+          },
+        });
+      });
+
+    tick(190.5, 1717700000.1); // second 1717700000
+    tick(191.0, 1717700000.6); // same second — replaces, update() called with equal time
+    tick(191.5, 1717700001.2); // next second — appends
+
+    expect(series.update).toHaveBeenNthCalledWith(1, { time: 1717700000, value: 190.5 });
+    expect(series.update).toHaveBeenNthCalledWith(2, { time: 1717700000, value: 191.0 });
+    expect(series.update).toHaveBeenNthCalledWith(3, { time: 1717700001, value: 191.5 });
   });
 
   it('Test 3: Re-rendering with a different ticker prop calls series.setData([])', () => {
@@ -123,10 +156,10 @@ describe('MainChart', () => {
     expect(trimmed).toHaveLength(600);
 
     // Front-trimmed: oldest retained point is tick 122 (721 - 600 + 1), newest is 721
-    expect(trimmed[0].time).toBe(122);
-    expect(trimmed[trimmed.length - 1].time).toBe(721);
+    expect(trimmed[0].time).toBe(1717700000 + 122);
+    expect(trimmed[trimmed.length - 1].time).toBe(1717700000 + 721);
 
-    // Times remain strictly ascending (monotonic counter is never reset by trims)
+    // Times remain strictly ascending (real timestamps, one point per second)
     for (let i = 1; i < trimmed.length; i++) {
       expect(trimmed[i].time).toBeGreaterThan(trimmed[i - 1].time);
     }

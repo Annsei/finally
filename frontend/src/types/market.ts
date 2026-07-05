@@ -72,10 +72,12 @@ export interface TradeOutcome {
 }
 
 // POST /api/chat watchlist_changes[] item:
+// Success: {status: "added"|"removed", ticker, action}; failure: {status: "failed", ticker, error}
 export interface WatchlistOutcome {
   status: string;
   ticker: string;
-  action: string;
+  action?: string;
+  error?: string;
 }
 
 // GET /api/chat/ response message item:
