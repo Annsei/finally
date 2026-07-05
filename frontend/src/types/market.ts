@@ -77,6 +77,20 @@ export const DEFAULT_TICKERS = [
   'NVDA', 'META', 'JPM', 'V', 'NFLX',
 ] as const;
 
+// GET /api/market/events response (newest first) — sudden-move news feed:
+export interface MarketEvent {
+  id: string;
+  ticker: string;
+  headline: string;
+  change_percent: number;  // signed single-tick move that triggered the event
+  direction: 'up' | 'down';
+  timestamp: number;       // Unix seconds (float)
+}
+
+export interface MarketEventsResponse {
+  events: MarketEvent[];
+}
+
 // GET /api/portfolio/trades response (newest first):
 export interface TradeRecord {
   id: string;

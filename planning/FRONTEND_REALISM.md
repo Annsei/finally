@@ -70,15 +70,20 @@ Implementation notes: PriceUpdate additionally carries `volume`, `bid`, `ask`
 
 ## Batch 3 — Depth and atmosphere
 
-- **3.1 Market event news feed**: the simulator already generates random 2–5%
-  "events" — surface them (SSE event type or endpoint) as a scrolling news
-  ticker ("14:32 · NVDA surges +3.4%"); the AI chat can reference them.
-- **3.2 Limit orders** (flagship, own phase): order-type selector, pending
-  orders panel, cancel; backend orders table + fill loop on price cross + fill
-  events.
-- **3.3 Interaction polish**: keyboard (`/` focus ticker, B/S trade, ↑↓ watchlist
-  navigation), ticker autocomplete with company names, resizable panels,
-  status bar (market clock, SSE latency).
+- **3.1 Market event news feed** (DONE — 2026-07-06): sudden-move detection
+  lives in the PriceCache funnel (|tick move| ≥ 1%, 30s per-ticker cooldown,
+  100-event ring buffer) so Massive data produces events too; served by
+  `GET /api/market/events`; frontend renders a CSS-marquee NewsTicker under
+  the header (5s polling); the newest 5 events are injected into the AI chat
+  context so the assistant can reference them.
+- **3.2 Limit orders** (flagship, own phase — REMAINING): order-type selector,
+  pending orders panel, cancel; backend orders table + fill loop on price
+  cross + fill events.
+- **3.3 Interaction polish** (DONE — 2026-07-06, except resizable panels):
+  keyboard shortcuts (`/` focus search, ↑↓ watchlist navigation, B/S trade),
+  ticker autocomplete via a shared 30-symbol datalist directory, bottom
+  status bar (SIM label, shortcut hints, feed-latency health, live clock).
+  Resizable panels deferred — would add a dependency for modest benefit.
 
 ## Explicitly out of scope
 - L2 order-book depth (no matching engine — fake data has no teaching value)

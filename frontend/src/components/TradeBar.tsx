@@ -171,6 +171,7 @@ export default function TradeBar({ selectedTicker, onTradeComplete }: TradeBarPr
             id="trade-ticker"
             aria-label="Ticker"
             type="text"
+            list="ticker-suggestions"
             value={ticker}
             onChange={(e) => setTicker(e.target.value.toUpperCase())}
             placeholder="AAPL"
@@ -203,6 +204,7 @@ export default function TradeBar({ selectedTicker, onTradeComplete }: TradeBarPr
 
         {/* Buy button — green semantic (profit/long direction) */}
         <button
+          data-testid="trade-buy-button"
           onClick={() => handleTrade('buy')}
           disabled={pending}
           className="px-4 py-1.5 text-xs font-semibold rounded min-h-[36px] text-white disabled:opacity-50 disabled:cursor-not-allowed transition-opacity"
@@ -213,6 +215,7 @@ export default function TradeBar({ selectedTicker, onTradeComplete }: TradeBarPr
 
         {/* Sell button — red semantic (loss/short direction) */}
         <button
+          data-testid="trade-sell-button"
           onClick={() => handleTrade('sell')}
           disabled={pending}
           className="px-4 py-1.5 text-xs font-semibold rounded min-h-[36px] text-white disabled:opacity-50 disabled:cursor-not-allowed transition-opacity"

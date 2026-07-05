@@ -89,6 +89,7 @@ export default function WatchlistPanel({ selectedTicker, onSelectTicker }: Props
           type="text"
           data-testid="watchlist-add-input"
           aria-label="Add ticker"
+          list="ticker-suggestions"
           value={addInput}
           onChange={(e) => setAddInput(e.target.value.toUpperCase())}
           onKeyDown={(e) => {

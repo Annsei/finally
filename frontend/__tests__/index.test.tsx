@@ -171,4 +171,59 @@ describe('Dashboard index page', () => {
     expect(mutatePortfolio).toHaveBeenCalledTimes(1);
     expect(mutateWatchlist).toHaveBeenCalledTimes(1);
   });
+
+  // ---------------------------------------------------------------------------
+  // Batch-3 polish: keyboard shortcuts + shared autocomplete directory
+  // ---------------------------------------------------------------------------
+  it('Test 11: "/" focuses the watchlist add input', () => {
+    const { getByTestId } = render(<Dashboard />);
+    const input = getByTestId('watchlist-add-input') as HTMLInputElement;
+
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: '/' }));
+    });
+
+    expect(document.activeElement).toBe(input);
+  });
+
+  it('Test 12: ArrowDown/ArrowUp move the watchlist selection', () => {
+    mockUseSWR.mockImplementation((key: any) => {
+      if (key === '/api/watchlist/') {
+        return {
+          data: { tickers: [{ ticker: 'AAPL' }, { ticker: 'GOOGL' }, { ticker: 'MSFT' }] },
+          mutate: jest.fn(),
+        } as any;
+      }
+      return { data: undefined, mutate: jest.fn() } as any;
+    });
+
+    const { getByTestId } = render(<Dashboard />);
+
+    // Auto-select picked AAPL; ArrowDown → GOOGL
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown' }));
+    });
+    expect(getByTestId('main-chart').getAttribute('data-ticker')).toBe('GOOGL');
+
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp' }));
+    });
+    expect(getByTestId('main-chart').getAttribute('data-ticker')).toBe('AAPL');
+  });
+
+  it('Test 13: shared ticker-suggestions datalist renders with directory entries', () => {
+    const { container } = render(<Dashboard />);
+
+    const datalist = container.querySelector('datalist#ticker-suggestions');
+    expect(datalist).toBeTruthy();
+    expect(datalist!.querySelectorAll('option').length).toBeGreaterThanOrEqual(20);
+  });
+
+  it('Test 14: NewsTicker and StatusBar mount in the page chrome', () => {
+    const { getByTestId } = render(<Dashboard />);
+
+    expect(getByTestId('news-ticker')).toBeTruthy();
+    expect(getByTestId('status-clock')).toBeTruthy();
+    expect(getByTestId('status-feed-latency')).toBeTruthy();
+  });
 });

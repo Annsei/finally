@@ -1,7 +1,9 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import useSWR, { useSWRConfig } from 'swr';
 import { usePriceStream } from '@/hooks/usePriceStream';
 import Header from '@/components/Header';
+import NewsTicker from '@/components/NewsTicker';
+import StatusBar from '@/components/StatusBar';
 import WatchlistPanel from '@/components/WatchlistPanel';
 import MainChart from '@/components/MainChart';
 import PnLChart from '@/components/PnLChart';
@@ -10,6 +12,7 @@ import PortfolioTabs from '@/components/PortfolioTabs';
 import TradeBar from '@/components/TradeBar';
 import ChatPanel from '@/components/ChatPanel';
 import { fetcher } from '@/lib/fetcher';
+import { TICKER_DIRECTORY } from '@/lib/tickers';
 import type { WatchlistResponse, PortfolioResponse } from '@/types/market';
 
 export default function Dashboard() {
@@ -49,10 +52,52 @@ export default function Dashboard() {
     }
   }, [watchlistData, selectedTicker]);
 
+  // Keyboard shortcuts (FRONTEND_REALISM §3.3) — inactive while typing in a field.
+  // "/" focuses the watchlist search, ↑↓ move the selection, B/S press Buy/Sell
+  // (TradeBar's own validation still gates execution).
+  const tickerListRef = useRef<string[]>([]);
+  tickerListRef.current = watchlistData?.tickers?.map((t) => t.ticker) ?? [];
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const typing =
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        (target != null && target.isContentEditable);
+      if (typing) return;
+
+      if (e.key === '/') {
+        e.preventDefault();
+        document
+          .querySelector<HTMLInputElement>('[data-testid="watchlist-add-input"]')
+          ?.focus();
+      } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        const list = tickerListRef.current;
+        if (!list.length) return;
+        e.preventDefault();
+        setSelectedTicker((current) => {
+          const idx = current ? list.indexOf(current) : -1;
+          const next =
+            e.key === 'ArrowDown'
+              ? Math.min(idx + 1, list.length - 1)
+              : Math.max(idx - 1, 0);
+          return list[next] ?? current;
+        });
+      } else if (e.key === 'b' || e.key === 'B') {
+        document.querySelector<HTMLButtonElement>('[data-testid="trade-buy-button"]')?.click();
+      } else if (e.key === 's' || e.key === 'S') {
+        document.querySelector<HTMLButtonElement>('[data-testid="trade-sell-button"]')?.click();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
+
   return (
-    <div className="min-h-screen bg-terminal-bg text-terminal-text font-mono">
+    <div className="min-h-screen bg-terminal-bg text-terminal-text font-mono flex flex-col">
       <Header />
-      <div className="flex gap-4 p-4 h-[calc(100vh-52px)] overflow-hidden">
+      <NewsTicker />
+      <div className="flex gap-4 p-4 flex-1 min-h-0 overflow-hidden">
         {/* Column 1: Watchlist */}
         <WatchlistPanel
           selectedTicker={selectedTicker}
@@ -103,6 +148,16 @@ export default function Dashboard() {
           />
         </div>
       </div>
+      <StatusBar />
+
+      {/* Shared autocomplete directory — referenced by ticker inputs via list="ticker-suggestions" */}
+      <datalist id="ticker-suggestions">
+        {TICKER_DIRECTORY.map((t) => (
+          <option key={t.symbol} value={t.symbol}>
+            {t.name}
+          </option>
+        ))}
+      </datalist>
     </div>
   );
 }
