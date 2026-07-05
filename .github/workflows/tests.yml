@@ -5,6 +5,13 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # E2E runs on demand and nightly (see e2e job below)
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * *"
+
+permissions:
+  contents: read
 
 jobs:
   backend:
@@ -53,7 +60,21 @@ jobs:
       - name: Build static export
         run: npm run build
 
-  # E2E (Playwright) is intentionally NOT run in CI: it requires building the
-  # full Docker image via docker compose, which is slow on hosted runners.
-  # Run locally instead:
-  #   cd test && docker compose -f docker-compose.test.yml up --build --abort-on-container-exit
+  # E2E (Playwright) is too slow to gate every push, so it runs nightly and on
+  # manual dispatch only. Run locally with:
+  #   cd test && docker compose -f docker-compose.test.yml up --build --abort-on-container-exit --exit-code-from playwright
+  e2e:
+    name: E2E (Playwright via docker compose)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run E2E suite
+        working-directory: test
+        run: docker compose -f docker-compose.test.yml up --build --abort-on-container-exit --exit-code-from playwright
+
+      - name: Tear down
+        if: always()
+        working-directory: test
+        run: docker compose -f docker-compose.test.yml down -v

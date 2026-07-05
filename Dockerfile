@@ -17,8 +17,10 @@ RUN npm run build
 # ---------------------------------------------------------------------------
 FROM python:3.12-slim AS runtime
 
-# uv binary (backend is a uv project per PLAN.md §3/§11)
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
+# uv binary (backend is a uv project per PLAN.md §3/§11).
+# Pinned version — floating :latest makes builds non-reproducible and exposes
+# the image to upstream tag compromise.
+COPY --from=ghcr.io/astral-sh/uv:0.9.28 /uv /uvx /usr/local/bin/
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
