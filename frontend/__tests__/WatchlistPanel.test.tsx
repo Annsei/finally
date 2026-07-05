@@ -1,7 +1,7 @@
 /**
  * WatchlistPanel tests (TDD):
  * Test 1: SWR returns 2 tickers → renders a row for each
- * Test 2: Panel renders column headers Symbol, Price, Change %
+ * Test 2: Panel renders column headers Symbol, Price, Day %
  * Test 3: Before data loads (undefined) → shows empty-state heading 'No prices yet'
  * Test 4: Clicking a row updates selected ticker (only one selected at a time)
  * FIX 4 suite: manual add/remove UI — input validation, endpoint wiring, inline errors
@@ -82,13 +82,13 @@ describe('WatchlistPanel', () => {
     expect(screen.getByTestId('row-GOOGL')).toBeInTheDocument();
   });
 
-  it('Test 2: Renders column headers Symbol, Price, Change %', () => {
+  it('Test 2: Renders column headers Symbol, Price, Day %', () => {
     mockUseSWR.mockReturnValue({ data: mockWatchlistData } as any);
     render(<WatchlistPanel selectedTicker={null} onSelectTicker={jest.fn()} />);
 
     expect(screen.getByText('Symbol')).toBeInTheDocument();
     expect(screen.getByText('Price')).toBeInTheDocument();
-    expect(screen.getByText('Change %')).toBeInTheDocument();
+    expect(screen.getByText('Day %')).toBeInTheDocument();
   });
 
   it('Test 3: Before data loads → shows empty-state heading No prices yet', () => {

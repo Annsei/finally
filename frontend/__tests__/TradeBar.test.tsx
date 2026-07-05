@@ -250,4 +250,67 @@ describe('TradeBar', () => {
     rerender(<TradeBar selectedTicker="MSFT" />);
     expect(tickerInput.value).toBe('MSFT');
   });
+
+  // ---------------------------------------------------------------------------
+  // Batch-1 realism: live estimate, max-buy / held shortcuts, fill toast
+  // (position current_price 190.00 is the price source; cash is $10,000)
+  // ---------------------------------------------------------------------------
+  it('Test T-4-est: estimate row shows qty × price notional', () => {
+    const { getByLabelText, getByTestId } = render(<TradeBar selectedTicker="AAPL" />);
+
+    fireEvent.change(getByLabelText('Qty'), { target: { value: '5' } });
+
+    // 5 × $190.00 = $950.00
+    expect(getByTestId('trade-estimate').textContent).toContain('$950.00');
+  });
+
+  it('Test T-4-max: clicking Max buy fills qty with cash ÷ price (4dp floor)', () => {
+    const { getByLabelText, getByTestId } = render(<TradeBar selectedTicker="AAPL" />);
+
+    // 10000 / 190 = 52.63157… → floored to 52.6315
+    fireEvent.click(getByTestId('trade-max-buy'));
+    expect((getByLabelText('Qty') as HTMLInputElement).value).toBe('52.6315');
+  });
+
+  it('Test T-4-held: clicking Held fills qty with the full position', () => {
+    const { getByLabelText, getByTestId } = render(<TradeBar selectedTicker="AAPL" />);
+
+    fireEvent.click(getByTestId('trade-held'));
+    expect((getByLabelText('Qty') as HTMLInputElement).value).toBe('10');
+  });
+
+  it('Test T-4-toast: successful fill shows a toast with side, qty, ticker and price', async () => {
+    (global.fetch as jest.Mock).mockImplementation(async (url: string) => {
+      if (url === '/api/portfolio/trade') {
+        return {
+          ok: true,
+          json: async () => ({
+            status: 'ok',
+            ticker: 'AAPL',
+            side: 'buy',
+            quantity: 5,
+            price: 190.02,
+            trade_id: 'toast-id',
+          }),
+        };
+      }
+      // fresh portfolio snapshot fetched by the mutator
+      return { ok: true, json: async () => mockPortfolio };
+    });
+
+    const { getByLabelText, getByText, getByTestId } = render(
+      <TradeBar selectedTicker={null} />
+    );
+
+    fireEvent.change(getByLabelText('Ticker'), { target: { value: 'AAPL' } });
+    fireEvent.change(getByLabelText('Qty'), { target: { value: '5' } });
+
+    await act(async () => {
+      fireEvent.click(getByText('Buy'));
+    });
+
+    await waitFor(() => {
+      expect(getByTestId('trade-toast').textContent).toContain('Bought 5 AAPL @ $190.02');
+    });
+  });
 });

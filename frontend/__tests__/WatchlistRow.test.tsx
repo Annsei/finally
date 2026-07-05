@@ -166,4 +166,93 @@ describe('WatchlistRow', () => {
 
     expect(queryByTestId('watchlist-remove-AAPL')).toBeNull();
   });
+
+  // ---------------------------------------------------------------------------
+  // Batch-1 realism: day change vs prev close, arrows, coloring, range bar
+  // ---------------------------------------------------------------------------
+  it('Test 11: day change % renders with ▲ arrow and day coloring on price + change cells', () => {
+    const { container, priceCell } = renderRow();
+
+    act(() => {
+      usePriceStore.setState({
+        prices: {
+          AAPL: {
+            ...mkPrice('up'),
+            prev_close: 188.0,
+            day_change: 2.5,
+            day_change_percent: 1.33,
+            day_high: 191.0,
+            day_low: 187.5,
+          },
+        },
+      });
+    });
+
+    const changeCell = container.querySelectorAll('td')[2] as HTMLElement;
+    expect(changeCell.textContent).toBe('▲+1.33%');
+    expect(changeCell.className).toContain('text-terminal-up');
+    expect(priceCell.className).toContain('text-terminal-up');
+  });
+
+  it('Test 12: negative day change renders ▼ with down coloring', () => {
+    const { container } = renderRow();
+
+    act(() => {
+      usePriceStore.setState({
+        prices: {
+          AAPL: {
+            ...mkPrice('down'),
+            prev_close: 193.0,
+            day_change: -2.5,
+            day_change_percent: -1.3,
+            day_high: 193.2,
+            day_low: 189.9,
+          },
+        },
+      });
+    });
+
+    const changeCell = container.querySelectorAll('td')[2] as HTMLElement;
+    expect(changeCell.textContent).toBe('▼-1.30%');
+    expect(changeCell.className).toContain('text-terminal-down');
+  });
+
+  it('Test 13: without day fields the change cell falls back to — and neutral color', () => {
+    const { container } = renderRow();
+
+    act(() => {
+      usePriceStore.setState({ prices: { AAPL: mkPrice('up') } });
+    });
+
+    const changeCell = container.querySelectorAll('td')[2] as HTMLElement;
+    expect(changeCell.textContent).toBe('—');
+    expect(changeCell.className).toContain('text-terminal-muted');
+    expect(container.querySelector('[data-testid="day-range-bar"]')).toBeNull();
+  });
+
+  it('Test 14: day-range bar renders with the marker positioned between low and high', () => {
+    const { container } = renderRow();
+
+    act(() => {
+      usePriceStore.setState({
+        prices: {
+          AAPL: {
+            ...mkPrice('up'),
+            price: 190.0, // (190 − 188) / (192 − 188) = 50%
+            prev_close: 188.0,
+            day_change: 2.0,
+            day_change_percent: 1.06,
+            day_high: 192.0,
+            day_low: 188.0,
+          },
+        },
+      });
+    });
+
+    const bar = container.querySelector('[data-testid="day-range-bar"]') as HTMLElement;
+    expect(bar).toBeTruthy();
+    expect(bar.title).toBe('Day range 188.00 – 192.00');
+    const marker = bar.firstElementChild as HTMLElement;
+    expect(marker.style.left).toBe('calc(50% - 1px)');
+  });
 });

@@ -130,7 +130,7 @@ export default function WatchlistPanel({ selectedTicker, onSelectTicker }: Props
               <tr className="text-terminal-muted border-b border-terminal-border">
                 <th className="text-left py-1 pl-1 font-semibold">Symbol</th>
                 <th className="text-right py-1 font-semibold">Price</th>
-                <th className="text-right py-1 font-semibold">Change %</th>
+                <th className="text-right py-1 font-semibold">Day %</th>
                 <th className="text-right py-1 pr-1 font-semibold">Chart</th>
                 <th className="w-4" aria-label="Remove column" />
               </tr>

@@ -6,9 +6,16 @@ export interface PriceUpdate {
   price: number;
   previous_price: number;
   timestamp: number;       // Unix seconds (float)
-  change: number;
+  change: number;          // tick-over-tick (drives flash animation)
   change_percent: number;
   direction: 'up' | 'down' | 'flat';
+  // Day-session fields (Batch 1 realism) — optional so older payloads and
+  // test fixtures without them stay valid; backend always sends them
+  prev_close?: number;         // previous session close reference
+  day_change?: number;         // price − prev_close
+  day_change_percent?: number; // vs prev_close, what real platforms quote
+  day_high?: number;
+  day_low?: number;
 }
 
 // SSE event.data is a JSON object keyed by ticker symbol:
@@ -22,6 +29,7 @@ export interface WatchlistEntry {
   price: number | null;          // null if not in price cache yet
   change_percent: number | null;
   direction: 'up' | 'down' | 'flat' | null;
+  day_change_percent?: number | null;
 }
 
 export interface WatchlistResponse {
@@ -49,6 +57,20 @@ export const DEFAULT_TICKERS = [
   'AAPL', 'GOOGL', 'MSFT', 'AMZN', 'TSLA',
   'NVDA', 'META', 'JPM', 'V', 'NFLX',
 ] as const;
+
+// GET /api/portfolio/trades response (newest first):
+export interface TradeRecord {
+  id: string;
+  ticker: string;
+  side: 'buy' | 'sell';
+  quantity: number;
+  price: number;
+  executed_at: string;  // ISO timestamp string
+}
+
+export interface TradesResponse {
+  trades: TradeRecord[];
+}
 
 // GET /api/portfolio/history response:
 export interface PortfolioSnapshot {

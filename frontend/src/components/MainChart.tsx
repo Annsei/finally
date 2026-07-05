@@ -95,10 +95,28 @@ export default function MainChart({ ticker }: Props) {
     }
   }, [priceUpdate]);
 
+  // Title bar: live price + day change vs previous close, colored by day direction
+  const dayPct = priceUpdate?.day_change_percent ?? null;
+  const dayChange = priceUpdate?.day_change ?? null;
+  const dayColor =
+    dayPct == null || dayPct === 0 ? '#8b949e' : dayPct > 0 ? '#22c55e' : '#ef4444';
+  const arrow = dayPct == null || dayPct === 0 ? '' : dayPct > 0 ? '▲' : '▼';
+
   return (
     <div>
-      <div className="px-3 py-1 text-xs font-semibold" style={{ color: '#ecad0a' }}>
-        {ticker}
+      <div className="px-3 py-1 text-xs font-semibold flex items-baseline gap-2">
+        <span style={{ color: '#ecad0a' }}>{ticker}</span>
+        {priceUpdate && (
+          <span className="tabular-nums text-terminal-text">{priceUpdate.price.toFixed(2)}</span>
+        )}
+        {dayPct != null && dayChange != null && (
+          <span className="tabular-nums" style={{ color: dayColor }} data-testid="main-chart-day-change">
+            {arrow}
+            {dayChange > 0 ? '+' : ''}
+            {dayChange.toFixed(2)} ({dayPct > 0 ? '+' : ''}
+            {dayPct.toFixed(2)}%)
+          </span>
+        )}
       </div>
       <div ref={containerRef} style={{ width: '100%', height: '240px' }} />
     </div>

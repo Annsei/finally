@@ -18,6 +18,7 @@ jest.mock('@/hooks/usePriceStream', () => ({
 jest.mock('swr', () => ({
   __esModule: true,
   default: jest.fn().mockReturnValue({ data: undefined, mutate: jest.fn() }),
+  useSWRConfig: jest.fn().mockReturnValue({ mutate: jest.fn() }),
 }));
 
 jest.mock('@/components/SparklineChart', () => ({

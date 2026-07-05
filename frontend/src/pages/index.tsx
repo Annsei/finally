@@ -1,12 +1,12 @@
 import { useState, useEffect } from 'react';
-import useSWR from 'swr';
+import useSWR, { useSWRConfig } from 'swr';
 import { usePriceStream } from '@/hooks/usePriceStream';
 import Header from '@/components/Header';
 import WatchlistPanel from '@/components/WatchlistPanel';
 import MainChart from '@/components/MainChart';
 import PnLChart from '@/components/PnLChart';
 import PortfolioHeatmap from '@/components/PortfolioHeatmap';
-import PositionsTable from '@/components/PositionsTable';
+import PortfolioTabs from '@/components/PortfolioTabs';
 import TradeBar from '@/components/TradeBar';
 import ChatPanel from '@/components/ChatPanel';
 import { fetcher } from '@/lib/fetcher';
@@ -23,6 +23,13 @@ export default function Dashboard() {
 
   // SWR for portfolio (bound mutate passed to TradeBar + ChatPanel for revalidation)
   const { mutate: mutatePortfolio } = useSWR<PortfolioResponse>('/api/portfolio/', fetcher);
+
+  // Global mutate — refreshes the Orders blotter after any trade
+  const { mutate: globalMutate } = useSWRConfig();
+  const refreshAfterTrade = () => {
+    void mutatePortfolio();
+    void globalMutate('/api/portfolio/trades');
+  };
 
   // SWR for watchlist (needed for auto-select D-03; mutate revalidates after AI watchlist changes)
   const { data: watchlistData, mutate: mutateWatchlist } = useSWR<WatchlistResponse>(
@@ -73,9 +80,9 @@ export default function Dashboard() {
           </div>
           <TradeBar
             selectedTicker={selectedTicker}
-            onTradeComplete={() => mutatePortfolio()}
+            onTradeComplete={refreshAfterTrade}
           />
-          <PositionsTable />
+          <PortfolioTabs />
         </div>
 
         {/* Column 3: Chat — fixed width, collapsible via toggle (D-09) */}
@@ -88,9 +95,9 @@ export default function Dashboard() {
             open={chatOpen}
             onToggle={() => setChatOpen(!chatOpen)}
             onNewTrade={() => {
-              // AI actions can affect both portfolio (trades) and watchlist
-              // (watchlist_changes) — revalidate both so no panel goes stale
-              void mutatePortfolio();
+              // AI actions can affect portfolio (trades), the blotter, and the
+              // watchlist (watchlist_changes) — revalidate all so nothing goes stale
+              refreshAfterTrade();
               void mutateWatchlist();
             }}
           />
