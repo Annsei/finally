@@ -8,13 +8,33 @@ from app.market.cache import PriceCache
 from app.market.massive_client import MassiveDataSource
 
 
-def _make_snapshot(ticker: str, price: float, timestamp_ms: int) -> MagicMock:
-    """Create a mock Massive snapshot object."""
+def _make_snapshot(
+    ticker: str,
+    price: float,
+    timestamp_ms: int,
+    prev_close: float | None = None,
+    day_high: float | None = None,
+    day_low: float | None = None,
+) -> MagicMock:
+    """Create a mock Massive snapshot object.
+
+    prev_day/day default to None (absent in the API response) so tests
+    exercise the fallback path unless values are provided explicitly.
+    """
     snap = MagicMock()
     snap.ticker = ticker
     snap.last_trade = MagicMock()
     snap.last_trade.price = price
     snap.last_trade.timestamp = timestamp_ms
+    snap.prev_day = None
+    snap.day = None
+    if prev_close is not None:
+        snap.prev_day = MagicMock()
+        snap.prev_day.close = prev_close
+    if day_high is not None or day_low is not None:
+        snap.day = MagicMock()
+        snap.day.high = day_high
+        snap.day.low = day_low
     return snap
 
 
@@ -199,3 +219,95 @@ class TestMassiveDataSource:
         assert cache.get_price("AAPL") == 190.50
 
         await source.stop()
+
+    async def test_prev_day_close_mapped(self):
+        """Snapshot prevDay.c becomes prev_close; day fields derive from it."""
+        cache = PriceCache()
+        source = MassiveDataSource(api_key="test-key", price_cache=cache, poll_interval=60.0)
+        source._tickers = ["AAPL"]
+        source._client = MagicMock()
+
+        snap = _make_snapshot("AAPL", 190.50, 1707580800000, prev_close=188.25)
+        with patch.object(source, "_fetch_snapshots", return_value=[snap]):
+            await source._poll_once()
+
+        update = cache.get("AAPL")
+        assert update is not None
+        assert update.prev_close == 188.25
+        assert update.day_change == round(190.50 - 188.25, 4)
+        assert update.day_change_percent == round((190.50 - 188.25) / 188.25 * 100, 4)
+
+    async def test_day_high_low_mapped(self):
+        """Snapshot day.h/day.l become day_high/day_low."""
+        cache = PriceCache()
+        source = MassiveDataSource(api_key="test-key", price_cache=cache, poll_interval=60.0)
+        source._tickers = ["AAPL"]
+        source._client = MagicMock()
+
+        snap = _make_snapshot(
+            "AAPL", 190.50, 1707580800000, day_high=193.10, day_low=187.40
+        )
+        with patch.object(source, "_fetch_snapshots", return_value=[snap]):
+            await source._poll_once()
+
+        update = cache.get("AAPL")
+        assert update is not None
+        assert update.day_high == 193.10
+        assert update.day_low == 187.40
+
+    async def test_fallback_first_price_when_snapshot_fields_absent(self):
+        """Without prevDay/day, prev_close falls back to the first price seen
+        (and stays constant) while extremes track running high/low."""
+        cache = PriceCache()
+        source = MassiveDataSource(api_key="test-key", price_cache=cache, poll_interval=60.0)
+        source._tickers = ["AAPL"]
+        source._client = MagicMock()
+
+        first_poll = [_make_snapshot("AAPL", 190.50, 1707580800000)]
+        with patch.object(source, "_fetch_snapshots", return_value=first_poll):
+            await source._poll_once()
+
+        first = cache.get("AAPL")
+        assert first.prev_close == 190.50  # Fallback: first price seen
+        assert first.day_high == 190.50
+        assert first.day_low == 190.50
+
+        second_poll = [_make_snapshot("AAPL", 192.00, 1707580815000)]
+        with patch.object(source, "_fetch_snapshots", return_value=second_poll):
+            await source._poll_once()
+
+        second = cache.get("AAPL")
+        assert second.prev_close == 190.50  # Fallback stays constant
+        assert second.day_high == 192.00  # Running extremes advance
+        assert second.day_low == 190.50
+
+    async def test_zero_prev_day_close_falls_back(self):
+        """A zero-filled prevDay.c (off-hours) is ignored in favor of fallback."""
+        cache = PriceCache()
+        source = MassiveDataSource(api_key="test-key", price_cache=cache, poll_interval=60.0)
+        source._tickers = ["AAPL"]
+        source._client = MagicMock()
+
+        # Simulates a zero-filled prevDay aggregate (prevDay.c == 0.0)
+        snap = _make_snapshot("AAPL", 190.50, 1707580800000, prev_close=0.0)
+
+        with patch.object(source, "_fetch_snapshots", return_value=[snap]):
+            await source._poll_once()
+
+        update = cache.get("AAPL")
+        assert update.prev_close == 190.50  # Fell back to first price seen
+
+    async def test_added_ticker_gets_prev_close_on_first_poll(self):
+        """A ticker added via add_ticker() gets a prev_close once polled."""
+        cache = PriceCache()
+        source = MassiveDataSource(api_key="test-key", price_cache=cache, poll_interval=60.0)
+        source._client = MagicMock()
+
+        await source.add_ticker("NVDA")
+        snap = _make_snapshot("NVDA", 805.00, 1707580800000)
+        with patch.object(source, "_fetch_snapshots", return_value=[snap]):
+            await source._poll_once()
+
+        update = cache.get("NVDA")
+        assert update is not None
+        assert update.prev_close == 805.00

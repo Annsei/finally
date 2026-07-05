@@ -101,3 +101,74 @@ class TestPriceCache:
         cache = PriceCache()
         update = cache.update("AAPL", 190.12345)
         assert update.price == 190.12
+
+
+class TestPriceCacheSessionFields:
+    """Session-state carry semantics: prev_close, day_high, day_low."""
+
+    def test_first_update_initializes_session_fields(self):
+        """First price seen becomes prev_close and both extremes."""
+        cache = PriceCache()
+        update = cache.update("AAPL", 190.00)
+        assert update.prev_close == 190.00
+        assert update.day_high == 190.00
+        assert update.day_low == 190.00
+
+    def test_prev_close_stays_constant_across_updates(self):
+        """prev_close is captured once and never moves with the price."""
+        cache = PriceCache()
+        cache.update("AAPL", 190.00)
+        cache.update("AAPL", 195.00)
+        update = cache.update("AAPL", 185.00)
+        assert update.prev_close == 190.00
+
+    def test_day_extremes_track_running_high_low(self):
+        """day_high/day_low expand to cover every price seen."""
+        cache = PriceCache()
+        cache.update("AAPL", 190.00)
+        cache.update("AAPL", 195.00)
+        update = cache.update("AAPL", 185.00)
+        assert update.day_high == 195.00
+        assert update.day_low == 185.00
+
+    def test_day_change_fields_derive_from_prev_close(self):
+        """day_change/day_change_percent compare price vs session prev_close."""
+        cache = PriceCache()
+        cache.update("AAPL", 200.00)
+        update = cache.update("AAPL", 210.00)
+        assert update.day_change == 10.00
+        assert update.day_change_percent == 5.0
+
+    def test_explicit_prev_close_wins_and_is_carried(self):
+        """An explicit prev_close (Massive prevDay.c) overrides and persists."""
+        cache = PriceCache()
+        cache.update("AAPL", 190.00, prev_close=180.00)
+        update = cache.update("AAPL", 191.00)  # No explicit value this time
+        assert update.prev_close == 180.00
+
+    def test_explicit_day_extremes_used_verbatim(self):
+        """Explicit day_high/day_low (Massive day.h/day.l) are used as given."""
+        cache = PriceCache()
+        update = cache.update("AAPL", 190.00, day_high=193.10, day_low=187.40)
+        assert update.day_high == 193.10
+        assert update.day_low == 187.40
+
+    def test_session_fields_reset_after_remove(self):
+        """Removing a ticker clears its session state; re-add starts fresh."""
+        cache = PriceCache()
+        cache.update("AAPL", 190.00)
+        cache.remove("AAPL")
+        update = cache.update("AAPL", 210.00)
+        assert update.prev_close == 210.00
+        assert update.day_high == 210.00
+        assert update.day_low == 210.00
+
+    def test_session_fields_rounded_to_2_decimals(self):
+        """Explicit session inputs are rounded like prices."""
+        cache = PriceCache()
+        update = cache.update(
+            "AAPL", 190.12345, prev_close=180.98765, day_high=195.55555, day_low=170.11111
+        )
+        assert update.prev_close == 180.99
+        assert update.day_high == 195.56
+        assert update.day_low == 170.11

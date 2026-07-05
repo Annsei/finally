@@ -5,6 +5,7 @@ import asyncio
 import pytest
 
 from app.market.cache import PriceCache
+from app.market.seed_prices import SEED_PRICES
 from app.market.simulator import SimulatorDataSource
 
 
@@ -121,6 +122,60 @@ class TestSimulatorDataSource:
 
         # Should have multiple updates with fast interval
         assert cache.version > initial_version + 2
+
+        await source.stop()
+
+    async def test_prev_close_is_seed_price_and_constant(self):
+        """prev_close equals the GBM starting (seed) price and never moves."""
+        cache = PriceCache()
+        source = SimulatorDataSource(price_cache=cache, update_interval=0.02)
+        await source.start(["AAPL"])
+
+        first = cache.get("AAPL")
+        assert first is not None
+        assert first.prev_close == SEED_PRICES["AAPL"]
+
+        initial_version = cache.version
+        await asyncio.sleep(0.2)  # Let several GBM ticks land
+        assert cache.version > initial_version  # Prices actually updated
+
+        later = cache.get("AAPL")
+        assert later.prev_close == SEED_PRICES["AAPL"]
+
+        await source.stop()
+
+    async def test_day_extremes_and_day_change_consistency(self):
+        """day_high/day_low bracket the price and seed; day_change matches math."""
+        cache = PriceCache()
+        source = SimulatorDataSource(price_cache=cache, update_interval=0.02)
+        await source.start(["AAPL"])
+        await asyncio.sleep(0.2)
+
+        update = cache.get("AAPL")
+        assert update is not None
+        # Extremes always bracket the current price and the seed (first) price
+        assert update.day_low <= update.price <= update.day_high
+        assert update.day_low <= SEED_PRICES["AAPL"] <= update.day_high
+        # Derived day fields are consistent with price vs prev_close
+        assert update.day_change == round(update.price - update.prev_close, 4)
+        assert update.day_change_percent == round(
+            (update.price - update.prev_close) / update.prev_close * 100, 4
+        )
+
+        await source.stop()
+
+    async def test_add_ticker_gets_prev_close(self):
+        """A dynamically added ticker's prev_close is its GBM starting price."""
+        cache = PriceCache()
+        source = SimulatorDataSource(price_cache=cache, update_interval=0.1)
+        await source.start(["AAPL"])
+
+        await source.add_ticker("TSLA")
+        update = cache.get("TSLA")
+        assert update is not None
+        assert update.prev_close == SEED_PRICES["TSLA"]
+        assert update.day_high == SEED_PRICES["TSLA"]
+        assert update.day_low == SEED_PRICES["TSLA"]
 
         await source.stop()
 

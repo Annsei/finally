@@ -155,6 +155,7 @@ def create_watchlist_router(price_cache: PriceCache, db_path: str) -> APIRouter:
                         "price": update.price if update else None,
                         "change_percent": update.change_percent if update else None,
                         "direction": update.direction if update else None,
+                        "day_change_percent": update.day_change_percent if update else None,
                     }
                 )
 

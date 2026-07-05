@@ -14,6 +14,19 @@ from .interface import MarketDataSource
 logger = logging.getLogger(__name__)
 
 
+def _positive_float(value: object) -> float | None:
+    """Return value as a float if it is a positive real number, else None.
+
+    Guards against absent snapshot fields (None), Massive's zero-filled
+    day/prevDay aggregates outside market hours, and non-numeric values.
+    Returning None lets the PriceCache fall back to its carried session state
+    (first price seen / running extremes).
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value) if value > 0 else None
+
+
 class MassiveDataSource(MarketDataSource):
     """MarketDataSource backed by the Massive (Polygon.io) REST API.
 
@@ -101,10 +114,19 @@ class MassiveDataSource(MarketDataSource):
                     price = snap.last_trade.price
                     # Massive timestamps are Unix milliseconds → convert to seconds
                     timestamp = snap.last_trade.timestamp / 1000.0
+                    # Session fields: prefer the snapshot's previous-day close
+                    # (prevDay.c) and day extremes (day.h / day.l). When absent
+                    # (None passed), the cache falls back to the first price
+                    # seen (held constant) and its running extremes.
+                    prev_day = getattr(snap, "prev_day", None)
+                    day = getattr(snap, "day", None)
                     self._cache.update(
                         ticker=snap.ticker,
                         price=price,
                         timestamp=timestamp,
+                        prev_close=_positive_float(getattr(prev_day, "close", None)),
+                        day_high=_positive_float(getattr(day, "high", None)),
+                        day_low=_positive_float(getattr(day, "low", None)),
                     )
                     processed += 1
                 except (AttributeError, TypeError) as e:

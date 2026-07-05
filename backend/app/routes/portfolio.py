@@ -3,6 +3,7 @@
 Provides:
 - GET /api/portfolio — current positions, cash, and total portfolio value
 - POST /api/portfolio/trade — market order execution (buy/sell)
+- GET /api/portfolio/trades — trade blotter (executed trades, newest first)
 - GET /api/portfolio/history — portfolio value snapshots over time
 
 All routes are created via the factory function ``create_portfolio_router`` which
@@ -302,6 +303,61 @@ def create_portfolio_router(price_cache: PriceCache, db_path: str) -> APIRouter:
             "price": outcome["price"],
             "trade_id": outcome["trade_id"],
         }
+
+    @router.get("/trades")
+    async def get_trades(request: Request, limit: str | None = None) -> dict:
+        """Return the trade blotter: executed trades, newest first.
+
+        Query params:
+            limit: maximum number of trades to return. Defaults to 50 and is
+                clamped to the range 1..500. Non-integer values return
+                HTTP 400 with ``{"error": "message"}``.
+
+        Ordering is executed_at DESC with rowid DESC as a tie-break so trades
+        executed within the same timestamp still return in stable
+        newest-first insertion order.
+
+        Note: the path is distinct from POST /trade (the execution endpoint);
+        FastAPI matches literal paths exactly, so there is no route conflict.
+        """
+        if limit is None:
+            limit_value = 50
+        else:
+            try:
+                limit_value = int(limit)
+            except ValueError:
+                return JSONResponse(
+                    status_code=400, content={"error": "limit must be an integer"}
+                )
+        limit_value = max(1, min(500, limit_value))
+
+        conn = get_conn(db_path)
+        try:
+            rows = conn.execute(
+                """
+                SELECT id, ticker, side, quantity, price, executed_at
+                FROM trades
+                WHERE user_id = 'default'
+                ORDER BY executed_at DESC, rowid DESC
+                LIMIT ?
+                """,
+                (limit_value,),
+            ).fetchall()
+            return {
+                "trades": [
+                    {
+                        "id": row["id"],
+                        "ticker": row["ticker"],
+                        "side": row["side"],
+                        "quantity": row["quantity"],
+                        "price": row["price"],
+                        "executed_at": row["executed_at"],
+                    }
+                    for row in rows
+                ]
+            }
+        finally:
+            conn.close()
 
     @router.get("/history")
     async def get_portfolio_history(request: Request) -> dict:

@@ -221,7 +221,9 @@ class SimulatorDataSource(MarketDataSource):
             tickers=tickers,
             event_probability=self._event_prob,
         )
-        # Seed the cache with initial prices so SSE has data immediately
+        # Seed the cache with initial prices so SSE has data immediately.
+        # This first write also fixes each ticker's session prev_close in the
+        # cache to the price the GBM walk starts from (constant thereafter).
         for ticker in tickers:
             price = self._sim.get_price(ticker)
             if price is not None:
@@ -242,7 +244,9 @@ class SimulatorDataSource(MarketDataSource):
     async def add_ticker(self, ticker: str) -> None:
         if self._sim:
             self._sim.add_ticker(ticker)
-            # Seed cache immediately so the ticker has a price right away
+            # Seed cache immediately so the ticker has a price right away.
+            # This first write fixes the ticker's session prev_close to its
+            # GBM starting price (constant thereafter).
             price = self._sim.get_price(ticker)
             if price is not None:
                 self._cache.update(ticker=ticker, price=price)

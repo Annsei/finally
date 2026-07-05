@@ -20,22 +20,64 @@ class PriceCache:
         self._lock = Lock()
         self._version: int = 0  # Monotonically increasing; bumped on every update
 
-    def update(self, ticker: str, price: float, timestamp: float | None = None) -> PriceUpdate:
+    def update(
+        self,
+        ticker: str,
+        price: float,
+        timestamp: float | None = None,
+        prev_close: float | None = None,
+        day_high: float | None = None,
+        day_low: float | None = None,
+    ) -> PriceUpdate:
         """Record a new price for a ticker. Returns the created PriceUpdate.
 
         Automatically computes direction and change from the previous price.
         If this is the first update for the ticker, previous_price == price (direction='flat').
+
+        Session fields may be supplied explicitly (e.g. the Massive source
+        passes the snapshot's prevDay close and day high/low). When omitted,
+        the cache carries per-ticker session state forward:
+          - prev_close: captured from the first price seen for the ticker and
+            held constant for the session (for the simulator this is the seed
+            price the GBM walk starts from, written by start()/add_ticker()).
+          - day_high / day_low: running session extremes, initialized to the
+            first price and updated on every tick.
         """
         with self._lock:
             ts = timestamp if timestamp is not None else time.time()
             prev = self._prices.get(ticker)
             previous_price = prev.price if prev else price
+            rounded_price = round(price, 2)
+
+            if prev_close is not None:
+                session_prev_close = round(prev_close, 2)
+            elif prev is not None:
+                session_prev_close = prev.prev_close
+            else:
+                session_prev_close = rounded_price
+
+            if day_high is not None:
+                session_high = round(day_high, 2)
+            elif prev is not None:
+                session_high = max(prev.day_high, rounded_price)
+            else:
+                session_high = rounded_price
+
+            if day_low is not None:
+                session_low = round(day_low, 2)
+            elif prev is not None:
+                session_low = min(prev.day_low, rounded_price)
+            else:
+                session_low = rounded_price
 
             update = PriceUpdate(
                 ticker=ticker,
-                price=round(price, 2),
+                price=rounded_price,
                 previous_price=round(previous_price, 2),
                 timestamp=ts,
+                prev_close=session_prev_close,
+                day_high=session_high,
+                day_low=session_low,
             )
             self._prices[ticker] = update
             self._version += 1
