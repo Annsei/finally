@@ -38,7 +38,9 @@ export default function OrdersTable() {
           <th className="text-left py-1 font-semibold">Ticker</th>
           <th className="text-right py-1 font-semibold">Qty</th>
           <th className="text-right py-1 font-semibold">Price</th>
-          <th className="text-right py-1 pr-1 font-semibold">Value</th>
+          <th className="text-right py-1 font-semibold">Value</th>
+          <th className="text-right py-1 font-semibold">Fee</th>
+          <th className="text-right py-1 pr-1 font-semibold">Realized</th>
         </tr>
       </thead>
       <tbody>
@@ -65,8 +67,24 @@ export default function OrdersTable() {
             <td className="text-right py-1 tabular-nums text-terminal-text">
               ${t.price.toFixed(2)}
             </td>
-            <td className="text-right py-1 pr-1 tabular-nums text-terminal-text">
+            <td className="text-right py-1 tabular-nums text-terminal-text">
               ${(t.quantity * t.price).toFixed(2)}
+            </td>
+            <td className="text-right py-1 tabular-nums text-terminal-muted">
+              {t.commission ? `$${t.commission.toFixed(2)}` : '—'}
+            </td>
+            <td
+              className={`text-right py-1 pr-1 tabular-nums ${
+                t.realized_pnl == null
+                  ? 'text-terminal-muted'
+                  : t.realized_pnl >= 0
+                    ? 'text-terminal-up'
+                    : 'text-terminal-down'
+              }`}
+            >
+              {t.realized_pnl != null
+                ? `${t.realized_pnl >= 0 ? '+' : '-'}$${Math.abs(t.realized_pnl).toFixed(2)}`
+                : '—'}
             </td>
           </tr>
         ))}

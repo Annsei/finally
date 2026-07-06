@@ -1,16 +1,15 @@
 /**
- * TradeBar.tsx — order ticket (FE-13; realism Batches 1-3)
+ * TradeBar.tsx — order ticket (FE-13; realism Batches 1-3 + PLATFORM_ROADMAP M1)
  *
- * Order types (FRONTEND_REALISM.md §3.2):
+ * Order kinds (M1):
  *   - Market: POST /api/portfolio/trade — instant fill at ask (buy) / bid (sell)
- *   - Limit:  POST /api/portfolio/orders — marketable limits fill immediately,
- *     otherwise the order rests and the backend fill loop executes it when the
- *     quote crosses the limit; open orders appear in the Orders tab.
+ *   - Limit:  rests until the quote crosses the limit (marketable fills now)
+ *   - Stop:   market-on-trigger — buy arms above the ask, sell below the bid
+ *   - Stop-limit: on trigger converts to a resting limit order
+ *   Non-market orders carry a time-in-force (GTC default, DAY expires in 24h).
  *
- * Realism affordances (§1.2/§2.3):
- *   - Live estimated notional (limit price when set, else live price)
- *   - Live Bid × Ask; "Max buy" sized against the ask (or the limit in limit mode)
- *   - Held quantity shortcut; fill/placement toast
+ * Risk rail (M1.5): a non-blocking concentration warning appears when the
+ * prospective buy would push a single position past 40% of portfolio value.
  *
  * SWR key '/api/portfolio/' — exact match with Header.tsx so a trade
  * revalidates the header cash/portfolio total at the same time.
@@ -19,7 +18,7 @@
 
 import { useState, useEffect, useRef } from 'react';
 import useSWR from 'swr';
-import type { PortfolioResponse, OrderPostResponse } from '@/types/market';
+import type { PortfolioResponse, OrderPostResponse, OrderKind, TimeInForce } from '@/types/market';
 import { fetcher } from '@/lib/fetcher';
 import { formatQuantity } from '@/lib/format';
 import { usePriceStore, useTicker } from '@/stores/priceStore';
@@ -36,13 +35,24 @@ interface TradeFill {
   price: number;
 }
 
-type OrderType = 'market' | 'limit';
+type OrderType = 'market' | OrderKind;
+
+const CONCENTRATION_WARN = 0.4;
+
+const ORDER_TYPES: { key: OrderType; label: string; testid: string }[] = [
+  { key: 'market', label: 'Mkt', testid: 'order-type-market' },
+  { key: 'limit', label: 'Lmt', testid: 'order-type-limit' },
+  { key: 'stop', label: 'Stp', testid: 'order-type-stop' },
+  { key: 'stop_limit', label: 'StpLmt', testid: 'order-type-stop-limit' },
+];
 
 export default function TradeBar({ selectedTicker, onTradeComplete }: TradeBarProps) {
   const [orderType, setOrderType] = useState<OrderType>('market');
   const [ticker, setTicker] = useState('');
   const [qty, setQty] = useState('');
   const [limitPrice, setLimitPrice] = useState('');
+  const [stopPrice, setStopPrice] = useState('');
+  const [tif, setTif] = useState<TimeInForce>('gtc');
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
@@ -65,6 +75,9 @@ export default function TradeBar({ selectedTicker, onTradeComplete }: TradeBarPr
     };
   }, [toast]);
 
+  const needsLimit = orderType === 'limit' || orderType === 'stop_limit';
+  const needsStop = orderType === 'stop' || orderType === 'stop_limit';
+
   // Live figures for the estimate row
   const normalizedTicker = ticker.trim().toUpperCase();
   const liveUpdate = useTicker(normalizedTicker);
@@ -74,21 +87,30 @@ export default function TradeBar({ selectedTicker, onTradeComplete }: TradeBarPr
   const qtyValid = isFinite(qtyNum) && qtyNum > 0;
   const limitNum = Number(limitPrice);
   const limitValid = isFinite(limitNum) && limitNum > 0;
+  const stopNum = Number(stopPrice);
+  const stopValid = isFinite(stopNum) && stopNum > 0;
 
-  // In limit mode a valid limit price is the basis for cost math
-  const basisPrice = orderType === 'limit' && limitValid ? limitNum : livePrice;
+  // Cost-math basis: the limit when set, the stop for pure stops, else live
+  const basisPrice = needsLimit && limitValid ? limitNum : needsStop && stopValid ? stopNum : livePrice;
   const estimate = basisPrice != null && qtyValid ? qtyNum * basisPrice : null;
-  // Buys fill at the ask — size the max-buy shortcut against it (or the limit)
+  // Buys fill at the ask — size the max-buy shortcut against it (or the basis)
   const askPrice =
-    orderType === 'limit' && limitValid ? limitNum : (liveUpdate?.ask ?? livePrice);
+    orderType !== 'market' && basisPrice != null ? basisPrice : (liveUpdate?.ask ?? livePrice);
   const maxBuy =
     askPrice != null && askPrice > 0 && portfolio
       ? Math.floor((portfolio.cash / askPrice) * 10000) / 10000
       : null;
   const held = position?.quantity ?? null;
 
-  const validateCommon = (side: 'buy' | 'sell'): boolean => {
-    void side;
+  // Concentration rail (M1.5): prospective post-buy weight of this ticker
+  const totalValue = portfolio?.total_value ?? 0;
+  const prospectiveWeight =
+    qtyValid && basisPrice != null && totalValue > 0
+      ? (((held ?? 0) + qtyNum) * basisPrice) / totalValue
+      : null;
+  const concentrated = prospectiveWeight != null && prospectiveWeight > CONCENTRATION_WARN;
+
+  const validate = (): boolean => {
     if (!normalizedTicker || !/^[A-Z]+$/.test(normalizedTicker)) {
       setError('Enter a valid ticker and quantity.');
       return false;
@@ -97,14 +119,18 @@ export default function TradeBar({ selectedTicker, onTradeComplete }: TradeBarPr
       setError('Enter a valid ticker and quantity.');
       return false;
     }
-    if (orderType === 'limit' && !limitValid) {
+    if (needsLimit && !limitValid) {
       setError('Enter a valid limit price.');
+      return false;
+    }
+    if (needsStop && !stopValid) {
+      setError('Enter a valid stop price.');
       return false;
     }
     return true;
   };
 
-  const placeLimitOrder = async (side: 'buy' | 'sell') => {
+  const placeOrder = async (side: 'buy' | 'sell') => {
     const res = await fetch('/api/portfolio/orders', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -112,7 +138,10 @@ export default function TradeBar({ selectedTicker, onTradeComplete }: TradeBarPr
         ticker: normalizedTicker,
         quantity: qtyNum,
         side,
-        limit_price: limitNum,
+        kind: orderType as OrderKind,
+        limit_price: needsLimit ? limitNum : undefined,
+        stop_price: needsStop ? stopNum : undefined,
+        time_in_force: tif,
       }),
     });
     if (!res.ok) {
@@ -120,14 +149,23 @@ export default function TradeBar({ selectedTicker, onTradeComplete }: TradeBarPr
       throw new Error(data.error ?? 'Order failed');
     }
     const { order } = (await res.json()) as OrderPostResponse;
+    const verb = side === 'buy' ? 'Buy' : 'Sell';
     if (order.status === 'filled' && order.fill_price != null) {
       setToast(
         `${side === 'buy' ? 'Bought' : 'Sold'} ${formatQuantity(order.quantity)} ${order.ticker} @ $${order.fill_price.toFixed(2)}`
       );
       await mutate(); // filled immediately — refresh cash/positions
+    } else if (order.kind === 'stop') {
+      setToast(
+        `Stop placed: ${verb} ${formatQuantity(order.quantity)} ${order.ticker} @ stop $${order.stop_price?.toFixed(2)}`
+      );
+    } else if (order.kind === 'stop_limit') {
+      setToast(
+        `Stop-limit placed: ${verb} ${formatQuantity(order.quantity)} ${order.ticker} @ stop $${order.stop_price?.toFixed(2)} / ${side === 'buy' ? '≤' : '≥'}$${order.limit_price?.toFixed(2)}`
+      );
     } else {
       setToast(
-        `Order placed: ${side === 'buy' ? 'Buy' : 'Sell'} ${formatQuantity(order.quantity)} ${order.ticker} @ ${side === 'buy' ? '≤' : '≥'}$${order.limit_price.toFixed(2)}`
+        `Order placed: ${verb} ${formatQuantity(order.quantity)} ${order.ticker} @ ${side === 'buy' ? '≤' : '≥'}$${order.limit_price?.toFixed(2)}`
       );
     }
   };
@@ -189,14 +227,14 @@ export default function TradeBar({ selectedTicker, onTradeComplete }: TradeBarPr
     setError(null);
 
     // Client-side validation BEFORE any network call (T-4-01, T-4-03)
-    if (!validateCommon(side)) return;
+    if (!validate()) return;
 
     setPending(true);
     try {
-      if (orderType === 'limit') {
-        await placeLimitOrder(side);
-      } else {
+      if (orderType === 'market') {
         await executeMarketOrder(side);
+      } else {
+        await placeOrder(side);
       }
       onTradeComplete?.();
     } catch (e) {
@@ -213,33 +251,34 @@ export default function TradeBar({ selectedTicker, onTradeComplete }: TradeBarPr
         : 'text-terminal-muted border border-terminal-border hover:text-terminal-text'
     }`;
 
+  const tifButtonClass = (t: TimeInForce) =>
+    `px-1.5 py-0.5 rounded text-[10px] font-semibold transition-colors ${
+      tif === t
+        ? 'bg-terminal-bg text-terminal-text border border-terminal-blue'
+        : 'text-terminal-muted border border-terminal-border hover:text-terminal-text'
+    }`;
+
   return (
     <div className="p-3 bg-terminal-surface border-t border-terminal-border">
       <div className="flex items-end gap-2 flex-wrap">
-        {/* Order type — market or limit */}
+        {/* Order kind — market / limit / stop / stop-limit */}
         <div className="flex flex-col gap-1">
           <span className="text-xs font-semibold text-terminal-muted uppercase tracking-wider">
             Type
           </span>
           <div className="flex gap-1">
-            <button
-              type="button"
-              data-testid="order-type-market"
-              onClick={() => setOrderType('market')}
-              disabled={pending}
-              className={typeButtonClass('market')}
-            >
-              Mkt
-            </button>
-            <button
-              type="button"
-              data-testid="order-type-limit"
-              onClick={() => setOrderType('limit')}
-              disabled={pending}
-              className={typeButtonClass('limit')}
-            >
-              Lmt
-            </button>
+            {ORDER_TYPES.map((t) => (
+              <button
+                key={t.key}
+                type="button"
+                data-testid={t.testid}
+                onClick={() => setOrderType(t.key)}
+                disabled={pending}
+                className={typeButtonClass(t.key)}
+              >
+                {t.label}
+              </button>
+            ))}
           </div>
         </div>
 
@@ -286,8 +325,32 @@ export default function TradeBar({ selectedTicker, onTradeComplete }: TradeBarPr
           />
         </div>
 
-        {/* Limit price — only in limit mode */}
-        {orderType === 'limit' && (
+        {/* Stop price — stop and stop-limit */}
+        {needsStop && (
+          <div className="flex flex-col gap-1">
+            <label
+              htmlFor="trade-stop-price"
+              className="text-xs font-semibold text-terminal-muted uppercase tracking-wider"
+            >
+              Stop $
+            </label>
+            <input
+              id="trade-stop-price"
+              aria-label="Stop price"
+              type="number"
+              value={stopPrice}
+              onChange={(e) => setStopPrice(e.target.value)}
+              placeholder="0.00"
+              min="0"
+              step="any"
+              disabled={pending}
+              className="w-24 px-2 py-1.5 text-xs font-mono bg-terminal-bg border border-terminal-border text-terminal-text rounded focus:outline-none focus:border-terminal-blue tabular-nums placeholder:text-terminal-muted disabled:opacity-50"
+            />
+          </div>
+        )}
+
+        {/* Limit price — limit and stop-limit */}
+        {needsLimit && (
           <div className="flex flex-col gap-1">
             <label
               htmlFor="trade-limit-price"
@@ -307,6 +370,35 @@ export default function TradeBar({ selectedTicker, onTradeComplete }: TradeBarPr
               disabled={pending}
               className="w-24 px-2 py-1.5 text-xs font-mono bg-terminal-bg border border-terminal-border text-terminal-text rounded focus:outline-none focus:border-terminal-blue tabular-nums placeholder:text-terminal-muted disabled:opacity-50"
             />
+          </div>
+        )}
+
+        {/* Time-in-force — resting orders only */}
+        {orderType !== 'market' && (
+          <div className="flex flex-col gap-1 pb-0.5">
+            <span className="text-xs font-semibold text-terminal-muted uppercase tracking-wider">
+              TIF
+            </span>
+            <div className="flex gap-1">
+              <button
+                type="button"
+                data-testid="tif-gtc"
+                onClick={() => setTif('gtc')}
+                disabled={pending}
+                className={tifButtonClass('gtc')}
+              >
+                GTC
+              </button>
+              <button
+                type="button"
+                data-testid="tif-day"
+                onClick={() => setTif('day')}
+                disabled={pending}
+                className={tifButtonClass('day')}
+              >
+                DAY
+              </button>
+            </div>
           </div>
         )}
 
@@ -376,6 +468,17 @@ export default function TradeBar({ selectedTicker, onTradeComplete }: TradeBarPr
           )}
         </div>
       </div>
+
+      {/* Concentration rail — non-blocking warning (M1.5) */}
+      {concentrated && prospectiveWeight != null && (
+        <p
+          data-testid="trade-concentration-warning"
+          className="mt-1.5 text-xs leading-tight text-terminal-amber"
+        >
+          ⚠ A buy this size would make {normalizedTicker} ~
+          {Math.round(prospectiveWeight * 100)}% of your portfolio.
+        </p>
+      )}
 
       {/* Inline error display — 12px, red, below inputs (D-14) */}
       {error && (

@@ -63,7 +63,9 @@ export default function OpenOrdersTable() {
             <th className="text-left py-1 font-semibold">Side</th>
             <th className="text-left py-1 font-semibold">Ticker</th>
             <th className="text-right py-1 font-semibold">Qty</th>
+            <th className="text-left py-1 pl-2 font-semibold">Kind</th>
             <th className="text-right py-1 font-semibold">Limit</th>
+            <th className="text-right py-1 font-semibold">Stop</th>
             <th className="text-right py-1 pr-1 font-semibold" aria-label="Cancel column" />
           </tr>
         </thead>
@@ -88,8 +90,18 @@ export default function OpenOrdersTable() {
               <td className="text-right py-1 tabular-nums text-terminal-text">
                 {formatQuantity(o.quantity)}
               </td>
+              <td className="py-1 pl-2 text-terminal-muted uppercase">
+                {(o.kind ?? 'limit').replace('stop_limit', 'stp-lmt').replace('stop', 'stp').replace('limit', 'lmt')}
+                {o.time_in_force === 'day' && <span className="ml-1 text-terminal-amber">day</span>}
+                {o.triggered_at && <span className="ml-1 text-terminal-blue" title="Stop triggered — resting as a limit order">trig</span>}
+              </td>
               <td className="text-right py-1 tabular-nums text-terminal-text">
-                {o.side === 'buy' ? '≤' : '≥'}${o.limit_price.toFixed(2)}
+                {o.limit_price != null
+                  ? `${o.side === 'buy' ? '≤' : '≥'}$${o.limit_price.toFixed(2)}`
+                  : '—'}
+              </td>
+              <td className="text-right py-1 tabular-nums text-terminal-text">
+                {o.stop_price != null ? `@$${o.stop_price.toFixed(2)}` : '—'}
               </td>
               <td className="text-right py-1 pr-1">
                 <button

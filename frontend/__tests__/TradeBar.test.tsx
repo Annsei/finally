@@ -342,12 +342,96 @@ describe('TradeBar', () => {
       '/api/portfolio/orders',
       expect.objectContaining({
         method: 'POST',
-        body: JSON.stringify({ ticker: 'AAPL', quantity: 5, side: 'buy', limit_price: 185 }),
+        body: JSON.stringify({
+          ticker: 'AAPL',
+          quantity: 5,
+          side: 'buy',
+          kind: 'limit',
+          limit_price: 185,
+          time_in_force: 'gtc',
+        }),
       })
     );
     await waitFor(() => {
       expect(getByTestId('trade-toast').textContent).toContain('Order placed: Buy 5 AAPL @ ≤$185.00');
     });
+  });
+
+  it('Test T-4-stp: stop order shows Stop input, POSTs kind=stop with DAY tif, toasts placement', async () => {
+    (global.fetch as jest.Mock).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        order: {
+          id: 'o3', ticker: 'AAPL', side: 'sell', quantity: 5, kind: 'stop',
+          limit_price: null, stop_price: 180, time_in_force: 'day',
+          expires_at: '2026-07-07T00:00:00Z', triggered_at: null,
+          status: 'open', reject_reason: null, created_at: '2026-07-06T00:00:00Z',
+          filled_at: null, fill_price: null,
+        },
+      }),
+    });
+
+    const { getByTestId, getByLabelText, getByText, queryByLabelText } = render(
+      <TradeBar selectedTicker="AAPL" />
+    );
+
+    fireEvent.click(getByTestId('order-type-stop'));
+    expect(getByLabelText('Stop price')).toBeTruthy();
+    expect(queryByLabelText('Limit price')).toBeNull(); // pure stop has no limit input
+
+    fireEvent.change(getByLabelText('Qty'), { target: { value: '5' } });
+    fireEvent.change(getByLabelText('Stop price'), { target: { value: '180' } });
+    fireEvent.click(getByTestId('tif-day'));
+
+    await act(async () => {
+      fireEvent.click(getByText('Sell'));
+    });
+
+    expect(global.fetch).toHaveBeenCalledWith(
+      '/api/portfolio/orders',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          ticker: 'AAPL',
+          quantity: 5,
+          side: 'sell',
+          kind: 'stop',
+          stop_price: 180,
+          time_in_force: 'day',
+        }),
+      })
+    );
+    await waitFor(() => {
+      expect(getByTestId('trade-toast').textContent).toContain(
+        'Stop placed: Sell 5 AAPL @ stop $180.00'
+      );
+    });
+  });
+
+  it('Test T-4-stp-val: missing stop price blocks fetch with inline error', () => {
+    const { getByTestId, getByLabelText, getByText } = render(<TradeBar selectedTicker="AAPL" />);
+
+    fireEvent.click(getByTestId('order-type-stop'));
+    fireEvent.change(getByLabelText('Qty'), { target: { value: '5' } });
+    fireEvent.click(getByText('Sell'));
+
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(getByText('Enter a valid stop price.')).toBeTruthy();
+  });
+
+  it('Test T-4-conc: an oversized buy shows the concentration warning (non-blocking)', () => {
+    // portfolio: total 10000, held 10 AAPL @190 — buying 15 more @190 → (10+15)*190/10000 = 47.5%
+    const { getByLabelText, getByTestId, queryByTestId } = render(
+      <TradeBar selectedTicker="AAPL" />
+    );
+
+    fireEvent.change(getByLabelText('Qty'), { target: { value: '15' } });
+    expect(getByTestId('trade-concentration-warning').textContent).toContain('AAPL');
+    expect(getByTestId('trade-concentration-warning').textContent).toContain('48%');
+
+    // small buy → warning gone: (10+1)*190/10000 = 20.9%
+    fireEvent.change(getByLabelText('Qty'), { target: { value: '1' } });
+    expect(queryByTestId('trade-concentration-warning')).toBeNull();
   });
 
   it('Test T-4-lmt-fill: an immediately-filled (marketable) limit order toasts the fill', async () => {

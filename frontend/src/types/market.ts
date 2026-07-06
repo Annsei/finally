@@ -69,6 +69,7 @@ export interface PortfolioResponse {
   cash: number;
   total_value: number;
   positions: Position[];
+  realized_pnl?: number;  // lifetime realized P&L across all sells
 }
 
 // Default tickers matching backend/app/market/seed_prices.py SEED_PRICES
@@ -91,15 +92,22 @@ export interface MarketEventsResponse {
   events: MarketEvent[];
 }
 
-// Limit orders (POST/GET /api/portfolio/orders, DELETE /api/portfolio/orders/{id}):
-export type OrderStatus = 'open' | 'filled' | 'cancelled' | 'rejected';
+// Orders (POST/GET /api/portfolio/orders, DELETE /api/portfolio/orders/{id}):
+export type OrderStatus = 'open' | 'filled' | 'cancelled' | 'rejected' | 'expired';
+export type OrderKind = 'limit' | 'stop' | 'stop_limit';
+export type TimeInForce = 'day' | 'gtc';
 
 export interface LimitOrder {
   id: string;
   ticker: string;
   side: 'buy' | 'sell';
   quantity: number;
-  limit_price: number;
+  kind: OrderKind;
+  limit_price: number | null;   // null for pure stop orders
+  stop_price: number | null;    // null for plain limit orders
+  time_in_force: TimeInForce;
+  expires_at: string | null;    // ISO; set for DAY orders
+  triggered_at: string | null;  // stamped when a stop(-limit) trigger fires
   status: OrderStatus;
   reject_reason: string | null;
   created_at: string;      // ISO timestamp string
@@ -123,6 +131,8 @@ export interface TradeRecord {
   quantity: number;
   price: number;
   executed_at: string;  // ISO timestamp string
+  commission?: number;            // 0 unless FINALLY_COMMISSION_BPS is set
+  realized_pnl?: number | null;   // sells only; null for buys
 }
 
 export interface TradesResponse {

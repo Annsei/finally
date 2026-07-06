@@ -84,6 +84,27 @@ export default function Header() {
           </span>
         </div>
 
+        {/* Realized P&L — lifetime, from closed trades (M1.4) */}
+        <div className="flex flex-col items-end">
+          <span className="text-xs font-semibold text-terminal-muted uppercase tracking-wider">
+            Realized
+          </span>
+          <span
+            data-testid="realized-pnl"
+            className={`text-sm font-normal tabular-nums ${
+              data?.realized_pnl == null || data.realized_pnl === 0
+                ? 'text-terminal-muted'
+                : data.realized_pnl > 0
+                  ? 'text-terminal-up'
+                  : 'text-terminal-down'
+            }`}
+          >
+            {data?.realized_pnl != null
+              ? `${data.realized_pnl > 0 ? '+' : data.realized_pnl < 0 ? '-' : ''}$${fmt(Math.abs(data.realized_pnl))}`
+              : '—'}
+          </span>
+        </div>
+
         {/* Day P&L — positions only, vs previous close */}
         <div className="flex flex-col items-end">
           <span className="text-xs font-semibold text-terminal-muted uppercase tracking-wider">
