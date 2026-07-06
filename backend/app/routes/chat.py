@@ -155,12 +155,17 @@ def _assemble_portfolio_context(
 # ---------------------------------------------------------------------------
 
 
-def create_chat_router(price_cache: PriceCache, db_path: str) -> APIRouter:
+def create_chat_router(
+    price_cache: PriceCache, db_path: str, commission_bps: float = 0.0
+) -> APIRouter:
     """Factory: build the chat APIRouter with injected dependencies.
 
     Args:
         price_cache: Shared in-memory price cache populated by the market data source.
         db_path: Path to the SQLite database file.
+        commission_bps: Commission in basis points of notional applied to every
+            fill — chat-executed trades pay the same commission as manual ones
+            (FINALLY_COMMISSION_BPS, read once at app startup in main.py).
 
     Returns:
         A configured FastAPI APIRouter ready to be registered with ``app.include_router``.
@@ -318,6 +323,7 @@ def create_chat_router(price_cache: PriceCache, db_path: str) -> APIRouter:
                     t.ticker.strip().upper(),
                     t.side.lower(),
                     t.quantity,
+                    commission_bps=commission_bps,
                 )
                 for t in parsed.trades
             ]

@@ -54,7 +54,11 @@ class TestExecuteTradeOnConnImport:
         from app.routes.portfolio import execute_trade_on_conn
         sig = inspect.signature(execute_trade_on_conn)
         params = list(sig.parameters.keys())
-        assert params == ["conn", "price_cache", "ticker", "side", "quantity"]
+        assert params == [
+            "conn", "price_cache", "ticker", "side", "quantity", "commission_bps",
+        ]
+        # Commission-free by default — legacy callers keep pre-M1 behavior
+        assert sig.parameters["commission_bps"].default == 0.0
 
 
 class TestExecuteTradeOnConnFailurePaths:

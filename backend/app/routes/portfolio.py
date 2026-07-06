@@ -69,6 +69,7 @@ def execute_trade_on_conn(
     ticker: str,
     side: str,
     quantity: float,
+    commission_bps: float = 0.0,
 ) -> dict:
     """Execute a market order on an open SQLite connection.
 
@@ -92,13 +93,24 @@ def execute_trade_on_conn(
         ticker: Ticker symbol (normalized to uppercase internally).
         side: "buy" or "sell" (normalized to lowercase internally).
         quantity: Number of shares to trade (must be > 0).
+        commission_bps: Commission in basis points of notional (0 = free).
+            Read once from FINALLY_COMMISSION_BPS at app startup and passed
+            down; never read from the environment here.
 
     Fill price: buys fill at the cached ask, sells at the cached bid, falling
     back to the last price when bid/ask are absent or equal (zero spread).
     The "price" in the returned dict and the trades table is that fill price.
 
+    Commission (M1): commission = round(notional * bps / 10000, 2). Buys pay
+    notional + commission from cash and fold the commission into the position
+    cost basis; sells receive notional - commission and realize
+    round((fill_price - avg_cost_at_sale) * quantity - commission, 2) as
+    realized_pnl on the trade row (NULL for buys). With commission_bps == 0
+    the cash/position math is bit-identical to the pre-commission behavior.
+
     Returns:
-        On success: {"status": "executed", "ticker", "side", "quantity", "price", "trade_id"}
+        On success: {"status": "executed", "ticker", "side", "quantity",
+                     "price", "commission", "realized_pnl", "trade_id"}
         On failure: {"status": "failed", "ticker", "error"}
     """
     ticker = ticker.upper()
@@ -137,17 +149,28 @@ def execute_trade_on_conn(
 
     trade_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
-    cost = quantity * current_price
+    cost = quantity * current_price  # notional at the fill price
+    # Commission on the notional, rounded to cents. When commission_bps is 0
+    # (the default) every formula below reduces exactly to the pre-commission
+    # math (x + 0.0 == x in IEEE 754), keeping legacy behavior bit-identical.
+    commission = round(cost * commission_bps / 10000.0, 2) if commission_bps else 0.0
+    realized_pnl: float | None = None
 
     if side == "buy":
-        if cash_balance < cost:
+        if cash_balance < cost + commission:
             return {"status": "failed", "ticker": ticker, "error": "Insufficient cash"}
 
-        # Deduct cash
+        # Deduct cash: notional plus commission
         conn.execute(
             "UPDATE users_profile SET cash_balance = cash_balance - ? WHERE id = 'default'",
-            (cost,),
+            (cost + commission,),
         )
+
+        # Commission folds into the cost basis: the per-share cost of THIS lot
+        # is (notional + commission) / quantity, weighted into avg_cost by the
+        # upsert below. With zero commission use current_price verbatim so the
+        # stored avg_cost is bit-identical to the pre-commission behavior.
+        effective_cost = (cost + commission) / quantity if commission else current_price
 
         # Upsert position — weighted average cost on conflict
         position_id = str(uuid.uuid4())
@@ -161,23 +184,28 @@ def execute_trade_on_conn(
                 quantity = quantity + excluded.quantity,
                 updated_at = excluded.updated_at
             """,
-            (position_id, ticker, quantity, current_price, now),
+            (position_id, ticker, quantity, effective_cost, now),
         )
 
     else:  # sell
         pos_row = conn.execute(
-            "SELECT quantity FROM positions WHERE user_id = 'default' AND ticker = ?",
+            "SELECT quantity, avg_cost FROM positions WHERE user_id = 'default' AND ticker = ?",
             (ticker,),
         ).fetchone()
         current_qty: float = pos_row["quantity"] if pos_row else 0.0
+        avg_cost_at_sale: float = pos_row["avg_cost"] if pos_row else 0.0
 
         if current_qty < quantity:
             return {"status": "failed", "ticker": ticker, "error": "Insufficient shares to sell"}
 
-        # Add cash proceeds
+        # Add cash proceeds: notional minus commission
         conn.execute(
             "UPDATE users_profile SET cash_balance = cash_balance + ? WHERE id = 'default'",
-            (cost,),
+            (cost - commission,),
+        )
+
+        realized_pnl = round(
+            (current_price - avg_cost_at_sale) * quantity - commission, 2
         )
 
         new_qty = current_qty - quantity
@@ -195,10 +223,11 @@ def execute_trade_on_conn(
                 (new_qty, now, ticker),
             )
 
-    # Insert trade log entry
+    # Insert trade log entry (commission always stored; realized_pnl NULL on buys)
     conn.execute(
-        "INSERT INTO trades (id, user_id, ticker, side, quantity, price, executed_at) VALUES (?, 'default', ?, ?, ?, ?, ?)",
-        (trade_id, ticker, side, quantity, current_price, now),
+        "INSERT INTO trades (id, user_id, ticker, side, quantity, price, commission, realized_pnl, executed_at)"
+        " VALUES (?, 'default', ?, ?, ?, ?, ?, ?, ?)",
+        (trade_id, ticker, side, quantity, current_price, commission, realized_pnl, now),
     )
 
     return {
@@ -207,16 +236,22 @@ def execute_trade_on_conn(
         "side": side,
         "quantity": quantity,
         "price": current_price,
+        "commission": commission,
+        "realized_pnl": realized_pnl,
         "trade_id": trade_id,
     }
 
 
-def create_portfolio_router(price_cache: PriceCache, db_path: str) -> APIRouter:
+def create_portfolio_router(
+    price_cache: PriceCache, db_path: str, commission_bps: float = 0.0
+) -> APIRouter:
     """Factory: build the portfolio APIRouter with injected dependencies.
 
     Args:
         price_cache: Shared in-memory price cache populated by the market data source.
         db_path: Path to the SQLite database file.
+        commission_bps: Commission in basis points of notional applied to every
+            fill (FINALLY_COMMISSION_BPS, read once at app startup in main.py).
 
     Returns:
         A configured FastAPI APIRouter ready to be registered with ``app.include_router``.
@@ -225,13 +260,19 @@ def create_portfolio_router(price_cache: PriceCache, db_path: str) -> APIRouter:
 
     @router.get("/")
     async def get_portfolio(request: Request) -> dict:
-        """Return current cash balance, all positions, and total portfolio value."""
+        """Return cash balance, positions, total value, and lifetime realized P&L."""
         conn = get_conn(db_path)
         try:
             user_row = conn.execute(
                 "SELECT cash_balance FROM users_profile WHERE id = 'default'"
             ).fetchone()
             cash_balance: float = user_row["cash_balance"] if user_row else 0.0
+
+            realized_row = conn.execute(
+                "SELECT COALESCE(SUM(realized_pnl), 0.0) AS total FROM trades "
+                "WHERE user_id = 'default'"
+            ).fetchone()
+            realized_pnl: float = round(realized_row["total"] or 0.0, 2)
 
             position_rows = conn.execute(
                 "SELECT ticker, quantity, avg_cost FROM positions WHERE user_id = 'default'"
@@ -264,6 +305,7 @@ def create_portfolio_router(price_cache: PriceCache, db_path: str) -> APIRouter:
             return {
                 "cash": cash_balance,
                 "total_value": total_value,
+                "realized_pnl": realized_pnl,
                 "positions": positions,
             }
         finally:
@@ -282,7 +324,8 @@ def create_portfolio_router(price_cache: PriceCache, db_path: str) -> APIRouter:
         conn = get_conn(db_path)
         try:
             outcome = execute_trade_on_conn(
-                conn, price_cache, body.ticker, body.side, body.quantity
+                conn, price_cache, body.ticker, body.side, body.quantity,
+                commission_bps=commission_bps,
             )
             if outcome["status"] == "executed":
                 # Record portfolio snapshot immediately after the trade and
@@ -312,6 +355,8 @@ def create_portfolio_router(price_cache: PriceCache, db_path: str) -> APIRouter:
             "side": outcome["side"],
             "quantity": outcome["quantity"],
             "price": outcome["price"],
+            "commission": outcome["commission"],
+            "realized_pnl": outcome["realized_pnl"],
             "trade_id": outcome["trade_id"],
         }
 
@@ -346,7 +391,8 @@ def create_portfolio_router(price_cache: PriceCache, db_path: str) -> APIRouter:
         try:
             rows = conn.execute(
                 """
-                SELECT id, ticker, side, quantity, price, executed_at
+                SELECT id, ticker, side, quantity, price, commission,
+                       realized_pnl, executed_at
                 FROM trades
                 WHERE user_id = 'default'
                 ORDER BY executed_at DESC, rowid DESC
@@ -362,6 +408,8 @@ def create_portfolio_router(price_cache: PriceCache, db_path: str) -> APIRouter:
                         "side": row["side"],
                         "quantity": row["quantity"],
                         "price": row["price"],
+                        "commission": row["commission"],
+                        "realized_pnl": row["realized_pnl"],
                         "executed_at": row["executed_at"],
                     }
                     for row in rows

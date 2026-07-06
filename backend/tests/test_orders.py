@@ -26,7 +26,8 @@ from app.routes.orders import create_orders_router, process_open_orders_once
 from app.routes.portfolio import create_portfolio_router, execute_trade_on_conn
 
 ORDER_JSON_KEYS = {
-    "id", "ticker", "side", "quantity", "limit_price",
+    "id", "ticker", "side", "quantity", "kind", "limit_price", "stop_price",
+    "time_in_force", "expires_at", "triggered_at",
     "status", "reject_reason", "created_at", "filled_at", "fill_price",
 }
 
@@ -130,6 +131,12 @@ class TestPlaceOrder:
         assert order["filled_at"] is None
         assert order["fill_price"] is None
         assert order["created_at"]
+        # M1 defaults: plain GTC limit order
+        assert order["kind"] == "limit"
+        assert order["stop_price"] is None
+        assert order["time_in_force"] == "gtc"
+        assert order["expires_at"] is None
+        assert order["triggered_at"] is None
 
         # No trade executed, cash untouched
         state = _db_state(orders_env.db)
@@ -365,7 +372,7 @@ class TestProcessOpenOrdersOnce:
         order_id = _insert_open_order(fill_env.db, "AAPL", "buy", 2, 150.0)
 
         counts = process_open_orders_once(fill_env.db, fill_env.cache)
-        assert counts == {"filled": 0, "rejected": 0, "skipped": 1}
+        assert counts == {"filled": 0, "rejected": 0, "skipped": 1, "expired": 0}
         assert _get_order_row(fill_env.db, order_id)["status"] == "open"
         state = _db_state(fill_env.db)
         assert state.cash == 10000.0
@@ -377,7 +384,7 @@ class TestProcessOpenOrdersOnce:
         fill_env.cache.update("AAPL", 150.0)
 
         counts = process_open_orders_once(fill_env.db, fill_env.cache)
-        assert counts == {"filled": 1, "rejected": 0, "skipped": 0}
+        assert counts == {"filled": 1, "rejected": 0, "skipped": 0, "expired": 0}
 
         row = _get_order_row(fill_env.db, order_id)
         assert row["status"] == "filled"
@@ -404,7 +411,7 @@ class TestProcessOpenOrdersOnce:
 
         # Idempotent: a second pass does not double-fill
         counts = process_open_orders_once(fill_env.db, fill_env.cache)
-        assert counts == {"filled": 0, "rejected": 0, "skipped": 0}
+        assert counts == {"filled": 0, "rejected": 0, "skipped": 0, "expired": 0}
         assert len(_db_state(fill_env.db).trades) == 1
 
     def test_buy_marketability_uses_ask_not_last_price(self, fill_env):
@@ -436,12 +443,12 @@ class TestProcessOpenOrdersOnce:
         order_id = _insert_open_order(fill_env.db, "AAPL", "sell", 2, 250.0)
 
         counts = process_open_orders_once(fill_env.db, fill_env.cache)
-        assert counts == {"filled": 0, "rejected": 0, "skipped": 1}
+        assert counts == {"filled": 0, "rejected": 0, "skipped": 1, "expired": 0}
         assert _get_order_row(fill_env.db, order_id)["status"] == "open"
 
         fill_env.cache.update("AAPL", 250.0)
         counts = process_open_orders_once(fill_env.db, fill_env.cache)
-        assert counts == {"filled": 1, "rejected": 0, "skipped": 0}
+        assert counts == {"filled": 1, "rejected": 0, "skipped": 0, "expired": 0}
 
         row = _get_order_row(fill_env.db, order_id)
         assert row["status"] == "filled"
@@ -456,7 +463,7 @@ class TestProcessOpenOrdersOnce:
         fill_env.cache.update("AAPL", 150.0)  # marketable, but costs $150k > $10k
 
         counts = process_open_orders_once(fill_env.db, fill_env.cache)
-        assert counts == {"filled": 0, "rejected": 1, "skipped": 0}
+        assert counts == {"filled": 0, "rejected": 1, "skipped": 0, "expired": 0}
 
         row = _get_order_row(fill_env.db, order_id)
         assert row["status"] == "rejected"
@@ -475,7 +482,7 @@ class TestProcessOpenOrdersOnce:
         order_id = _insert_open_order(fill_env.db, "AAPL", "sell", 5, 150.0)
 
         counts = process_open_orders_once(fill_env.db, fill_env.cache)
-        assert counts == {"filled": 0, "rejected": 1, "skipped": 0}
+        assert counts == {"filled": 0, "rejected": 1, "skipped": 0, "expired": 0}
         row = _get_order_row(fill_env.db, order_id)
         assert row["status"] == "rejected"
         assert row["reject_reason"] == "Insufficient shares to sell"
@@ -485,13 +492,13 @@ class TestProcessOpenOrdersOnce:
         order_id = _insert_open_order(fill_env.db, "GONE", "buy", 1, 100.0)
 
         counts = process_open_orders_once(fill_env.db, fill_env.cache)
-        assert counts == {"filled": 0, "rejected": 0, "skipped": 1}
+        assert counts == {"filled": 0, "rejected": 0, "skipped": 1, "expired": 0}
         assert _get_order_row(fill_env.db, order_id)["status"] == "open"
 
         # Ticker comes back below the limit → fills on a later pass
         fill_env.cache.update("GONE", 90.0)
         counts = process_open_orders_once(fill_env.db, fill_env.cache)
-        assert counts == {"filled": 1, "rejected": 0, "skipped": 0}
+        assert counts == {"filled": 1, "rejected": 0, "skipped": 0, "expired": 0}
         assert _get_order_row(fill_env.db, order_id)["status"] == "filled"
 
 

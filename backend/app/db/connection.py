@@ -50,11 +50,119 @@ def _needs_seed(conn: sqlite3.Connection) -> bool:
     return row[0] == 0
 
 
+# Columns added after the tables first shipped. CREATE TABLE IF NOT EXISTS in
+# schema.sql does NOT evolve existing tables, so pre-existing database volumes
+# gain these via idempotent ALTER TABLE ADD COLUMN on startup (M1 migration).
+_ORDERS_NEW_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("kind", "TEXT NOT NULL DEFAULT 'limit'"),
+    ("stop_price", "REAL"),
+    ("time_in_force", "TEXT NOT NULL DEFAULT 'gtc'"),
+    ("expires_at", "TEXT"),
+    ("triggered_at", "TEXT"),
+)
+_TRADES_NEW_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("commission", "REAL NOT NULL DEFAULT 0"),
+    ("realized_pnl", "REAL"),
+)
+
+# Rebuild target for the orders table: identical to schema.sql. Used only when
+# an old database still has limit_price declared NOT NULL (stop orders store
+# NULL there) — SQLite cannot drop NOT NULL via ALTER, so rebuild once.
+_ORDERS_REBUILD_DDL = """
+CREATE TABLE orders_m1_rebuild (
+    id            TEXT PRIMARY KEY,
+    user_id       TEXT NOT NULL DEFAULT 'default',
+    ticker        TEXT NOT NULL,
+    side          TEXT NOT NULL,
+    quantity      REAL NOT NULL,
+    kind          TEXT NOT NULL DEFAULT 'limit',
+    limit_price   REAL,
+    stop_price    REAL,
+    time_in_force TEXT NOT NULL DEFAULT 'gtc',
+    expires_at    TEXT,
+    triggered_at  TEXT,
+    status        TEXT NOT NULL DEFAULT 'open',
+    reject_reason TEXT,
+    created_at    TEXT NOT NULL,
+    filled_at     TEXT,
+    fill_price    REAL,
+    fill_trade_id TEXT
+)
+"""
+
+_ORDERS_COLUMN_LIST = (
+    "id, user_id, ticker, side, quantity, kind, limit_price, stop_price, "
+    "time_in_force, expires_at, triggered_at, status, reject_reason, "
+    "created_at, filled_at, fill_price, fill_trade_id"
+)
+
+
+def _table_columns(conn: sqlite3.Connection, table: str) -> dict[str, sqlite3.Row]:
+    """Return {column_name: pragma row} for ``table`` (empty if table absent)."""
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return {row["name"]: row for row in rows}
+
+
+def _add_missing_columns(
+    conn: sqlite3.Connection, table: str, columns: tuple[tuple[str, str], ...]
+) -> list[str]:
+    """ALTER TABLE ADD COLUMN for each column not already present. Idempotent."""
+    existing = _table_columns(conn, table)
+    added: list[str] = []
+    for name, ddl in columns:
+        if name not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+            added.append(f"{table}.{name}")
+    return added
+
+
+def _migrate_schema(conn: sqlite3.Connection) -> None:
+    """Upgrade pre-existing databases to the current schema. Idempotent.
+
+    Runs on every startup after schema.sql is applied. Two steps:
+
+    1. Add columns that shipped after the tables were first created
+       (PRAGMA table_info check -> ALTER TABLE ADD COLUMN). Existing rows get
+       the column defaults (orders: kind='limit', time_in_force='gtc';
+       trades: commission=0, realized_pnl NULL) — exactly the pre-M1 semantics.
+    2. Relax orders.limit_price to nullable (stop orders carry no limit price).
+       SQLite cannot drop NOT NULL in place, so a one-time table rebuild
+       (create new -> copy -> drop -> rename) runs when the old constraint is
+       detected. The status index is recreated afterwards (DROP TABLE drops it).
+    """
+    added = _add_missing_columns(conn, "orders", _ORDERS_NEW_COLUMNS)
+    added += _add_missing_columns(conn, "trades", _TRADES_NEW_COLUMNS)
+
+    limit_price_col = _table_columns(conn, "orders").get("limit_price")
+    rebuilt = limit_price_col is not None and limit_price_col["notnull"]
+    if rebuilt:
+        conn.execute(_ORDERS_REBUILD_DDL)
+        conn.execute(
+            f"INSERT INTO orders_m1_rebuild ({_ORDERS_COLUMN_LIST}) "
+            f"SELECT {_ORDERS_COLUMN_LIST} FROM orders"
+        )
+        conn.execute("DROP TABLE orders")
+        conn.execute("ALTER TABLE orders_m1_rebuild RENAME TO orders")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_orders_user_status ON orders (user_id, status)"
+        )
+
+    if added or rebuilt:
+        conn.commit()
+        logger.info(
+            "Schema migration applied: added columns %s%s",
+            added or "(none)",
+            "; rebuilt orders table for nullable limit_price" if rebuilt else "",
+        )
+
+
 def init_db(db_path: str = DB_PATH) -> None:
     """Initialize the database: create schema and seed default data if empty.
 
     Idempotent — uses ``CREATE TABLE IF NOT EXISTS`` so calling this multiple
-    times does not raise errors or duplicate data.
+    times does not raise errors or duplicate data, then runs the column
+    migration step (``_migrate_schema``) so pre-existing database volumes
+    pick up columns added after their tables were first created.
 
     Args:
         db_path: Path to the SQLite database file. Defaults to DB_PATH.
@@ -64,6 +172,7 @@ def init_db(db_path: str = DB_PATH) -> None:
     try:
         schema_sql = _SCHEMA_FILE.read_text(encoding="utf-8")
         conn.executescript(schema_sql)
+        _migrate_schema(conn)
         logger.debug("Schema applied successfully")
 
         if _needs_seed(conn):

@@ -1,25 +1,44 @@
-"""Limit-order API routes and fill engine for FinAlly.
+"""Order API routes and fill engine for FinAlly (limit / stop / stop-limit).
 
 Provides:
-- POST   /api/portfolio/orders            — place a limit order (marketable orders fill immediately)
+- POST   /api/portfolio/orders            — place an order (marketable limit
+  orders fill immediately; stop/stop_limit orders always rest until triggered)
 - GET    /api/portfolio/orders            — list orders (status filter, newest first)
 - DELETE /api/portfolio/orders/{order_id} — cancel an open order
 
 plus the background fill engine:
-- ``process_open_orders_once(db_path, price_cache)`` — one scan-and-fill pass
-  over open orders (synchronous, unit-testable)
-- ``orders_fill_loop(price_cache, db_path, interval)`` — asyncio background
-  task wired in main.py's lifespan, calling the pass every ~1 second
+- ``process_open_orders_once(db_path, price_cache, commission_bps)`` — one
+  scan pass over open orders (synchronous, unit-testable): expires day orders,
+  triggers stops, and fills marketable orders
+- ``orders_fill_loop(price_cache, db_path, interval, commission_bps)`` —
+  asyncio background task wired in main.py's lifespan, calling the pass every
+  ~1 second
 
 Routes are created via the factory function ``create_orders_router`` which
-closes over the shared ``PriceCache`` instance and the database path, mirroring
-the other routers.
+closes over the shared ``PriceCache`` instance, the database path, and the
+commission rate, mirroring the other routers.
 
-Marketability semantics (mirrors ``execute_trade_on_conn`` fill pricing):
-a buy is marketable when the current ask is at or below the limit price and
-fills at the ask; a sell is marketable when the current bid is at or above the
-limit price and fills at the bid. On a zero spread (bid == ask), the last price
-is used for both, matching the market-order fill path.
+Order kinds (M1, PLATFORM_ROADMAP §M1):
+- ``limit``: limit_price required. A buy is marketable when the current ask is
+  at or below the limit price and fills at the ask; a sell is marketable when
+  the current bid is at or above the limit price and fills at the bid. On a
+  zero spread (bid == ask), the last price is used for both, matching the
+  market-order fill path. Marketable limit orders fill at placement time.
+- ``stop``: stop_price required, market-on-trigger. A BUY stop triggers when
+  the ask rises to/above stop_price (breakout entry); a SELL stop triggers
+  when the bid falls to/below stop_price (stop-loss). On trigger the fill
+  loop executes a market fill at the ask/bid.
+- ``stop_limit``: both prices required. On trigger, ``triggered_at`` is
+  stamped and the order becomes a resting limit order (normal limit
+  semantics thereafter).
+
+Wrong-side stops are rejected at placement: a SELL stop must be below the
+current bid, a BUY stop above the current ask (otherwise it would trigger
+instantly and it is really a market order).
+
+Time-in-force: ``gtc`` (default) never expires; ``day`` sets expires_at to
+created_at + 24h (this becomes session close once M3's session clock lands).
+The fill loop marks open orders past expires_at as status ``expired``.
 """
 
 from __future__ import annotations
@@ -28,7 +47,7 @@ import asyncio
 import logging
 import sqlite3
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
@@ -41,14 +60,23 @@ from app.routes.portfolio import _record_snapshot, execute_trade_on_conn
 
 logger = logging.getLogger(__name__)
 
-ORDER_STATUSES = {"open", "filled", "cancelled", "rejected"}
+ORDER_STATUSES = {"open", "filled", "cancelled", "rejected", "expired"}
+ORDER_KINDS = {"limit", "stop", "stop_limit"}
+TIME_IN_FORCE_VALUES = {"day", "gtc"}
+
+# 'day' orders live 24 hours from placement for now; once M3.1's session clock
+# lands this becomes expiry at session close (PLATFORM_ROADMAP M1.2 / M3.1).
+DAY_ORDER_TTL = timedelta(hours=24)
 
 
-class LimitOrderRequest(BaseModel):
+class PlaceOrderRequest(BaseModel):
     ticker: str
     quantity: float
     side: str  # "buy" or "sell"
-    limit_price: float
+    kind: str = "limit"  # "limit" | "stop" | "stop_limit"
+    limit_price: float | None = None
+    stop_price: float | None = None
+    time_in_force: str = "gtc"  # "day" | "gtc"
 
 
 def _order_dict(
@@ -57,7 +85,12 @@ def _order_dict(
     ticker: str,
     side: str,
     quantity: float,
-    limit_price: float,
+    kind: str,
+    limit_price: float | None,
+    stop_price: float | None,
+    time_in_force: str,
+    expires_at: str | None,
+    triggered_at: str | None = None,
     status: str,
     reject_reason: str | None = None,
     created_at: str,
@@ -70,7 +103,12 @@ def _order_dict(
         "ticker": ticker,
         "side": side,
         "quantity": quantity,
+        "kind": kind,
         "limit_price": limit_price,
+        "stop_price": stop_price,
+        "time_in_force": time_in_force,
+        "expires_at": expires_at,
+        "triggered_at": triggered_at,
         "status": status,
         "reject_reason": reject_reason,
         "created_at": created_at,
@@ -86,7 +124,12 @@ def _order_row_to_dict(row: sqlite3.Row) -> dict:
         ticker=row["ticker"],
         side=row["side"],
         quantity=row["quantity"],
+        kind=row["kind"],
         limit_price=row["limit_price"],
+        stop_price=row["stop_price"],
+        time_in_force=row["time_in_force"],
+        expires_at=row["expires_at"],
+        triggered_at=row["triggered_at"],
         status=row["status"],
         reject_reason=row["reject_reason"],
         created_at=row["created_at"],
@@ -95,21 +138,64 @@ def _order_row_to_dict(row: sqlite3.Row) -> dict:
     )
 
 
-def _marketable_price(quote: PriceUpdate, side: str, limit_price: float) -> float | None:
-    """Return the executable fill price when the order is marketable, else None.
+_ORDER_SELECT_COLUMNS = (
+    "id, ticker, side, quantity, kind, limit_price, stop_price, "
+    "time_in_force, expires_at, triggered_at, status, reject_reason, "
+    "created_at, filled_at, fill_price"
+)
 
-    Mirrors ``execute_trade_on_conn``'s fill-price selection: buys fill at the
-    ask, sells at the bid, falling back to the last price on a zero spread.
-    A buy is marketable when that price is <= limit_price; a sell when it is
-    >= limit_price.
+
+def _quote_bid_ask(quote: PriceUpdate) -> tuple[float, float]:
+    """Return (bid, ask), falling back to the last price on a zero/absent spread.
+
+    Mirrors ``execute_trade_on_conn``'s fill-price selection so trigger and
+    marketability checks gate on exactly the price a fill would execute at.
     """
     if quote.bid is not None and quote.ask is not None and quote.bid != quote.ask:
-        price = quote.ask if side == "buy" else quote.bid
-    else:
-        price = quote.price
+        return quote.bid, quote.ask
+    return quote.price, quote.price
+
+
+def _marketable_price(quote: PriceUpdate, side: str, limit_price: float) -> float | None:
+    """Return the executable fill price when a limit order is marketable, else None.
+
+    Buys fill at the ask, sells at the bid (zero-spread fallback to the last
+    price). A buy is marketable when that price is <= limit_price; a sell when
+    it is >= limit_price.
+    """
+    bid, ask = _quote_bid_ask(quote)
+    price = ask if side == "buy" else bid
     if side == "buy":
         return price if price <= limit_price else None
     return price if price >= limit_price else None
+
+
+def _stop_triggered(quote: PriceUpdate, side: str, stop_price: float) -> bool:
+    """True when a stop condition has fired.
+
+    BUY stop: triggers when the ask rises to/above stop_price (breakout entry).
+    SELL stop: triggers when the bid falls to/below stop_price (stop-loss).
+    """
+    bid, ask = _quote_bid_ask(quote)
+    if side == "buy":
+        return ask >= stop_price
+    return bid <= stop_price
+
+
+def _is_expired(expires_at: str, now: datetime) -> bool:
+    """True when the ISO timestamp ``expires_at`` is at/before ``now``.
+
+    Unparseable timestamps are logged and treated as non-expiring (the order
+    stays open rather than being destroyed by bad data).
+    """
+    try:
+        expiry = datetime.fromisoformat(expires_at)
+    except ValueError:
+        logger.warning("Order has unparseable expires_at %r — treating as GTC", expires_at)
+        return False
+    if expiry.tzinfo is None:
+        expiry = expiry.replace(tzinfo=timezone.utc)
+    return now >= expiry
 
 
 def _execute_fill(
@@ -118,57 +204,55 @@ def _execute_fill(
     ticker: str,
     side: str,
     quantity: float,
-    limit_price: float,
+    limit_price: float | None,
+    commission_bps: float,
 ) -> dict:
-    """Execute the trade for a marketable order within the caller's transaction.
+    """Execute the trade for a triggered/marketable order within the caller's transaction.
 
-    Thin guard around ``execute_trade_on_conn``: if the cache ticked between the
+    Thin guard around ``execute_trade_on_conn``: for limit-priced orders
+    (limit / triggered stop_limit), if the cache ticked between the
     marketability check and execution and the executed price would violate the
     limit, returns ``{"status": "not_marketable"}`` — the caller must roll back
-    and leave the order open. Otherwise returns the trade outcome dict as-is.
-    Does NOT commit; the caller owns the transaction boundary.
+    and leave the order open. Plain stop orders (limit_price is None) fill at
+    whatever the market gives (market-on-trigger). Does NOT commit; the caller
+    owns the transaction boundary.
     """
-    outcome = execute_trade_on_conn(conn, price_cache, ticker, side, quantity)
-    if outcome["status"] == "executed":
+    outcome = execute_trade_on_conn(
+        conn, price_cache, ticker, side, quantity, commission_bps=commission_bps
+    )
+    if outcome["status"] == "executed" and limit_price is not None:
         price = outcome["price"]
         if (side == "buy" and price > limit_price) or (side == "sell" and price < limit_price):
             return {"status": "not_marketable", "ticker": ticker}
     return outcome
 
 
-def _try_fill_order(
-    conn: sqlite3.Connection, price_cache: PriceCache, order: sqlite3.Row
+def _apply_fill_outcome(
+    conn: sqlite3.Connection,
+    price_cache: PriceCache,
+    order: sqlite3.Row,
+    outcome: dict,
 ) -> str:
-    """Attempt to fill one open order. Returns 'filled', 'rejected', or 'skipped'.
+    """Apply a trade outcome to the order row. Returns 'filled', 'rejected', or 'skipped'.
 
     Transaction semantics: commits on fill/reject, rolls back otherwise. The
     trade, its portfolio snapshot, and the order-status update land in the SAME
-    commit. Orders whose ticker has no quote (removed from the cache) are
-    skipped and stay open — the ticker may come back.
+    commit. For stop/stop_limit orders, triggered_at is stamped alongside the
+    terminal status (COALESCE keeps an earlier stamp); it stays NULL for limit
+    orders.
     """
-    ticker: str = order["ticker"]
-    side: str = order["side"]
-    quantity: float = order["quantity"]
-    limit_price: float = order["limit_price"]
-
-    quote = price_cache.get(ticker)
-    if quote is None:
-        return "skipped"  # No quote (e.g. removed from cache) — leave open.
-    if _marketable_price(quote, side, limit_price) is None:
-        return "skipped"  # Not marketable yet.
-
-    outcome = _execute_fill(conn, price_cache, ticker, side, quantity, limit_price)
-
     if outcome["status"] == "executed":
         _record_snapshot(conn, price_cache)
         filled_at = datetime.now(timezone.utc).isoformat()
         cur = conn.execute(
             """
             UPDATE orders
-            SET status = 'filled', filled_at = ?, fill_price = ?, fill_trade_id = ?
+            SET status = 'filled', filled_at = ?, fill_price = ?, fill_trade_id = ?,
+                triggered_at = CASE WHEN kind = 'limit' THEN triggered_at
+                                    ELSE COALESCE(triggered_at, ?) END
             WHERE id = ? AND status = 'open'
             """,
-            (filled_at, outcome["price"], outcome["trade_id"], order["id"]),
+            (filled_at, outcome["price"], outcome["trade_id"], filled_at, order["id"]),
         )
         if cur.rowcount == 0:
             # Order was cancelled between the scan and taking the write lock —
@@ -177,8 +261,9 @@ def _try_fill_order(
             return "skipped"
         conn.commit()
         logger.info(
-            "Limit order %s filled: %s %s %s @ %s",
-            order["id"], side, quantity, ticker, outcome["price"],
+            "Order %s (%s) filled: %s %s %s @ %s",
+            order["id"], order["kind"], order["side"], order["quantity"],
+            order["ticker"], outcome["price"],
         )
         return "filled"
 
@@ -193,33 +278,118 @@ def _try_fill_order(
         return "skipped"  # Cache raced away between our check and the fill.
 
     # Genuine validation failure at fill time (insufficient cash/shares).
+    now = datetime.now(timezone.utc).isoformat()
     cur = conn.execute(
-        "UPDATE orders SET status = 'rejected', reject_reason = ? WHERE id = ? AND status = 'open'",
-        (error, order["id"]),
+        """
+        UPDATE orders
+        SET status = 'rejected', reject_reason = ?,
+            triggered_at = CASE WHEN kind = 'limit' THEN triggered_at
+                                ELSE COALESCE(triggered_at, ?) END
+        WHERE id = ? AND status = 'open'
+        """,
+        (error, now, order["id"]),
     )
     conn.commit()
     if cur.rowcount == 0:
         return "skipped"  # Cancelled concurrently — nothing to reject.
-    logger.info("Limit order %s rejected at fill time: %s", order["id"], error)
+    logger.info("Order %s rejected at fill time: %s", order["id"], error)
     return "rejected"
 
 
-def process_open_orders_once(db_path: str, price_cache: PriceCache) -> dict[str, int]:
-    """One scan-and-fill pass over all open limit orders.
+def _try_fill_order(
+    conn: sqlite3.Connection,
+    price_cache: PriceCache,
+    order: sqlite3.Row,
+    commission_bps: float,
+) -> str:
+    """Process one open order. Returns 'filled', 'rejected', 'skipped', or 'expired'.
+
+    Pipeline per pass: expire (TIF) -> trigger (stop/stop_limit) -> fill.
+    A stop_limit whose trigger fires is stamped triggered_at in its own commit
+    and then evaluated with normal limit semantics in the same pass. Orders
+    whose ticker has no quote (removed from the cache) are skipped and stay
+    open — the ticker may come back — but expiry applies even without a quote.
+    """
+    ticker: str = order["ticker"]
+    side: str = order["side"]
+    quantity: float = order["quantity"]
+    kind: str = order["kind"]
+    limit_price: float | None = order["limit_price"]
+    stop_price: float | None = order["stop_price"]
+    triggered_at: str | None = order["triggered_at"]
+
+    # Time-in-force: day orders past their expiry become 'expired' (terminal).
+    expires_at: str | None = order["expires_at"]
+    if expires_at is not None and _is_expired(expires_at, datetime.now(timezone.utc)):
+        cur = conn.execute(
+            "UPDATE orders SET status = 'expired' WHERE id = ? AND status = 'open'",
+            (order["id"],),
+        )
+        conn.commit()
+        if cur.rowcount == 0:
+            return "skipped"  # Cancelled/filled concurrently.
+        logger.info("Order %s expired (time_in_force=%s)", order["id"], order["time_in_force"])
+        return "expired"
+
+    quote = price_cache.get(ticker)
+    if quote is None:
+        return "skipped"  # No quote (e.g. removed from cache) — leave open.
+
+    if kind == "stop":
+        if stop_price is None or not _stop_triggered(quote, side, stop_price):
+            return "skipped"  # Untriggered — stays open.
+        # Market-on-trigger: fill at the ask/bid with no limit guard.
+        outcome = _execute_fill(
+            conn, price_cache, ticker, side, quantity, None, commission_bps
+        )
+        return _apply_fill_outcome(conn, price_cache, order, outcome)
+
+    if kind == "stop_limit" and triggered_at is None:
+        if stop_price is None or not _stop_triggered(quote, side, stop_price):
+            return "skipped"  # Untriggered — stays open.
+        # Trigger fired: stamp triggered_at in its own commit, then the order
+        # is a plain resting limit order from here on (including this pass).
+        cur = conn.execute(
+            "UPDATE orders SET triggered_at = ? "
+            "WHERE id = ? AND status = 'open' AND triggered_at IS NULL",
+            (datetime.now(timezone.utc).isoformat(), order["id"]),
+        )
+        conn.commit()
+        if cur.rowcount == 0:
+            return "skipped"  # Cancelled (or already stamped) concurrently.
+        logger.info("Stop-limit order %s triggered at stop %s", order["id"], stop_price)
+
+    # Limit semantics: kind == 'limit', or a stop_limit that has triggered.
+    if limit_price is None or _marketable_price(quote, side, limit_price) is None:
+        return "skipped"  # Not marketable yet.
+
+    outcome = _execute_fill(
+        conn, price_cache, ticker, side, quantity, limit_price, commission_bps
+    )
+    return _apply_fill_outcome(conn, price_cache, order, outcome)
+
+
+def process_open_orders_once(
+    db_path: str, price_cache: PriceCache, commission_bps: float = 0.0
+) -> dict[str, int]:
+    """One scan pass over all open orders: expire, trigger, and fill.
 
     Opens (and always closes) its own connection. Each order is processed in
     its own transaction — one bad order (or a DB lock error on it) is logged
     and does not stop the pass. Orders are processed oldest-first.
 
     Returns:
-        Counts for observability/tests: {"filled": n, "rejected": n, "skipped": n}.
+        Counts for observability/tests:
+        {"filled": n, "rejected": n, "skipped": n, "expired": n}.
+        A stop_limit that triggers but does not fill counts as "skipped"
+        (it remains open).
     """
-    counts = {"filled": 0, "rejected": 0, "skipped": 0}
+    counts = {"filled": 0, "rejected": 0, "skipped": 0, "expired": 0}
     conn = get_conn(db_path)
     try:
         open_rows = conn.execute(
-            """
-            SELECT id, ticker, side, quantity, limit_price
+            f"""
+            SELECT {_ORDER_SELECT_COLUMNS}
             FROM orders
             WHERE user_id = 'default' AND status = 'open'
             ORDER BY created_at ASC, rowid ASC
@@ -227,7 +397,7 @@ def process_open_orders_once(db_path: str, price_cache: PriceCache) -> dict[str,
         ).fetchall()
         for row in open_rows:
             try:
-                result = _try_fill_order(conn, price_cache, row)
+                result = _try_fill_order(conn, price_cache, row, commission_bps)
             except Exception:
                 try:
                     conn.rollback()
@@ -244,16 +414,19 @@ def process_open_orders_once(db_path: str, price_cache: PriceCache) -> dict[str,
 
 
 async def orders_fill_loop(
-    price_cache: PriceCache, db_path: str, interval: float = 1.0
+    price_cache: PriceCache,
+    db_path: str,
+    interval: float = 1.0,
+    commission_bps: float = 0.0,
 ) -> None:
-    """Background task: fill marketable open limit orders every ``interval`` seconds.
+    """Background task: process open orders every ``interval`` seconds.
 
     Runs indefinitely until cancelled via ``asyncio.CancelledError``. Any other
     exception (bad order, DB lock, etc.) is logged and the loop continues.
     """
     while True:
         try:
-            process_open_orders_once(db_path, price_cache)
+            process_open_orders_once(db_path, price_cache, commission_bps)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -261,12 +434,68 @@ async def orders_fill_loop(
         await asyncio.sleep(interval)
 
 
-def create_orders_router(price_cache: PriceCache, db_path: str) -> APIRouter:
-    """Factory: build the limit-orders APIRouter with injected dependencies.
+def _validate_order_request(
+    body: PlaceOrderRequest, side: str, kind: str, time_in_force: str, quote: PriceUpdate | None
+) -> str | None:
+    """Validate a placement request. Returns an error message or None if valid.
+
+    Covers the kind/tif enums, the required-fields matrix per kind, price
+    positivity, and the wrong-side stop checks against the live quote.
+    """
+    if quote is None:
+        return "Ticker not found in price cache"
+    if side not in {"buy", "sell"}:
+        return "Side must be 'buy' or 'sell'"
+    if body.quantity <= 0:
+        return "Quantity must be greater than 0"
+    if kind not in ORDER_KINDS:
+        return "kind must be one of 'limit', 'stop', 'stop_limit'"
+    if time_in_force not in TIME_IN_FORCE_VALUES:
+        return "time_in_force must be 'day' or 'gtc'"
+
+    # Required-fields matrix per kind
+    if kind == "limit":
+        if body.limit_price is None:
+            return "limit_price is required for kind 'limit'"
+        if body.stop_price is not None:
+            return "stop_price is not allowed for kind 'limit'"
+    elif kind == "stop":
+        if body.stop_price is None:
+            return "stop_price is required for kind 'stop'"
+        if body.limit_price is not None:
+            return "limit_price is not allowed for kind 'stop'"
+    else:  # stop_limit
+        if body.limit_price is None or body.stop_price is None:
+            return "kind 'stop_limit' requires both limit_price and stop_price"
+
+    # Price positivity
+    if body.limit_price is not None and body.limit_price <= 0:
+        return "Limit price must be greater than 0"
+    if body.stop_price is not None and body.stop_price <= 0:
+        return "Stop price must be greater than 0"
+
+    # Wrong-side stops rejected: a stop that is already on the triggering side
+    # of the market would fire instantly (it is really a market order).
+    if kind in {"stop", "stop_limit"}:
+        bid, ask = _quote_bid_ask(quote)
+        if side == "sell" and body.stop_price >= bid:
+            return "Stop price must be below the market"
+        if side == "buy" and body.stop_price <= ask:
+            return "Stop price must be above the market"
+
+    return None
+
+
+def create_orders_router(
+    price_cache: PriceCache, db_path: str, commission_bps: float = 0.0
+) -> APIRouter:
+    """Factory: build the orders APIRouter with injected dependencies.
 
     Args:
         price_cache: Shared in-memory price cache populated by the market data source.
         db_path: Path to the SQLite database file.
+        commission_bps: Commission in basis points of notional applied to every
+            fill (FINALLY_COMMISSION_BPS, read once at app startup in main.py).
 
     Returns:
         A configured FastAPI APIRouter ready to be registered with ``app.include_router``.
@@ -274,40 +503,42 @@ def create_orders_router(price_cache: PriceCache, db_path: str) -> APIRouter:
     router = APIRouter(prefix="/api/portfolio", tags=["orders"])
 
     @router.post("/orders")
-    async def place_order(body: LimitOrderRequest) -> dict:
-        """Place a limit order.
+    async def place_order(body: PlaceOrderRequest) -> dict:
+        """Place an order (limit, stop, or stop_limit).
 
-        Marketable orders (buy: ask <= limit_price; sell: bid >= limit_price)
-        execute immediately through the same transactional path as market
-        orders — positions/cash/trades row/snapshot and the 'filled' order row
-        commit atomically. If the immediate fill fails validation (e.g.
-        insufficient cash), HTTP 400 is returned and NOTHING is stored.
-        Non-marketable orders are stored as status 'open' for the fill loop.
+        Marketable LIMIT orders (buy: ask <= limit_price; sell: bid >=
+        limit_price) execute immediately through the same transactional path
+        as market orders — positions/cash/trades row/snapshot and the 'filled'
+        order row commit atomically. If the immediate fill fails validation
+        (e.g. insufficient cash), HTTP 400 is returned and NOTHING is stored.
+        Non-marketable limit orders and all stop/stop_limit orders are stored
+        as status 'open' for the fill loop. time_in_force 'day' stamps
+        expires_at = created_at + 24h (session close once M3 lands).
         """
         ticker = body.ticker.strip().upper()
         side = body.side.lower()
+        kind = body.kind.lower()
+        time_in_force = body.time_in_force.lower()
 
         quote = price_cache.get(ticker)
-        if quote is None:
-            return JSONResponse(
-                status_code=400, content={"error": "Ticker not found in price cache"}
-            )
-        if side not in {"buy", "sell"}:
-            return JSONResponse(
-                status_code=400, content={"error": "Side must be 'buy' or 'sell'"}
-            )
-        if body.quantity <= 0:
-            return JSONResponse(
-                status_code=400, content={"error": "Quantity must be greater than 0"}
-            )
-        if body.limit_price <= 0:
-            return JSONResponse(
-                status_code=400, content={"error": "Limit price must be greater than 0"}
-            )
+        error = _validate_order_request(body, side, kind, time_in_force, quote)
+        if error is not None:
+            return JSONResponse(status_code=400, content={"error": error})
 
         order_id = str(uuid.uuid4())
-        created_at = datetime.now(timezone.utc).isoformat()
-        marketable = _marketable_price(quote, side, body.limit_price) is not None
+        created_dt = datetime.now(timezone.utc)
+        created_at = created_dt.isoformat()
+        # 'day' orders expire 24 hours from placement until M3's session clock
+        # provides a real session close; 'gtc' orders never expire.
+        expires_at = (
+            (created_dt + DAY_ORDER_TTL).isoformat() if time_in_force == "day" else None
+        )
+        # Only limit orders can fill at placement. Stops never fill immediately:
+        # the wrong-side check above guarantees they are untriggered right now.
+        marketable = (
+            kind == "limit"
+            and _marketable_price(quote, side, body.limit_price) is not None
+        )
 
         conn = get_conn(db_path)
         try:
@@ -318,7 +549,8 @@ def create_orders_router(price_cache: PriceCache, db_path: str) -> APIRouter:
 
             if marketable:
                 outcome = _execute_fill(
-                    conn, price_cache, ticker, side, body.quantity, body.limit_price
+                    conn, price_cache, ticker, side, body.quantity,
+                    body.limit_price, commission_bps,
                 )
                 if outcome["status"] == "executed":
                     status = "filled"
@@ -340,22 +572,26 @@ def create_orders_router(price_cache: PriceCache, db_path: str) -> APIRouter:
             conn.execute(
                 """
                 INSERT INTO orders (
-                    id, user_id, ticker, side, quantity, limit_price,
-                    status, reject_reason, created_at, filled_at, fill_price, fill_trade_id
+                    id, user_id, ticker, side, quantity, kind, limit_price,
+                    stop_price, time_in_force, expires_at, triggered_at,
+                    status, reject_reason, created_at, filled_at, fill_price,
+                    fill_trade_id
                 )
-                VALUES (?, 'default', ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)
+                VALUES (?, 'default', ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, ?, ?, ?, ?)
                 """,
                 (
-                    order_id, ticker, side, body.quantity, body.limit_price,
-                    status, created_at, filled_at, fill_price, fill_trade_id,
+                    order_id, ticker, side, body.quantity, kind,
+                    body.limit_price, body.stop_price, time_in_force,
+                    expires_at, status, created_at, filled_at, fill_price,
+                    fill_trade_id,
                 ),
             )
             conn.commit()
         except Exception:
             conn.rollback()
             logger.exception(
-                "Unexpected error placing limit order %s %s %s @ %s",
-                side, body.quantity, ticker, body.limit_price,
+                "Unexpected error placing %s order %s %s %s (limit=%s stop=%s)",
+                kind, side, body.quantity, ticker, body.limit_price, body.stop_price,
             )
             raise
         finally:
@@ -367,7 +603,12 @@ def create_orders_router(price_cache: PriceCache, db_path: str) -> APIRouter:
                 ticker=ticker,
                 side=side,
                 quantity=body.quantity,
+                kind=kind,
                 limit_price=body.limit_price,
+                stop_price=body.stop_price,
+                time_in_force=time_in_force,
+                expires_at=expires_at,
+                triggered_at=None,
                 status=status,
                 created_at=created_at,
                 filled_at=filled_at,
@@ -380,8 +621,8 @@ def create_orders_router(price_cache: PriceCache, db_path: str) -> APIRouter:
         """List orders, newest first (created_at DESC, rowid DESC tie-break).
 
         Query params:
-            status: 'open' | 'filled' | 'cancelled' | 'rejected' | 'all'
-                (default 'all'). Invalid values return HTTP 400.
+            status: 'open' | 'filled' | 'cancelled' | 'rejected' | 'expired'
+                | 'all' (default 'all'). Invalid values return HTTP 400.
             limit: maximum number of orders to return. Defaults to 50 and is
                 clamped to the range 1..500. Non-integer values return HTTP 400.
         """
@@ -390,7 +631,10 @@ def create_orders_router(price_cache: PriceCache, db_path: str) -> APIRouter:
             return JSONResponse(
                 status_code=400,
                 content={
-                    "error": "status must be one of 'open', 'filled', 'cancelled', 'rejected', 'all'"
+                    "error": (
+                        "status must be one of 'open', 'filled', 'cancelled', "
+                        "'rejected', 'expired', 'all'"
+                    )
                 },
             )
 
@@ -405,9 +649,8 @@ def create_orders_router(price_cache: PriceCache, db_path: str) -> APIRouter:
                 )
         limit_value = max(1, min(500, limit_value))
 
-        query = """
-            SELECT id, ticker, side, quantity, limit_price, status,
-                   reject_reason, created_at, filled_at, fill_price
+        query = f"""
+            SELECT {_ORDER_SELECT_COLUMNS}
             FROM orders
             WHERE user_id = 'default'
         """
@@ -430,16 +673,15 @@ def create_orders_router(price_cache: PriceCache, db_path: str) -> APIRouter:
         """Cancel an open order.
 
         Returns the cancelled order. Unknown ids return HTTP 404; orders that
-        are not open (filled/cancelled/rejected) return HTTP 400. BEGIN
-        IMMEDIATE serializes the status check against a concurrent fill.
+        are not open (filled/cancelled/rejected/expired) return HTTP 400.
+        BEGIN IMMEDIATE serializes the status check against a concurrent fill.
         """
         conn = get_conn(db_path)
         try:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                """
-                SELECT id, ticker, side, quantity, limit_price, status,
-                       reject_reason, created_at, filled_at, fill_price
+                f"""
+                SELECT {_ORDER_SELECT_COLUMNS}
                 FROM orders
                 WHERE id = ? AND user_id = 'default'
                 """,

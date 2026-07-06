@@ -25,6 +25,28 @@ from app.market.seed_prices import SEED_PRICES
 logger = logging.getLogger(__name__)
 
 
+def _read_commission_bps() -> float:
+    """Parse FINALLY_COMMISSION_BPS from the environment (default 0.0).
+
+    Read ONCE at app startup and passed down to routers and the fill loop like
+    the other config (db_path, price_cache) — helpers never read the env
+    themselves. Invalid or negative values log a warning and fall back to 0.0
+    (commission-free, the pre-M1 behavior).
+    """
+    raw = os.getenv("FINALLY_COMMISSION_BPS", "").strip()
+    if not raw:
+        return 0.0
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning("Invalid FINALLY_COMMISSION_BPS=%r — using 0.0", raw)
+        return 0.0
+    if value < 0:
+        logger.warning("Negative FINALLY_COMMISSION_BPS=%r — using 0.0", raw)
+        return 0.0
+    return value
+
+
 def _mount_static_files(app: FastAPI) -> None:
     """Mount the static frontend after all API routers are registered."""
     static_dir = Path(__file__).parent.parent / "static"
@@ -60,6 +82,9 @@ async def _snapshot_loop(price_cache: PriceCache, db_path: str, interval: int = 
 async def lifespan(app: FastAPI):
     """Manage application lifecycle: start/stop market data and initialize DB."""
     db_path = os.getenv("DB_PATH", "db/finally.db")
+    commission_bps = _read_commission_bps()
+    if commission_bps:
+        logger.info("FinAlly startup: commission enabled at %s bps", commission_bps)
 
     logger.info("FinAlly startup: initializing database at %s", db_path)
     init_db(db_path)
@@ -87,12 +112,12 @@ async def lifespan(app: FastAPI):
 
     # Portfolio router
     from app.routes.portfolio import create_portfolio_router
-    portfolio_router = create_portfolio_router(price_cache, db_path)
+    portfolio_router = create_portfolio_router(price_cache, db_path, commission_bps)
     app.include_router(portfolio_router)
 
-    # Limit orders router
+    # Orders router (limit / stop / stop_limit)
     from app.routes.orders import create_orders_router, orders_fill_loop
-    orders_router = create_orders_router(price_cache, db_path)
+    orders_router = create_orders_router(price_cache, db_path, commission_bps)
     app.include_router(orders_router)
 
     # Watchlist router
@@ -102,7 +127,7 @@ async def lifespan(app: FastAPI):
 
     # Chat router
     from app.routes.chat import create_chat_router
-    chat_router = create_chat_router(price_cache, db_path)
+    chat_router = create_chat_router(price_cache, db_path, commission_bps)
     app.include_router(chat_router)
 
     # Market data router (history backfill)
@@ -118,10 +143,12 @@ async def lifespan(app: FastAPI):
     app.state.snapshot_task = snapshot_task
     logger.info("FinAlly startup: portfolio snapshot background task started")
 
-    # Start background limit-order fill task (every ~1 second)
-    orders_fill_task = asyncio.create_task(orders_fill_loop(price_cache, db_path))
+    # Start background order fill task (every ~1 second)
+    orders_fill_task = asyncio.create_task(
+        orders_fill_loop(price_cache, db_path, commission_bps=commission_bps)
+    )
     app.state.orders_fill_task = orders_fill_task
-    logger.info("FinAlly startup: limit-order fill background task started")
+    logger.info("FinAlly startup: order fill background task started")
 
     yield
 

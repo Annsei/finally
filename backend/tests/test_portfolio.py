@@ -146,8 +146,17 @@ class TestTradesEndpoint:
         # Exact response shape per trade entry
         for trade in trades:
             assert set(trade.keys()) == {
-                "id", "ticker", "side", "quantity", "price", "executed_at",
+                "id", "ticker", "side", "quantity", "price",
+                "commission", "realized_pnl", "executed_at",
             }
+
+        # Commission-free by default; realized_pnl only set on sells
+        for trade in trades:
+            assert trade["commission"] == 0.0
+            if trade["side"] == "buy":
+                assert trade["realized_pnl"] is None
+            else:
+                assert trade["realized_pnl"] is not None
 
         # Newest first: sell AAPL, buy GOOGL, buy AAPL
         assert (trades[0]["ticker"], trades[0]["side"]) == ("AAPL", "sell")
