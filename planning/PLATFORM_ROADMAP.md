@@ -48,8 +48,9 @@ Everything extends the existing `orders` table + 1s fill loop.
    (e.g. >40% of portfolio) surfaced in the UI before order submit and as a
    watchlist badge; no hard blocks (it's a sim). (S)
 
-## M2 — The AI becomes an agent (flagship milestone)
-### M2.1 + M2.2 DONE — 2026-07-06 (56e497a/7db0cd3); M2.3 + M2.4 remaining
+## M2 — The AI becomes an agent (flagship milestone) — COMPLETE 2026-07-06
+### M2.1+2.2: 56e497a/7db0cd3 · M2.3+2.4: 27c7df2/37a6b32
+### Known refinement: constrain brief prompts to supported actions (no shorting)
 
 1. **AI places advanced orders** (DONE) — extend the chat structured-output schema:
    `orders: [{ticker, side, quantity, kind, limit_price?, stop_price?}]`
