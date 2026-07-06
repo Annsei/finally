@@ -16,7 +16,8 @@ day one.
 
 ---
 
-## P0 — Maintenance debt (do before/alongside M1)
+## P0 — Maintenance debt (DONE — 2026-07-06: E2E orders/ticker specs added,
+## key rotated by the user, console script removed)
 
 | Item | Why | Effort |
 |---|---|---|
@@ -24,7 +25,7 @@ day one.
 | Rotate the OpenRouter key | Flagged compromised 2026-06; still unrotated (manual, openrouter.ai) | S |
 | `pyproject.toml` broken `finally-server` console script | Invoking it fails; unused | S |
 
-## M1 — Advanced orders & risk rails
+## M1 — Advanced orders & risk rails (DONE — 2026-07-06, commits 6391296/e600c1f)
 
 Everything extends the existing `orders` table + 1s fill loop.
 
