@@ -102,6 +102,8 @@ export default function MainChart({ ticker }: Props) {
       layout: {
         background: { color: 'transparent' },
         textColor: '#8b949e',
+        // Attribution lives in the README — the logo ghosts over dark charts
+        attributionLogo: false,
       },
       grid: {
         vertLines: { color: '#30363d' },

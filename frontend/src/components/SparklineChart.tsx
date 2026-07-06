@@ -34,6 +34,9 @@ export default function SparklineChart({ ticker, width = 80, height = 28 }: Prop
       layout: {
         background: { color: 'transparent' },
         textColor: 'transparent',
+        // The TradingView logo covers most of an 80×24 sparkline — attribution
+        // lives in the README instead
+        attributionLogo: false,
       },
       rightPriceScale: { visible: false },
       timeScale: { visible: false },

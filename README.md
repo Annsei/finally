@@ -88,6 +88,11 @@ cd test && docker compose -f docker-compose.test.yml up --build --abort-on-conta
 
 See [test/README.md](test/README.md) for running the E2E suite against a local instance.
 
+## Acknowledgements
+
+Charts are rendered with [TradingView Lightweight Charts™](https://www.tradingview.com/lightweight-charts/)
+(the in-chart attribution logo is disabled; attribution lives here instead).
+
 ## License
 
 See [LICENSE](LICENSE).
