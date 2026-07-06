@@ -180,6 +180,30 @@ export interface ChatRuleOutcome {
   error?: string;
 }
 
+// Auth (M4.1) — anonymous requests act as the 'default' Guest user:
+export interface AuthUser {
+  id: string;
+  name: string;
+}
+
+export interface AuthMeResponse {
+  user: AuthUser;
+}
+
+// GET /api/leaderboard (M4.2):
+export interface LeaderboardEntry {
+  user_id: string;
+  name: string;
+  total_value: number;
+  return_pct: number;
+  rank: number;
+}
+
+export interface LeaderboardResponse {
+  season: { id: number; started_at: string };
+  entries: LeaderboardEntry[];
+}
+
 // GET /api/portfolio/analytics (M3.4):
 export interface AnalyticsTradeRef {
   ticker: string;

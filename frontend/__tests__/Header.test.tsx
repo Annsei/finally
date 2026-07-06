@@ -9,7 +9,7 @@
  * 5. Before data loads (undefined), cash/value render '—' without throwing
  */
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent, act } from '@testing-library/react';
 import { usePriceStore } from '@/stores/priceStore';
 
 // Mock swr to control what data is returned
@@ -18,6 +18,13 @@ jest.mock('swr', () => {
   const mockSWR = jest.fn();
   return { __esModule: true, default: mockSWR };
 });
+
+jest.mock('@/lib/reload', () => ({
+  __esModule: true,
+  hardReload: jest.fn(),
+}));
+
+import { hardReload } from '@/lib/reload';
 
 // Import swr after mock so we can configure it per test
 import useSWR from 'swr';
@@ -145,6 +152,51 @@ describe('Header component', () => {
     const dayPnl = screen.getByTestId('day-pnl');
     expect(dayPnl.textContent).toBe('-$20.00');
     expect(dayPnl.className).toContain('text-terminal-down');
+  });
+
+  // ---------------------------------------------------------------------------
+  // M4.1: identity chip
+  // ---------------------------------------------------------------------------
+  it('Test 7: guest sees the sign-in affordance; a logged-in user sees name + sign out', () => {
+    // Guest (auth/me returns default)
+    mockUseSWR.mockImplementation(((key: string) => {
+      if (key === '/api/auth/me') return { data: { user: { id: 'default', name: 'Guest' } } } as any;
+      return { data: undefined } as any;
+    }) as any);
+    const { unmount } = render(<Header />);
+    expect(screen.getByTestId('auth-signin')).toBeInTheDocument();
+    unmount();
+
+    // Logged in
+    mockUseSWR.mockImplementation(((key: string) => {
+      if (key === '/api/auth/me') return { data: { user: { id: 'fiona', name: 'Fiona' } } } as any;
+      return { data: undefined } as any;
+    }) as any);
+    render(<Header />);
+    expect(screen.getByTestId('auth-user').textContent).toBe('Fiona');
+    expect(screen.getByTestId('auth-logout')).toBeInTheDocument();
+  });
+
+  it('Test 7b: sign-in form POSTs the name and reloads on success', async () => {
+    mockUseSWR.mockImplementation(((key: string) => {
+      if (key === '/api/auth/me') return { data: { user: { id: 'default', name: 'Guest' } } } as any;
+      return { data: undefined } as any;
+    }) as any);
+    global.fetch = jest.fn().mockResolvedValueOnce({ ok: true, json: async () => ({}) });
+
+    render(<Header />);
+
+    fireEvent.click(screen.getByTestId('auth-signin'));
+    fireEvent.change(screen.getByTestId('auth-name-input'), { target: { value: 'Fiona' } });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('auth-submit'));
+    });
+
+    expect(global.fetch).toHaveBeenCalledWith(
+      '/api/auth/login',
+      expect.objectContaining({ method: 'POST', body: JSON.stringify({ name: 'Fiona' }) })
+    );
+    await waitFor(() => expect(hardReload).toHaveBeenCalled());
   });
 
   it('Test 6c: Day P&L shows $0.00 with no positions and — before portfolio loads', () => {

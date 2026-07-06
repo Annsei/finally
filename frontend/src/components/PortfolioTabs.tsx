@@ -12,8 +12,9 @@ import OpenOrdersTable from './OpenOrdersTable';
 import OrdersTable from './OrdersTable';
 import RulesTable from './RulesTable';
 import AnalyticsPanel from './AnalyticsPanel';
+import Leaderboard from './Leaderboard';
 
-type Tab = 'positions' | 'orders' | 'fills' | 'rules' | 'analytics';
+type Tab = 'positions' | 'orders' | 'fills' | 'rules' | 'analytics' | 'board';
 
 const TABS: { key: Tab; label: string; testid: string }[] = [
   { key: 'positions', label: 'Positions', testid: 'tab-positions' },
@@ -21,6 +22,7 @@ const TABS: { key: Tab; label: string; testid: string }[] = [
   { key: 'fills', label: 'Fills', testid: 'tab-fills' },
   { key: 'rules', label: 'Rules', testid: 'tab-rules' },
   { key: 'analytics', label: 'Analytics', testid: 'tab-analytics' },
+  { key: 'board', label: 'Board', testid: 'tab-board' },
 ];
 
 export default function PortfolioTabs() {
@@ -53,6 +55,7 @@ export default function PortfolioTabs() {
       {tab === 'fills' && <OrdersTable />}
       {tab === 'rules' && <RulesTable />}
       {tab === 'analytics' && <AnalyticsPanel />}
+      {tab === 'board' && <Leaderboard />}
     </div>
   );
 }

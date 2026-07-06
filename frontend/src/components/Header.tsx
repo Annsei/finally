@@ -16,10 +16,124 @@
  *   Labels:          text-xs / font-semibold (label size, 12px / weight 600)
  * Both numeric spans use tabular-nums to prevent layout shift on digit changes.
  */
+import { useState } from 'react';
 import useSWR from 'swr';
 import { usePriceStore } from '@/stores/priceStore';
-import type { PortfolioResponse } from '@/types/market';
+import type { PortfolioResponse, AuthMeResponse } from '@/types/market';
 import { fetcher } from '@/lib/fetcher';
+import { hardReload } from '@/lib/reload';
+
+// M4.1 — name-only identity chip. Anonymous acts as the Guest ('default')
+// user; signing in/out reloads so every SWR key refetches under the new cookie.
+function AuthChip() {
+  const { data } = useSWR<AuthMeResponse>('/api/auth/me', fetcher);
+  const [editing, setEditing] = useState(false);
+  const [name, setName] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [pending, setPending] = useState(false);
+
+  const user = data?.user;
+  const isGuest = !user || user.id === 'default';
+
+  const login = async () => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    setPending(true);
+    setError(null);
+    try {
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: trimmed }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body?.error ?? `Sign-in failed (${res.status})`);
+      }
+      hardReload();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Sign-in failed');
+      setPending(false);
+    }
+  };
+
+  const logout = async () => {
+    setPending(true);
+    try {
+      await fetch('/api/auth/logout', { method: 'POST' });
+    } finally {
+      hardReload();
+    }
+  };
+
+  if (!isGuest) {
+    return (
+      <span className="flex items-center gap-2 text-xs">
+        <span data-testid="auth-user" className="text-terminal-text font-semibold">
+          {user!.name}
+        </span>
+        <button
+          type="button"
+          data-testid="auth-logout"
+          onClick={() => void logout()}
+          disabled={pending}
+          className="text-terminal-muted hover:text-terminal-down text-[10px] font-semibold uppercase tracking-wider disabled:opacity-50"
+        >
+          Sign out
+        </button>
+      </span>
+    );
+  }
+
+  if (!editing) {
+    return (
+      <button
+        type="button"
+        data-testid="auth-signin"
+        onClick={() => setEditing(true)}
+        className="text-[10px] font-semibold uppercase tracking-wider text-terminal-muted hover:text-terminal-accent transition-colors"
+      >
+        Guest · Sign in
+      </button>
+    );
+  }
+
+  return (
+    <span className="flex items-center gap-1">
+      <input
+        type="text"
+        data-testid="auth-name-input"
+        aria-label="Trader name"
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') void login();
+          if (e.key === 'Escape') setEditing(false);
+        }}
+        placeholder="Trader name…"
+        maxLength={24}
+        disabled={pending}
+        autoFocus
+        className="w-28 px-2 py-0.5 text-xs font-mono bg-terminal-bg border border-terminal-border text-terminal-text rounded focus:outline-none focus:border-terminal-blue disabled:opacity-50"
+      />
+      <button
+        type="button"
+        data-testid="auth-submit"
+        onClick={() => void login()}
+        disabled={pending || !name.trim()}
+        className="px-2 py-0.5 rounded text-[10px] font-semibold text-white disabled:opacity-50"
+        style={{ backgroundColor: '#753991' }}
+      >
+        Go
+      </button>
+      {error && (
+        <span data-testid="auth-error" className="text-[10px] text-terminal-down">
+          {error}
+        </span>
+      )}
+    </span>
+  );
+}
 
 // Dot color map — amber for reconnecting so accent yellow stays reserved for row selection (UI-SPEC)
 const DOT_COLORS: Record<'connected' | 'reconnecting' | 'disconnected', string> = {
@@ -67,9 +181,12 @@ export default function Header() {
 
   return (
     <header className="flex items-center justify-between px-4 py-2 border-b border-terminal-border bg-terminal-surface">
-      {/* Brand */}
-      <span className="text-terminal-accent font-semibold text-lg tracking-wide">
-        FinAlly
+      {/* Brand + identity */}
+      <span className="flex items-center gap-4">
+        <span className="text-terminal-accent font-semibold text-lg tracking-wide">
+          FinAlly
+        </span>
+        <AuthChip />
       </span>
 
       {/* Right cluster: Cash · Portfolio · Connection dot */}

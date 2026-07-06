@@ -116,6 +116,9 @@ describe('PortfolioTabs', () => {
     fireEvent.click(screen.getByTestId('tab-analytics'));
     expect(screen.getByText(/Loading analytics/i)).toBeInTheDocument();
 
+    fireEvent.click(screen.getByTestId('tab-board'));
+    expect(screen.getByText(/Loading leaderboard/i)).toBeInTheDocument();
+
     fireEvent.click(screen.getByTestId('tab-positions'));
     expect(screen.getByText(/No positions yet/i)).toBeInTheDocument();
   });
