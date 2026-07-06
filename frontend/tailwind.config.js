@@ -7,7 +7,15 @@ module.exports = {
   theme: {
     extend: {
       fontFamily: {
-        mono: ['var(--font-mono)', 'ui-monospace', 'monospace'],
+        // Local-first stack — no build-time font download (see _app.tsx note)
+        mono: [
+          '"JetBrains Mono"',
+          'ui-monospace',
+          'SFMono-Regular',
+          'Menlo',
+          'Consolas',
+          'monospace',
+        ],
       },
       colors: {
         terminal: {
