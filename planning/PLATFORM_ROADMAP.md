@@ -49,12 +49,13 @@ Everything extends the existing `orders` table + 1s fill loop.
    watchlist badge; no hard blocks (it's a sim). (S)
 
 ## M2 — The AI becomes an agent (flagship milestone)
+### M2.1 + M2.2 DONE — 2026-07-06 (56e497a/7db0cd3); M2.3 + M2.4 remaining
 
-1. **AI places advanced orders** — extend the chat structured-output schema:
+1. **AI places advanced orders** (DONE) — extend the chat structured-output schema:
    `orders: [{ticker, side, quantity, kind, limit_price?, stop_price?}]`
    alongside `trades`. "Buy 10 AAPL if it drops to 180 and protect it with a
    stop at 170" becomes two resting orders from one sentence. (M)
-2. **Standing rules engine** — user states a rule in chat ("if NVDA drops 3%
+2. **Standing rules engine** (DONE) — user states a rule in chat ("if NVDA drops 3%
    in a day, buy 5"); the AI emits a structured `rules` action; a backend
    rules table + evaluator (piggybacks on the fill-loop cadence) executes and
    logs activations; Rules panel in the UI with enable/disable/delete. This is
