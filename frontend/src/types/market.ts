@@ -93,6 +93,7 @@ export interface MarketEvent {
   id: string;
   ticker: string;
   headline: string;
+  narrative?: string | null; // LLM-generated news flavor (M3.2); null until enriched
   change_percent: number;  // signed single-tick move that triggered the event
   direction: 'up' | 'down';
   timestamp: number;       // Unix seconds (float)
@@ -177,6 +178,34 @@ export interface ChatRuleOutcome {
   rule?: TradingRule;
   ticker?: string;
   error?: string;
+}
+
+// GET /api/portfolio/analytics (M3.4):
+export interface AnalyticsTradeRef {
+  ticker: string;
+  side: string;
+  quantity: number;
+  price: number;
+  realized_pnl: number;
+  executed_at: string;
+}
+
+export interface SectorAllocation {
+  sector: string;
+  value: number;
+  weight: number; // fraction of total portfolio value
+}
+
+export interface AnalyticsResponse {
+  total_trades: number;
+  sell_trades: number;
+  win_rate: number | null;
+  realized_pnl: number;
+  max_drawdown_pct: number | null;
+  sharpe: number | null;
+  best_trade: AnalyticsTradeRef | null;
+  worst_trade: AnalyticsTradeRef | null;
+  sector_allocation: SectorAllocation[];
 }
 
 // GET /api/portfolio/trades response (newest first):

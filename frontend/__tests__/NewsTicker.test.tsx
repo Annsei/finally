@@ -66,6 +66,24 @@ describe('NewsTicker', () => {
     expect(container.querySelectorAll('[data-testid^="news-item-"]')).toHaveLength(4);
   });
 
+  it('Test 2b: an enriched event shows its LLM narrative instead of the template headline', () => {
+    mockUseSWR.mockReturnValue({
+      data: {
+        events: [
+          {
+            ...mockEvents.events[0],
+            narrative: 'NVDA jumps on rumored datacenter win',
+          },
+        ],
+      },
+    } as any);
+
+    render(<NewsTicker />);
+
+    expect(screen.getAllByText('NVDA jumps on rumored datacenter win').length).toBeGreaterThanOrEqual(1);
+    expect(screen.queryByText('NVDA surges +3.4% in sudden move')).toBeNull();
+  });
+
   it('Test 3: empty state renders the placeholder line', () => {
     mockUseSWR.mockReturnValue({ data: { events: [] } } as any);
 

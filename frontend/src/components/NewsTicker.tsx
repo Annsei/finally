@@ -21,7 +21,8 @@ function EventItem({ ev }: { ev: MarketEvent }) {
     <span className="inline-flex items-baseline gap-1 px-4 text-xs" data-testid={`news-item-${ev.id}`}>
       <span className="text-terminal-muted tabular-nums">{formatTime(ev.timestamp)}</span>
       <span style={{ color }}>{ev.direction === 'up' ? '▲' : '▼'}</span>
-      <span className="text-terminal-text">{ev.headline}</span>
+      {/* LLM narrative when enriched (M3.2), template headline otherwise */}
+      <span className="text-terminal-text">{ev.narrative ?? ev.headline}</span>
     </span>
   );
 }
