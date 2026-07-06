@@ -20,6 +20,16 @@ export interface PriceUpdate {
   bid?: number;                // best bid (sells fill here)
   ask?: number;                // best ask (buys fill here)
   volume?: number;             // volume traded since the previous update
+  asset_class?: 'equity' | 'crypto'; // crypto trades 24/7 (M3.3)
+}
+
+// GET /api/market/session (M3.1) — sim trading sessions:
+export interface MarketSessionResponse {
+  state: 'open' | 'closed';
+  session_id: number;
+  state_since: number;             // Unix seconds
+  next_transition_at: number | null; // null in 24/7 mode
+  now: number;
 }
 
 // GET /api/market/history response — 1-second OHLCV bars, ascending by time:
