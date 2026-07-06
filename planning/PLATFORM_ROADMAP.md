@@ -69,7 +69,8 @@ Everything extends the existing `orders` table + 1s fill loop.
    trades made, realized/unrealized P&L, best/worst decision, rule
    activations; rendered as a rich chat message. (S, after M1.4)
 
-## M3 — A living market world
+## M3 — A living market world — COMPLETE 2026-07-06
+### Wave 1 (sessions/settlement/crypto): 811053e/34c1d6f · Wave 2 (narratives/bursts/analytics): 983852c/7a44cb3
 
 1. **Sessions & settlement** — a sim clock with open/close (accelerated or
    real-time), closing auction that stamps the official close → `prev_close`
