@@ -88,7 +88,11 @@ Everything extends the existing `orders` table + 1s fill loop.
    holding-period distribution. Read-only, pure frontend + one summary
    endpoint. (M)
 
-## M4 — Multi-user arena
+## M4 — Multi-user arena — COMPLETE 2026-07-06 (8b9770f/93ccae9)
+
+**THE ROADMAP IS COMPLETE.** All four milestones shipped. M4.4's Postgres
+migration path remains documented-not-built by design (SQLite + WAL + BEGIN
+IMMEDIATE holds at classroom scale); Terraform deploy stays a stretch goal.
 
 The schema carried `user_id` from day one; this milestone cashes that in.
 
