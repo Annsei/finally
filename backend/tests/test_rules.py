@@ -356,6 +356,7 @@ class TestRulesEvaluatorLifecycle:
         assert len(messages) == 1
         msg = messages[0]
         assert msg["role"] == "assistant"
+        assert msg["kind"] == "rule"  # M2 Wave 2: rule activations are kind='rule'
         assert msg["content"] == (
             f"Rule fired: Momentum buy on NVDA — executed at ${NVDA_PRICE:.2f}."
         )

@@ -55,13 +55,23 @@ CREATE TABLE IF NOT EXISTS portfolio_snapshots (
     recorded_at TEXT NOT NULL
 );
 
--- Chat messages: conversation history with the LLM assistant
+-- Chat messages: conversation history with the LLM assistant.
+-- kind marks who initiated the message and why (M2.3/M2.4):
+--   'chat'   — ordinary conversation turns (user + assistant)
+--   'brief'  — assistant-initiated event-driven AI brief (M2.3)
+--   'review' — daily AI review generated via POST /api/chat/review (M2.4)
+--   'rule'   — rule-fired activation record written by the rules evaluator
+-- Only kind='chat' rows feed the LLM conversation history; GET /api/chat/
+-- returns all kinds. NOTE: new columns here must also be added to
+-- _migrate_schema() in connection.py — CREATE TABLE IF NOT EXISTS does not
+-- evolve existing tables.
 CREATE TABLE IF NOT EXISTS chat_messages (
     id         TEXT PRIMARY KEY,
     user_id    TEXT NOT NULL DEFAULT 'default',
     role       TEXT NOT NULL,
     content    TEXT NOT NULL,
     actions    TEXT,
+    kind       TEXT NOT NULL DEFAULT 'chat',
     created_at TEXT NOT NULL
 );
 

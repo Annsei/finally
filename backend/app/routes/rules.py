@@ -243,8 +243,8 @@ def _fire_rule_if_triggered(
     On trigger, ONE commit covers: the market trade (buy fills at ask / sell
     at bid via ``execute_trade_on_conn``), the rule's status='fired' +
     last_fired_at + fire_count update, the post-trade portfolio snapshot (on
-    executed trades), and an assistant chat_messages row documenting the
-    activation. The rule is one-shot: a trade validation failure (e.g.
+    executed trades), and an assistant chat_messages row (kind='rule')
+    documenting the activation. The rule is one-shot: a trade validation failure (e.g.
     insufficient cash) still consumes it — the failure is documented in the
     chat message and its actions JSON.
 
@@ -295,8 +295,8 @@ def _fire_rule_if_triggered(
 
     actions = json.dumps({"trades": [outcome], "rule_id": rule["id"]})
     conn.execute(
-        "INSERT INTO chat_messages (id, user_id, role, content, actions, created_at) "
-        "VALUES (?, 'default', 'assistant', ?, ?, ?)",
+        "INSERT INTO chat_messages (id, user_id, role, content, actions, kind, created_at) "
+        "VALUES (?, 'default', 'assistant', ?, ?, 'rule', ?)",
         (str(uuid.uuid4()), content, actions, now),
     )
     conn.commit()

@@ -151,12 +151,16 @@ class TestChat:
         # After one chat POST we have at least 2 rows (user + assistant)
         assert len(data["messages"]) >= 2
 
-        # Each message has the expected keys
+        # Each message has the expected keys (kind added in M2 Wave 2)
         for msg in data["messages"]:
             assert "role" in msg
             assert "content" in msg
             assert "actions" in msg
+            assert "kind" in msg
             assert "created_at" in msg
+
+        # Ordinary conversation turns carry kind='chat'
+        assert all(msg["kind"] == "chat" for msg in data["messages"])
 
         # Messages are ordered ascending by created_at (earliest first)
         timestamps = [msg["created_at"] for msg in data["messages"]]

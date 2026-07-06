@@ -162,10 +162,16 @@ async def lifespan(app: FastAPI):
     app.state.rules_eval_task = rules_eval_task
     logger.info("FinAlly startup: rules evaluator background task started")
 
+    # Start background AI briefs watcher task (every ~2 seconds, M2.3)
+    from app.briefs import briefs_watch_loop
+    briefs_watch_task = asyncio.create_task(briefs_watch_loop(price_cache, db_path))
+    app.state.briefs_watch_task = briefs_watch_task
+    logger.info("FinAlly startup: AI briefs watcher background task started")
+
     yield
 
     logger.info("FinAlly shutdown: cancelling background tasks")
-    for task in (snapshot_task, orders_fill_task, rules_eval_task):
+    for task in (snapshot_task, orders_fill_task, rules_eval_task, briefs_watch_task):
         task.cancel()
         try:
             await task

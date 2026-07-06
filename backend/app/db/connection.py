@@ -64,6 +64,11 @@ _TRADES_NEW_COLUMNS: tuple[tuple[str, str], ...] = (
     ("commission", "REAL NOT NULL DEFAULT 0"),
     ("realized_pnl", "REAL"),
 )
+# M2.3/M2.4: message kind ('chat' | 'brief' | 'review' | 'rule'). Pre-existing
+# rows are ordinary conversation turns, so the default 'chat' is exactly right.
+_CHAT_MESSAGES_NEW_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("kind", "TEXT NOT NULL DEFAULT 'chat'"),
+)
 
 # Rebuild target for the orders table: identical to schema.sql. Used only when
 # an old database still has limit_price declared NOT NULL (stop orders store
@@ -124,7 +129,8 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     1. Add columns that shipped after the tables were first created
        (PRAGMA table_info check -> ALTER TABLE ADD COLUMN). Existing rows get
        the column defaults (orders: kind='limit', time_in_force='gtc';
-       trades: commission=0, realized_pnl NULL) — exactly the pre-M1 semantics.
+       trades: commission=0, realized_pnl NULL; chat_messages: kind='chat') —
+       exactly the pre-migration semantics.
     2. Relax orders.limit_price to nullable (stop orders carry no limit price).
        SQLite cannot drop NOT NULL in place, so a one-time table rebuild
        (create new -> copy -> drop -> rename) runs when the old constraint is
@@ -132,6 +138,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     """
     added = _add_missing_columns(conn, "orders", _ORDERS_NEW_COLUMNS)
     added += _add_missing_columns(conn, "trades", _TRADES_NEW_COLUMNS)
+    added += _add_missing_columns(conn, "chat_messages", _CHAT_MESSAGES_NEW_COLUMNS)
 
     limit_price_col = _table_columns(conn, "orders").get("limit_price")
     rebuilt = limit_price_col is not None and limit_price_col["notnull"]

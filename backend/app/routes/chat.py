@@ -5,12 +5,17 @@ Provides:
   trades, advanced orders (limit/stop/stop_limit — M2.1), standing rules
   (M2.2), and watchlist changes; persists conversation history to
   chat_messages.
+- GET /api/chat — last 20 chat_messages rows of every kind
+  ('chat' | 'brief' | 'review' | 'rule').
+- POST /api/chat/review — on-demand daily AI review (M2.4): summarizes
+  today's trades, rule firings, P&L, and market events as a plain-text
+  assistant message stored with kind='review'.
 
 All routes are created via the factory function ``create_chat_router`` which
 closes over the shared ``PriceCache`` instance and the database path.
 
-When ``LLM_MOCK=true`` the endpoint returns a deterministic response that
-exercises the full auto-execution pipeline without network calls (D-06/D-07).
+When ``LLM_MOCK=true`` the endpoints return deterministic responses without
+network calls (D-06/D-07).
 """
 
 from __future__ import annotations
@@ -67,6 +72,14 @@ SYSTEM_PROMPT = (
     "it. Always write a clear human-readable description, e.g. "
     "'Buy 5 NVDA when day change <= -3%'.\n"
     "- 'watchlist_changes': {ticker, action} with action 'add' or 'remove'."
+)
+
+# System prompt for the daily review (M2.4) — plain text, no structured output.
+REVIEW_SYSTEM_PROMPT = (
+    "You are FinAlly, an AI trading assistant, writing the user's daily "
+    "review. Reply in plain text (no JSON, no markdown headings), 3-6 "
+    "sentences: what happened today, the best and worst decision, and one "
+    "concrete suggestion. Be concise and data-driven."
 )
 
 
@@ -211,6 +224,129 @@ def _assemble_portfolio_context(
     return context
 
 
+def _assemble_review_context(
+    conn: sqlite3.Connection,
+    price_cache: PriceCache,
+) -> tuple[str, int]:
+    """Build the daily-review context string for the M2.4 review prompt.
+
+    Gathers, for today's UTC date: executed trades (side/qty/price/commission/
+    realized P&L), rule firings (rules whose last_fired_at falls today, with
+    their descriptions), the current portfolio (cash, positions with
+    unrealized P&L, total value, lifetime realized P&L), day P&L per position
+    (qty x (price - prev_close) from the cache), and up to 5 of today's
+    market events.
+
+    Args:
+        conn: An open SQLite connection (caller manages lifecycle).
+        price_cache: Live price cache for current prices and prev_close.
+
+    Returns:
+        (context, trade_count) — the multi-line context string and the number
+        of trades executed today (the LLM_MOCK review interpolates the count).
+    """
+    now = datetime.now(timezone.utc)
+    today = now.strftime("%Y-%m-%d")
+
+    # Today's trades
+    trade_rows = conn.execute(
+        """
+        SELECT ticker, side, quantity, price, commission, realized_pnl
+        FROM trades
+        WHERE user_id = 'default' AND substr(executed_at, 1, 10) = ?
+        ORDER BY executed_at ASC, rowid ASC
+        """,
+        (today,),
+    ).fetchall()
+    trade_lines = [
+        f"{t['side']} {t['quantity']:g} {t['ticker']} @ ${t['price']:.2f}"
+        f" | commission ${t['commission']:.2f}"
+        + (
+            f" | realized P&L ${t['realized_pnl']:+.2f}"
+            if t["realized_pnl"] is not None
+            else ""
+        )
+        for t in trade_rows
+    ]
+    trades_block = "\n".join(trade_lines) if trade_lines else "(no trades today)"
+
+    # Today's rule firings
+    rule_rows = conn.execute(
+        """
+        SELECT description, last_fired_at
+        FROM rules
+        WHERE user_id = 'default' AND last_fired_at IS NOT NULL
+              AND substr(last_fired_at, 1, 10) = ?
+        ORDER BY last_fired_at ASC
+        """,
+        (today,),
+    ).fetchall()
+    rules_block = (
+        "\n".join(f"{r['description']} (fired {r['last_fired_at']})" for r in rule_rows)
+        if rule_rows
+        else "(no rules fired today)"
+    )
+
+    # Current portfolio: cash, positions with unrealized + day P&L, totals
+    user_row = conn.execute(
+        "SELECT cash_balance FROM users_profile WHERE id = 'default'"
+    ).fetchone()
+    cash: float = user_row["cash_balance"] if user_row else 0.0
+    realized_row = conn.execute(
+        "SELECT COALESCE(SUM(realized_pnl), 0.0) AS total FROM trades "
+        "WHERE user_id = 'default'"
+    ).fetchone()
+    lifetime_realized = round(realized_row["total"] or 0.0, 2)
+
+    position_rows = conn.execute(
+        "SELECT ticker, quantity, avg_cost FROM positions WHERE user_id = 'default'"
+    ).fetchall()
+    position_lines: list[str] = []
+    market_value = 0.0
+    for row in position_rows:
+        ticker: str = row["ticker"]
+        quantity: float = row["quantity"]
+        avg_cost: float = row["avg_cost"]
+        quote = price_cache.get(ticker)
+        current_price = quote.price if quote else 0.0
+        unrealized = (current_price - avg_cost) * quantity
+        # Day P&L: what the position gained/lost today vs the previous close.
+        day_pnl = quantity * (current_price - quote.prev_close) if quote else 0.0
+        market_value += quantity * current_price
+        position_lines.append(
+            f"{ticker} | qty {quantity:g} | avg {avg_cost:.2f} | cur {current_price:.2f}"
+            f" | unrealized {unrealized:+.2f} | day P&L {day_pnl:+.2f}"
+        )
+    positions_block = "\n".join(position_lines) if position_lines else "(no open positions)"
+    total = cash + market_value
+
+    # Today's market events (up to 5, newest first)
+    today_events = [
+        e
+        for e in price_cache.get_events()
+        if datetime.fromtimestamp(e.timestamp, tz=timezone.utc).strftime("%Y-%m-%d")
+        == today
+    ][:5]
+    events_block = (
+        "\n".join(e.headline for e in today_events)
+        if today_events
+        else "(no market events today)"
+    )
+
+    context = (
+        f"Date: {today} (UTC)\n"
+        f"Today's trades (side qty ticker @ price):\n{trades_block}\n"
+        f"Rules fired today:\n{rules_block}\n"
+        f"Cash: ${cash:.2f}\n"
+        f"Total portfolio value: ${total:.2f}\n"
+        f"Lifetime realized P&L: ${lifetime_realized:+.2f}\n"
+        f"Positions (ticker | qty | avg_cost | current | unrealized | day P&L):\n"
+        f"{positions_block}\n"
+        f"Today's market events:\n{events_block}"
+    )
+    return context, len(trade_rows)
+
+
 # ---------------------------------------------------------------------------
 # Router factory
 # ---------------------------------------------------------------------------
@@ -239,15 +375,17 @@ def create_chat_router(
 
         Query selects DESC then reverses so the response is ascending by created_at.
         The ``actions`` field is parsed from its stored JSON string to a dict (or None).
+        Every kind is returned ('chat' | 'brief' | 'review' | 'rule') — the
+        frontend labels non-conversation messages by their ``kind``.
 
         Returns:
-            {"messages": [{"role", "content", "actions", "created_at"}, ...]}
+            {"messages": [{"role", "content", "actions", "kind", "created_at"}, ...]}
         """
         conn = get_conn(db_path)
         try:
             rows = conn.execute(
                 """
-                SELECT role, content, actions, created_at
+                SELECT role, content, actions, kind, created_at
                 FROM chat_messages
                 WHERE user_id = 'default'
                 ORDER BY created_at DESC
@@ -259,6 +397,7 @@ def create_chat_router(
                     "role": row["role"],
                     "content": row["content"],
                     "actions": json.loads(row["actions"]) if row["actions"] else None,
+                    "kind": row["kind"],
                     "created_at": row["created_at"],
                 }
                 for row in rows
@@ -305,10 +444,16 @@ def create_chat_router(
         # turn — used to reconcile the source if the transaction rolls back.
         source_adds: list[str] = []
         try:
-            # Step 1: Load conversation history (D-04)
+            # Step 1: Load conversation history (D-04). Assistant-initiated
+            # rows (event briefs, daily reviews, rule activations — M2.3/M2.4)
+            # are excluded from the LLM's conversation window: they are
+            # notifications, not turns the user replied to, and would drown
+            # the recent history. GET /api/chat/ still returns every kind.
             rows = conn.execute(
                 "SELECT role, content FROM chat_messages "
-                "WHERE user_id = 'default' ORDER BY created_at DESC LIMIT 20"
+                "WHERE user_id = 'default' "
+                "AND kind NOT IN ('brief', 'rule', 'review') "
+                "ORDER BY created_at DESC LIMIT 20"
             ).fetchall()
             history = list(reversed(rows))
 
@@ -442,14 +587,14 @@ def create_chat_router(
                 actions["rules"] = rule_outcomes
             user_ts = datetime.now(timezone.utc).isoformat()
             conn.execute(
-                "INSERT INTO chat_messages (id, user_id, role, content, actions, created_at) "
-                "VALUES (?, 'default', 'user', ?, NULL, ?)",
+                "INSERT INTO chat_messages (id, user_id, role, content, actions, kind, created_at) "
+                "VALUES (?, 'default', 'user', ?, NULL, 'chat', ?)",
                 (str(uuid.uuid4()), body.message, user_ts),
             )
             asst_ts = datetime.now(timezone.utc).isoformat()
             conn.execute(
-                "INSERT INTO chat_messages (id, user_id, role, content, actions, created_at) "
-                "VALUES (?, 'default', 'assistant', ?, ?, ?)",
+                "INSERT INTO chat_messages (id, user_id, role, content, actions, kind, created_at) "
+                "VALUES (?, 'default', 'assistant', ?, ?, 'chat', ?)",
                 (str(uuid.uuid4()), parsed.message, json.dumps(actions), asst_ts),
             )
             # Single atomic commit: all trades + watchlist changes + both
@@ -511,6 +656,76 @@ def create_chat_router(
                         "Market source reconcile failed for %s after rollback",
                         added_ticker,
                     )
+            raise
+        finally:
+            conn.close()
+
+    @router.post("/review")
+    async def daily_review() -> dict:
+        """Generate the daily AI review on demand (M2.4). No request body.
+
+        Assembles today's activity (trades, rule firings, portfolio state,
+        day P&L per position, market events) and asks the LLM for a concise
+        plain-text review. The review is stored as an assistant chat_messages
+        row with kind='review' and actions NULL — it appears in GET /api/chat/
+        history but never feeds back into the chat LLM's conversation window.
+
+        Returns:
+            200 ``{"message": "<text>", "kind": "review"}`` on success.
+            500 ``{"error": "LLM unavailable"}`` on any LLM failure — nothing
+            is stored in that case.
+
+        When ``LLM_MOCK=true`` a deterministic review with the real trade
+        count interpolated is returned — no network call.
+        """
+        conn = get_conn(db_path)
+        try:
+            context, trade_count = _assemble_review_context(conn, price_cache)
+
+            if os.getenv("LLM_MOCK", "false").lower() == "true":
+                text = (
+                    f"[MOCK REVIEW] You made {trade_count} trades today. "
+                    "Review your positions and risk before the next session."
+                )
+            else:
+                from litellm import completion  # lazy import — never reached when mocked
+
+                messages = [
+                    {"role": "system", "content": REVIEW_SYSTEM_PROMPT},
+                    {
+                        "role": "user",
+                        "content": f"Write my daily review.\n\n{context}",
+                    },
+                ]
+                try:
+                    response = await asyncio.to_thread(
+                        completion,
+                        model=MODEL,
+                        messages=messages,
+                        reasoning_effort="low",
+                        extra_body=EXTRA_BODY,
+                    )
+                    text = (response.choices[0].message.content or "").strip()
+                except Exception:
+                    logger.exception("Daily review LLM call failed")
+                    return JSONResponse(
+                        status_code=500, content={"error": "LLM unavailable"}
+                    )
+                if not text:
+                    logger.error("Daily review LLM returned empty content")
+                    return JSONResponse(
+                        status_code=500, content={"error": "LLM unavailable"}
+                    )
+
+            conn.execute(
+                "INSERT INTO chat_messages (id, user_id, role, content, actions, kind, created_at) "
+                "VALUES (?, 'default', 'assistant', ?, NULL, 'review', ?)",
+                (str(uuid.uuid4()), text, datetime.now(timezone.utc).isoformat()),
+            )
+            conn.commit()
+            return {"message": text, "kind": "review"}
+        except Exception:
+            conn.rollback()
             raise
         finally:
             conn.close()
