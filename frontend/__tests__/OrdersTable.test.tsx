@@ -110,6 +110,9 @@ describe('PortfolioTabs', () => {
     fireEvent.click(screen.getByTestId('tab-fills'));
     expect(screen.getByText(/No trades yet/i)).toBeInTheDocument();
 
+    fireEvent.click(screen.getByTestId('tab-rules'));
+    expect(screen.getByText(/No standing rules/i)).toBeInTheDocument();
+
     fireEvent.click(screen.getByTestId('tab-positions'));
     expect(screen.getByText(/No positions yet/i)).toBeInTheDocument();
   });

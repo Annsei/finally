@@ -33,6 +33,7 @@ export default function Dashboard() {
     void mutatePortfolio();
     void globalMutate('/api/portfolio/trades');
     void globalMutate('/api/portfolio/orders?status=open');
+    void globalMutate('/api/rules');
   };
 
   // SWR for watchlist (needed for auto-select D-03; mutate revalidates after AI watchlist changes)

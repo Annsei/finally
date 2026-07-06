@@ -123,6 +123,52 @@ export interface OrderPostResponse {
   order: LimitOrder;
 }
 
+// Standing rules (GET/POST /api/rules, PATCH/DELETE /api/rules/{id}) — M2.2:
+export type RuleTriggerType =
+  | 'price_above'
+  | 'price_below'
+  | 'day_change_pct_above'
+  | 'day_change_pct_below';
+export type RuleStatus = 'active' | 'paused' | 'fired';
+
+export interface TradingRule {
+  id: string;
+  ticker: string;
+  description: string;
+  trigger_type: RuleTriggerType;
+  threshold: number;
+  side: 'buy' | 'sell';
+  quantity: number;
+  status: RuleStatus;
+  created_at: string;
+  last_fired_at: string | null;
+  fire_count: number;
+}
+
+export interface RulesResponse {
+  rules: TradingRule[];
+}
+
+// Chat action outcomes for AI-placed orders and AI-created rules (M2.1/2.2):
+export interface ChatOrderOutcome {
+  status: string; // open | filled | failed
+  ticker: string;
+  error?: string;
+  side?: string;
+  quantity?: number;
+  kind?: OrderKind;
+  limit_price?: number | null;
+  stop_price?: number | null;
+  fill_price?: number | null;
+}
+
+export interface ChatRuleOutcome {
+  status: 'created' | 'failed';
+  rule?: TradingRule;
+  ticker?: string;
+  error?: string;
+}
+
 // GET /api/portfolio/trades response (newest first):
 export interface TradeRecord {
   id: string;
@@ -176,6 +222,8 @@ export interface ChatMessage {
   actions: {
     trades: TradeOutcome[];
     watchlist_changes: WatchlistOutcome[];
+    orders?: ChatOrderOutcome[];
+    rules?: ChatRuleOutcome[];
   } | null;
   created_at: string;
 }
@@ -190,4 +238,6 @@ export interface ChatPostResponse {
   message: string;
   trades: TradeOutcome[];
   watchlist_changes: WatchlistOutcome[];
+  orders?: ChatOrderOutcome[];
+  rules?: ChatRuleOutcome[];
 }

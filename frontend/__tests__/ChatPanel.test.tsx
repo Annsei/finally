@@ -78,7 +78,7 @@ describe('ChatPanel', () => {
     expect(screen.getByText('Hi there!')).toBeTruthy();
 
     // SWR must have been called with the trailing-slash path
-    expect(useSWR).toHaveBeenCalledWith('/api/chat/', expect.anything());
+    expect(useSWR).toHaveBeenCalledWith('/api/chat/', expect.anything(), expect.anything());
   });
 
   // -------------------------------------------------------------------------
@@ -260,6 +260,82 @@ describe('ChatPanel', () => {
 
     // Regression: a failed change has no action field and must not read as a removal
     expect(screen.queryByText(/Removed PYPL/i)).toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
+  // M2.1/2.2: AI-placed order and AI-created rule badges
+  // -------------------------------------------------------------------------
+  it('Test 3c: an AI-placed resting stop order renders a placed badge with stop price', () => {
+    const msg: ChatMessage = {
+      role: 'assistant',
+      content: 'I placed a protective stop.',
+      actions: {
+        trades: [],
+        watchlist_changes: [],
+        orders: [
+          {
+            status: 'open', ticker: 'AAPL', side: 'sell', quantity: 5,
+            kind: 'stop', limit_price: null, stop_price: 170, fill_price: null,
+          },
+        ],
+      },
+      created_at: '2026-07-06T00:00:06Z',
+    };
+    (useSWR as jest.Mock).mockReturnValue({ data: { messages: [msg] }, mutate: mockMutateHistory });
+
+    renderPanel();
+
+    const badge = screen.getByTestId('order-badge-placed');
+    expect(badge.textContent).toBe('Order placed: Sell 5 AAPL @ stop $170.00');
+  });
+
+  it('Test 3d: a failed AI order renders a failure badge', () => {
+    const msg: ChatMessage = {
+      role: 'assistant',
+      content: 'That stop could not be placed.',
+      actions: {
+        trades: [],
+        watchlist_changes: [],
+        orders: [{ status: 'failed', ticker: 'AAPL', error: 'Stop price must be below the market' }],
+      },
+      created_at: '2026-07-06T00:00:07Z',
+    };
+    (useSWR as jest.Mock).mockReturnValue({ data: { messages: [msg] }, mutate: mockMutateHistory });
+
+    renderPanel();
+
+    expect(screen.getByTestId('order-badge-failed').textContent).toContain(
+      'Order failed: AAPL — Stop price must be below the market'
+    );
+  });
+
+  it('Test 3e: an AI-created rule renders an armed badge with the description', () => {
+    const msg: ChatMessage = {
+      role: 'assistant',
+      content: 'Rule created.',
+      actions: {
+        trades: [],
+        watchlist_changes: [],
+        rules: [
+          {
+            status: 'created',
+            rule: {
+              id: 'r9', ticker: 'NVDA', description: 'Buy 5 NVDA when day change <= -3%',
+              trigger_type: 'day_change_pct_below', threshold: -3, side: 'buy', quantity: 5,
+              status: 'active', created_at: '2026-07-06T00:00:08Z', last_fired_at: null, fire_count: 0,
+            },
+          },
+        ],
+      },
+      created_at: '2026-07-06T00:00:08Z',
+    };
+    (useSWR as jest.Mock).mockReturnValue({ data: { messages: [msg] }, mutate: mockMutateHistory });
+
+    renderPanel();
+
+    expect(screen.getByTestId('rule-badge-created').textContent).toBe(
+      'Rule armed: Buy 5 NVDA when day change <= -3%'
+    );
   });
 
   // -------------------------------------------------------------------------

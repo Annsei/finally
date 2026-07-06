@@ -2,7 +2,14 @@ import { useState, useRef, useEffect } from 'react';
 import useSWR from 'swr';
 import { fetcher } from '@/lib/fetcher';
 import { formatQuantity } from '@/lib/format';
-import type { ChatHistoryResponse, ChatPostResponse, TradeOutcome, WatchlistOutcome } from '@/types/market';
+import type {
+  ChatHistoryResponse,
+  ChatPostResponse,
+  TradeOutcome,
+  WatchlistOutcome,
+  ChatOrderOutcome,
+  ChatRuleOutcome,
+} from '@/types/market';
 
 interface Props {
   open: boolean;
@@ -44,6 +51,71 @@ function TradeBadge({ trade }: { trade: TradeOutcome }) {
   );
 }
 
+// AI-placed order outcomes (M2.1): open (resting) blue, filled yellow/red, failed red
+function OrderBadge({ order }: { order: ChatOrderOutcome }) {
+  if (order.status === 'failed') {
+    return (
+      <span
+        data-testid="order-badge-failed"
+        className="inline-block px-2 py-0.5 rounded text-xs mr-1 mt-1 bg-terminal-surface"
+        style={{ border: '1px solid #ef4444', color: '#ef4444' }}
+      >
+        {`Order failed: ${order.ticker} — ${order.error ?? 'rejected'}`}
+      </span>
+    );
+  }
+
+  const verb = order.side?.toLowerCase() === 'buy' ? 'Buy' : 'Sell';
+  if (order.status === 'filled' && order.fill_price != null) {
+    return (
+      <span
+        className="inline-block px-2 py-0.5 rounded text-xs mr-1 mt-1 bg-terminal-surface"
+        style={{ border: '1px solid #ecad0a', color: '#ecad0a' }}
+      >
+        {`${verb === 'Buy' ? 'Bought' : 'Sold'} ${formatQuantity(order.quantity)} ${order.ticker} @ $${order.fill_price.toFixed(2)}`}
+      </span>
+    );
+  }
+
+  const parts: string[] = [];
+  if (order.stop_price != null) parts.push(`stop $${order.stop_price.toFixed(2)}`);
+  if (order.limit_price != null)
+    parts.push(`${verb === 'Buy' ? '≤' : '≥'}$${order.limit_price.toFixed(2)}`);
+  return (
+    <span
+      data-testid="order-badge-placed"
+      className="inline-block px-2 py-0.5 rounded text-xs mr-1 mt-1 bg-terminal-surface"
+      style={{ border: '1px solid #209dd7', color: '#209dd7' }}
+    >
+      {`Order placed: ${verb} ${formatQuantity(order.quantity)} ${order.ticker} @ ${parts.join(' / ')}`}
+    </span>
+  );
+}
+
+// AI-created standing rules (M2.2)
+function RuleBadge({ outcome }: { outcome: ChatRuleOutcome }) {
+  if (outcome.status === 'failed' || !outcome.rule) {
+    return (
+      <span
+        data-testid="rule-badge-failed"
+        className="inline-block px-2 py-0.5 rounded text-xs mr-1 mt-1 bg-terminal-surface"
+        style={{ border: '1px solid #ef4444', color: '#ef4444' }}
+      >
+        {`Rule failed: ${outcome.ticker ?? ''} ${outcome.error ?? 'rejected'}`.trim()}
+      </span>
+    );
+  }
+  return (
+    <span
+      data-testid="rule-badge-created"
+      className="inline-block px-2 py-0.5 rounded text-xs mr-1 mt-1 bg-terminal-surface"
+      style={{ border: '1px solid #753991', color: '#b07cc6' }}
+    >
+      {`Rule armed: ${outcome.rule.description}`}
+    </span>
+  );
+}
+
 function WatchlistBadge({ change }: { change: WatchlistOutcome }) {
   // Failed outcomes carry only {status, ticker, error} — no action
   if (change.status === 'failed') {
@@ -75,9 +147,12 @@ function WatchlistBadge({ change }: { change: WatchlistOutcome }) {
 // ChatPanel main component
 // ---------------------------------------------------------------------------
 export default function ChatPanel({ open, onToggle, onNewTrade }: Props) {
+  // 10s polling — rule firings and other agent-initiated messages appear
+  // without the user having to send anything (M2.2)
   const { data: history, mutate: mutateHistory } = useSWR<ChatHistoryResponse>(
     '/api/chat/',
-    fetcher
+    fetcher,
+    { refreshInterval: 10_000 }
   );
 
   const [input, setInput] = useState('');
@@ -122,7 +197,12 @@ export default function ChatPanel({ open, onToggle, onNewTrade }: Props) {
       }
       const data: ChatPostResponse = await res.json();
       await mutateHistory();
-      if (data.trades?.length || data.watchlist_changes?.length) {
+      if (
+        data.trades?.length ||
+        data.watchlist_changes?.length ||
+        data.orders?.length ||
+        data.rules?.length
+      ) {
         onNewTrade?.();
       }
     } catch (e) {
@@ -184,6 +264,12 @@ export default function ChatPanel({ open, onToggle, onNewTrade }: Props) {
                 <div className="flex flex-wrap mt-1 max-w-full">
                   {msg.actions.trades?.map((trade, i) => (
                     <TradeBadge key={`trade-${i}`} trade={trade} />
+                  ))}
+                  {msg.actions.orders?.map((order, i) => (
+                    <OrderBadge key={`order-${i}`} order={order} />
+                  ))}
+                  {msg.actions.rules?.map((rule, i) => (
+                    <RuleBadge key={`rule-${i}`} outcome={rule} />
                   ))}
                   {msg.actions.watchlist_changes?.map((change, i) => (
                     <WatchlistBadge key={`wl-${i}`} change={change} />

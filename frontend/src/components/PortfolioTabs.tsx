@@ -10,13 +10,15 @@ import { useState } from 'react';
 import PositionsTable from './PositionsTable';
 import OpenOrdersTable from './OpenOrdersTable';
 import OrdersTable from './OrdersTable';
+import RulesTable from './RulesTable';
 
-type Tab = 'positions' | 'orders' | 'fills';
+type Tab = 'positions' | 'orders' | 'fills' | 'rules';
 
 const TABS: { key: Tab; label: string; testid: string }[] = [
   { key: 'positions', label: 'Positions', testid: 'tab-positions' },
   { key: 'orders', label: 'Orders', testid: 'tab-orders' },
   { key: 'fills', label: 'Fills', testid: 'tab-fills' },
+  { key: 'rules', label: 'Rules', testid: 'tab-rules' },
 ];
 
 export default function PortfolioTabs() {
@@ -47,6 +49,7 @@ export default function PortfolioTabs() {
       {tab === 'positions' && <PositionsTable />}
       {tab === 'orders' && <OpenOrdersTable />}
       {tab === 'fills' && <OrdersTable />}
+      {tab === 'rules' && <RulesTable />}
     </div>
   );
 }
