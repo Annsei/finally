@@ -379,14 +379,46 @@ class TestPriceCacheMarketEvents:
         assert cache.get_events() == []
 
     def test_event_serializes_with_contract_keys(self):
-        """to_dict() emits exactly the fixed contract keys."""
+        """to_dict() emits exactly the fixed contract keys (narrative: M3.2a)."""
         cache = PriceCache()
         cache.update("NVDA", 100.00, timestamp=1000.0)
         cache.update("NVDA", 103.00, timestamp=1001.0)
         payload = cache.get_events()[0].to_dict()
         assert set(payload.keys()) == {
             "id", "ticker", "headline", "change_percent", "direction", "timestamp",
+            "narrative",
         }
+        assert payload["narrative"] is None  # null until enriched
+
+    def test_set_event_narrative_swaps_in_place(self):
+        """set_event_narrative() enriches the stored event without reordering."""
+        cache = PriceCache()
+        cache.update("NVDA", 100.00, timestamp=1000.0)
+        cache.update("NVDA", 103.00, timestamp=1001.0)
+        cache.update("AAPL", 100.00, timestamp=1002.0)
+        cache.update("AAPL", 102.00, timestamp=1003.0)
+        nvda_event, aapl_event = cache.get_events()[1], cache.get_events()[0]
+
+        assert cache.set_event_narrative(nvda_event.id, "NVDA pops on sim news") is True
+
+        events = cache.get_events()  # newest first
+        assert [e.ticker for e in events] == ["AAPL", "NVDA"]  # order preserved
+        enriched = events[1]
+        assert enriched.id == nvda_event.id
+        assert enriched.narrative == "NVDA pops on sim news"
+        assert enriched.headline == nvda_event.headline  # other fields intact
+        assert enriched.to_dict()["narrative"] == "NVDA pops on sim news"
+        assert events[0].narrative is None  # only the targeted event changed
+        assert aapl_event.id == events[0].id
+
+    def test_set_event_narrative_unknown_id_returns_false(self):
+        """Unknown/evicted event ids report False and change nothing."""
+        cache = PriceCache()
+        cache.update("NVDA", 100.00, timestamp=1000.0)
+        cache.update("NVDA", 103.00, timestamp=1001.0)
+
+        assert cache.set_event_narrative("no-such-id", "text") is False
+        assert cache.get_events()[0].narrative is None
 
     def test_cooldown_suppresses_within_window(self):
         """A second qualifying move within 30s of update-timestamp is suppressed."""

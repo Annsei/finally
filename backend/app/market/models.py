@@ -23,9 +23,14 @@ class MarketEvent:
     change_percent: float  # signed tick move, rounded to 2 decimals
     direction: str  # "up" | "down"
     timestamp: float  # Unix seconds (the update timestamp)
+    # LLM-generated news-style headline (M3.2a). None until the narrative
+    # enricher processes the event; events skipped by the enricher's throttle
+    # stay template-only (None) forever.
+    narrative: str | None = None
 
     def to_dict(self) -> dict:
-        """Serialize for JSON transmission."""
+        """Serialize for JSON transmission. ``narrative`` is always present
+        (null until enriched)."""
         return {
             "id": self.id,
             "ticker": self.ticker,
@@ -33,6 +38,7 @@ class MarketEvent:
             "change_percent": self.change_percent,
             "direction": self.direction,
             "timestamp": self.timestamp,
+            "narrative": self.narrative,
         }
 
 

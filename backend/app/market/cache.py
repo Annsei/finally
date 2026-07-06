@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 import uuid
 from collections import deque
+from dataclasses import replace
 from threading import Lock
 
 from .models import MarketEvent, PriceUpdate
@@ -162,6 +163,23 @@ class PriceCache:
         )
         self._events.append(event)
         self._last_event_ts[update.ticker] = update.timestamp
+
+    def set_event_narrative(self, event_id: str, narrative: str) -> bool:
+        """Attach an LLM-generated narrative to a recorded event (M3.2a).
+
+        MarketEvent is a frozen dataclass, so the enriched record is built
+        with ``dataclasses.replace`` and swapped into the ring buffer in
+        place (ordering is preserved). Thread-safe.
+
+        Returns True on success, False when the event id is unknown — e.g.
+        the event has already been evicted from the ring buffer.
+        """
+        with self._lock:
+            for i, event in enumerate(self._events):
+                if event.id == event_id:
+                    self._events[i] = replace(event, narrative=narrative)
+                    return True
+        return False
 
     def get_events(self, limit: int | None = None) -> list[MarketEvent]:
         """Return recent market events, newest first.

@@ -5,6 +5,8 @@ Provides:
 - POST /api/portfolio/trade — market order execution (buy/sell)
 - GET /api/portfolio/trades — trade blotter (executed trades, newest first)
 - GET /api/portfolio/history — portfolio value snapshots over time
+- GET /api/portfolio/analytics — trading analytics summary (M3.4): win rate,
+  realized P&L, max drawdown, Sharpe, best/worst trade, sector allocation
 
 All routes are created via the factory function ``create_portfolio_router`` which
 closes over the shared ``PriceCache`` instance and the database path.
@@ -13,6 +15,7 @@ closes over the shared ``PriceCache`` instance and the database path.
 from __future__ import annotations
 
 import logging
+import math
 import sqlite3
 import uuid
 from datetime import datetime, timezone
@@ -23,7 +26,7 @@ from pydantic import BaseModel
 
 from app.db.connection import get_conn
 from app.market.cache import PriceCache
-from app.market.seed_prices import asset_class_for
+from app.market.seed_prices import asset_class_for, sector_for
 from app.market.session import SessionClock
 
 logger = logging.getLogger(__name__)
@@ -67,6 +70,54 @@ def _record_snapshot(conn: sqlite3.Connection, price_cache: PriceCache) -> None:
         "INSERT INTO portfolio_snapshots (id, user_id, total_value, recorded_at) VALUES (?, 'default', ?, ?)",
         (str(uuid.uuid4()), total_value, datetime.now(timezone.utc).isoformat()),
     )
+
+
+# Sharpe needs a minimally meaningful equity curve (M3.4 contract: null below
+# this many snapshots).
+MIN_SHARPE_SNAPSHOTS = 10
+
+
+def _max_drawdown_pct(values: list[float]) -> float | None:
+    """Maximum peak-to-trough drawdown of an equity curve, as a positive %.
+
+    Walks the curve tracking the running peak; the drawdown at each point is
+    (peak - value) / peak * 100. Returns the maximum seen (0.0 for a curve
+    that never falls below its running peak), or None for fewer than 2
+    points. Non-positive peaks are skipped (no meaningful percentage).
+    """
+    if len(values) < 2:
+        return None
+    peak = values[0]
+    max_dd = 0.0
+    for value in values[1:]:
+        if value > peak:
+            peak = value
+        elif peak > 0:
+            max_dd = max(max_dd, (peak - value) / peak * 100.0)
+    return round(max_dd, 4)
+
+
+def _sharpe(values: list[float]) -> float | None:
+    """Sharpe-style ratio from an equity curve (M3.4).
+
+    mean / population-std of snapshot-to-snapshot returns, scaled by
+    sqrt(number of returns). Returns None when the curve has fewer than
+    ``MIN_SHARPE_SNAPSHOTS`` points or the returns have (near-)zero std —
+    a flat curve has no meaningful risk-adjusted return.
+    """
+    if len(values) < MIN_SHARPE_SNAPSHOTS:
+        return None
+    returns = [
+        (curr - prev) / prev for prev, curr in zip(values, values[1:]) if prev > 0
+    ]
+    if len(returns) < 2:
+        return None
+    mean = sum(returns) / len(returns)
+    variance = sum((r - mean) ** 2 for r in returns) / len(returns)
+    std = math.sqrt(variance)
+    if std < 1e-12:
+        return None
+    return round(mean / std * math.sqrt(len(returns)), 4)
 
 
 def execute_trade_on_conn(
@@ -470,6 +521,114 @@ def create_portfolio_router(
                     {"total_value": row["total_value"], "recorded_at": row["recorded_at"]}
                     for row in rows
                 ]
+            }
+        finally:
+            conn.close()
+
+    @router.get("/analytics")
+    async def get_analytics(request: Request) -> dict:
+        """Trading analytics summary (M3.4). Contract fixed — frontend built
+        in parallel:
+
+            {"total_trades": int,
+             "sell_trades": int,
+             "win_rate": float | null,        # wins / sells with realized_pnl
+             "realized_pnl": float,           # lifetime sum
+             "max_drawdown_pct": float | null,  # positive %; null if < 2 snapshots
+             "sharpe": float | null,          # null if < 10 snapshots or zero std
+             "best_trade": {...} | null,      # max realized_pnl sell
+             "worst_trade": {...} | null,     # min realized_pnl sell
+             "sector_allocation": [{"sector", "value", "weight"}]}
+
+        best_trade/worst_trade carry {"ticker", "side", "quantity", "price",
+        "realized_pnl", "executed_at"}. sector_allocation values positions at
+        the live cache price, grouped by ``sector_for``, plus a "cash" entry
+        (always present); weights sum to ~1.0 of total portfolio value and
+        rows are sorted by value descending. Cheap to compute per request —
+        no caching.
+        """
+        conn = get_conn(db_path)
+        try:
+            totals = conn.execute(
+                "SELECT COUNT(*) AS total, "
+                "COALESCE(SUM(CASE WHEN side = 'sell' THEN 1 ELSE 0 END), 0) AS sells, "
+                "COALESCE(SUM(realized_pnl), 0.0) AS realized "
+                "FROM trades WHERE user_id = 'default'"
+            ).fetchone()
+
+            pnl_sells = conn.execute(
+                "SELECT ticker, side, quantity, price, realized_pnl, executed_at "
+                "FROM trades WHERE user_id = 'default' "
+                "AND side = 'sell' AND realized_pnl IS NOT NULL"
+            ).fetchall()
+
+            win_rate: float | None = None
+            best_trade: dict | None = None
+            worst_trade: dict | None = None
+            if pnl_sells:
+                wins = sum(1 for row in pnl_sells if row["realized_pnl"] > 0)
+                win_rate = round(wins / len(pnl_sells), 4)
+
+                def _trade_payload(row: sqlite3.Row) -> dict:
+                    return {
+                        "ticker": row["ticker"],
+                        "side": row["side"],
+                        "quantity": row["quantity"],
+                        "price": row["price"],
+                        "realized_pnl": row["realized_pnl"],
+                        "executed_at": row["executed_at"],
+                    }
+
+                best_trade = _trade_payload(
+                    max(pnl_sells, key=lambda row: row["realized_pnl"])
+                )
+                worst_trade = _trade_payload(
+                    min(pnl_sells, key=lambda row: row["realized_pnl"])
+                )
+
+            snapshot_values = [
+                row["total_value"]
+                for row in conn.execute(
+                    "SELECT total_value FROM portfolio_snapshots "
+                    "WHERE user_id = 'default' ORDER BY recorded_at ASC, rowid ASC"
+                )
+            ]
+
+            user_row = conn.execute(
+                "SELECT cash_balance FROM users_profile WHERE id = 'default'"
+            ).fetchone()
+            cash_balance: float = user_row["cash_balance"] if user_row else 0.0
+
+            sector_values: dict[str, float] = {"cash": cash_balance}
+            for row in conn.execute(
+                "SELECT ticker, quantity FROM positions WHERE user_id = 'default'"
+            ):
+                sector = sector_for(row["ticker"])
+                value = row["quantity"] * (price_cache.get_price(row["ticker"]) or 0.0)
+                sector_values[sector] = sector_values.get(sector, 0.0) + value
+
+            total_value = sum(sector_values.values())
+            sector_allocation = [
+                {
+                    "sector": sector,
+                    "value": round(value, 2),
+                    "weight": round(value / total_value, 6) if total_value > 0 else 0.0,
+                }
+                for sector, value in sorted(
+                    sector_values.items(), key=lambda item: item[1], reverse=True
+                )
+            ]
+
+            return {
+                "total_trades": totals["total"] or 0,
+                "sell_trades": totals["sells"] or 0,
+                "win_rate": win_rate,
+                "realized_pnl": round(totals["realized"] or 0.0, 2),
+                "max_drawdown_pct": _max_drawdown_pct(snapshot_values),
+                "sharpe": _sharpe(snapshot_values),
+                "best_trade": best_trade,
+                "worst_trade": worst_trade,
+                "sector_allocation": sector_allocation,
             }
         finally:
             conn.close()

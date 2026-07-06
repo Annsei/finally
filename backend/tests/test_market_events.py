@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import pytest
 
-EVENT_KEYS = {"id", "ticker", "headline", "change_percent", "direction", "timestamp"}
+EVENT_KEYS = {
+    "id", "ticker", "headline", "change_percent", "direction", "timestamp",
+    "narrative",
+}
 
 
 def _fire_event(fake_market_source, ticker: str, ts: float, up: bool = True) -> None:
@@ -92,3 +95,23 @@ class TestMarketEventsEndpoint:
             response = await app_client.get(f"/api/market/events?limit={bad}")
             assert response.status_code == 400
             assert "error" in response.json()
+
+    async def test_narrative_null_until_enriched_then_value(
+        self, app_client, fake_market_source
+    ):
+        """Events serve narrative=null pre-enrichment, the text afterwards (M3.2a)."""
+        _fire_event(fake_market_source, "ZAA", ts=1_700_000_010)
+
+        response = await app_client.get("/api/market/events")
+        event = response.json()["events"][0]
+        assert event["narrative"] is None
+
+        cache = fake_market_source.price_cache
+        assert cache.set_event_narrative(
+            event["id"], "ZAA rallies on simulated buyback chatter"
+        )
+
+        response = await app_client.get("/api/market/events")
+        enriched = response.json()["events"][0]
+        assert enriched["id"] == event["id"]
+        assert enriched["narrative"] == "ZAA rallies on simulated buyback chatter"

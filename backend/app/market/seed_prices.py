@@ -48,6 +48,34 @@ def asset_class_for(ticker: str) -> str:
     """
     return "crypto" if ticker.strip().upper() in CRYPTO_TICKERS else "equity"
 
+
+# Static ticker -> sector map (M3.2b / M3.4). Drives the simulator's
+# sector-correlated event bursts and the analytics sector-allocation grouping.
+# Distinct from CORRELATION_GROUPS below (the GBM tick-correlation structure,
+# where TSLA is deliberately independent): here TSLA is plain tech.
+SECTORS: dict[str, str] = {
+    "AAPL": "tech",
+    "GOOGL": "tech",
+    "MSFT": "tech",
+    "AMZN": "tech",
+    "META": "tech",
+    "NVDA": "tech",
+    "NFLX": "tech",
+    "TSLA": "tech",
+    "JPM": "financials",
+    "V": "financials",
+    "BTC": "crypto",
+    "ETH": "crypto",
+}
+
+
+def sector_for(ticker: str) -> str:
+    """Return the sector for a ticker; unknown/user-added tickers -> 'other'.
+
+    Input is normalized (strip + uppercase) so callers may pass raw user input.
+    """
+    return SECTORS.get(ticker.strip().upper(), "other")
+
 # Per-ticker GBM parameters
 # sigma: annualized volatility (higher = more price movement)
 # mu: annualized drift / expected return
