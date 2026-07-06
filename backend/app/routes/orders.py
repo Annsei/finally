@@ -14,6 +14,14 @@ plus the background fill engine:
   asyncio background task wired in main.py's lifespan, calling the pass every
   ~1 second
 
+and the shared placement helper:
+- ``place_order_on_conn(conn, price_cache, *, ...)`` — validates and places
+  one order on an open connection without committing; returns the full order
+  JSON (status 'open'/'filled') or a ``{"status": "failed", ...}`` dict and
+  never raises on validation failure. Used by both the POST route (which maps
+  failures to HTTP 400) and the chat auto-execution pipeline (M2.1, which
+  treats failures as non-fatal outcomes inside its single-commit turn).
+
 Routes are created via the factory function ``create_orders_router`` which
 closes over the shared ``PriceCache`` instance, the database path, and the
 commission rate, mirroring the other routers.
@@ -435,7 +443,14 @@ async def orders_fill_loop(
 
 
 def _validate_order_request(
-    body: PlaceOrderRequest, side: str, kind: str, time_in_force: str, quote: PriceUpdate | None
+    *,
+    side: str,
+    kind: str,
+    time_in_force: str,
+    quantity: float,
+    limit_price: float | None,
+    stop_price: float | None,
+    quote: PriceUpdate | None,
 ) -> str | None:
     """Validate a placement request. Returns an error message or None if valid.
 
@@ -446,7 +461,7 @@ def _validate_order_request(
         return "Ticker not found in price cache"
     if side not in {"buy", "sell"}:
         return "Side must be 'buy' or 'sell'"
-    if body.quantity <= 0:
+    if quantity <= 0:
         return "Quantity must be greater than 0"
     if kind not in ORDER_KINDS:
         return "kind must be one of 'limit', 'stop', 'stop_limit'"
@@ -455,35 +470,193 @@ def _validate_order_request(
 
     # Required-fields matrix per kind
     if kind == "limit":
-        if body.limit_price is None:
+        if limit_price is None:
             return "limit_price is required for kind 'limit'"
-        if body.stop_price is not None:
+        if stop_price is not None:
             return "stop_price is not allowed for kind 'limit'"
     elif kind == "stop":
-        if body.stop_price is None:
+        if stop_price is None:
             return "stop_price is required for kind 'stop'"
-        if body.limit_price is not None:
+        if limit_price is not None:
             return "limit_price is not allowed for kind 'stop'"
     else:  # stop_limit
-        if body.limit_price is None or body.stop_price is None:
+        if limit_price is None or stop_price is None:
             return "kind 'stop_limit' requires both limit_price and stop_price"
 
     # Price positivity
-    if body.limit_price is not None and body.limit_price <= 0:
+    if limit_price is not None and limit_price <= 0:
         return "Limit price must be greater than 0"
-    if body.stop_price is not None and body.stop_price <= 0:
+    if stop_price is not None and stop_price <= 0:
         return "Stop price must be greater than 0"
 
     # Wrong-side stops rejected: a stop that is already on the triggering side
     # of the market would fire instantly (it is really a market order).
     if kind in {"stop", "stop_limit"}:
         bid, ask = _quote_bid_ask(quote)
-        if side == "sell" and body.stop_price >= bid:
+        if side == "sell" and stop_price >= bid:
             return "Stop price must be below the market"
-        if side == "buy" and body.stop_price <= ask:
+        if side == "buy" and stop_price <= ask:
             return "Stop price must be above the market"
 
     return None
+
+
+def place_order_on_conn(
+    conn: sqlite3.Connection,
+    price_cache: PriceCache,
+    *,
+    ticker: str,
+    side: str,
+    quantity: float,
+    kind: str,
+    limit_price: float | None,
+    stop_price: float | None,
+    time_in_force: str | None,
+    commission_bps: float = 0.0,
+) -> dict:
+    """Place an order (limit / stop / stop_limit) on an open SQLite connection.
+
+    Shared placement path for the POST /api/portfolio/orders route and the
+    chat auto-execution pipeline (M2.1). All validation failures — including a
+    marketable limit fill failing trade validation (e.g. insufficient cash) —
+    return ``{"status": "failed", "ticker": T, "error": msg}`` and NEVER
+    raise. On success returns the full public order JSON (``_order_dict``
+    shape) with status ``'open'`` (resting) or ``'filled'`` (immediately
+    marketable limit; the trade, its portfolio snapshot, and the order row all
+    land on the caller's connection).
+
+    Transaction semantics: does NOT commit — the caller owns the transaction
+    boundary (mirroring ``execute_trade_on_conn``). If no transaction is open,
+    a ``BEGIN IMMEDIATE`` is issued first (same TOCTOU discipline as trades).
+    All writes happen inside a SAVEPOINT so a mid-placement failure (price
+    racing off the limit, or the fill failing validation) unwinds only THIS
+    order's writes — sibling writes already on the caller's transaction (e.g.
+    the chat flow's earlier trades) are untouched. A failed placement leaves
+    the connection exactly as it was found (plus, possibly, the BEGIN
+    IMMEDIATE this function issued — callers roll back or commit as usual).
+
+    Args:
+        conn: An open SQLite connection (caller manages lifecycle/commit).
+        price_cache: Live price cache for validation and marketable fills.
+        ticker: Ticker symbol (normalized with .strip().upper() internally).
+        side: "buy" or "sell" (normalized to lowercase internally).
+        quantity: Number of shares (must be > 0).
+        kind: "limit" | "stop" | "stop_limit" (normalized to lowercase).
+        limit_price: Required for limit/stop_limit; forbidden for stop.
+        stop_price: Required for stop/stop_limit; forbidden for limit.
+        time_in_force: "day" | "gtc"; None/empty defaults to "gtc" (LLM
+            structured outputs may emit null for optional fields).
+        commission_bps: Commission in basis points applied to immediate fills.
+    """
+    ticker = ticker.strip().upper()
+    side = side.lower()
+    kind = kind.lower()
+    time_in_force = (time_in_force or "gtc").lower()
+
+    quote = price_cache.get(ticker)
+    error = _validate_order_request(
+        side=side,
+        kind=kind,
+        time_in_force=time_in_force,
+        quantity=quantity,
+        limit_price=limit_price,
+        stop_price=stop_price,
+        quote=quote,
+    )
+    if error is not None:
+        return {"status": "failed", "ticker": ticker, "error": error}
+
+    order_id = str(uuid.uuid4())
+    created_dt = datetime.now(timezone.utc)
+    created_at = created_dt.isoformat()
+    # 'day' orders expire 24 hours from placement until M3's session clock
+    # provides a real session close; 'gtc' orders never expire.
+    expires_at = (
+        (created_dt + DAY_ORDER_TTL).isoformat() if time_in_force == "day" else None
+    )
+    # Only limit orders can fill at placement. Stops never fill immediately:
+    # the wrong-side check above guarantees they are untriggered right now.
+    marketable = (
+        kind == "limit" and _marketable_price(quote, side, limit_price) is not None
+    )
+
+    # Take the write lock up front when we own the transaction (TOCTOU
+    # discipline, mirroring execute_trade_on_conn), then scope this order's
+    # writes to a savepoint so failures unwind without touching sibling
+    # writes on a caller-owned transaction (the chat batch).
+    if not conn.in_transaction:
+        conn.execute("BEGIN IMMEDIATE")
+    conn.execute("SAVEPOINT place_order")
+
+    status = "open"
+    filled_at: str | None = None
+    fill_price: float | None = None
+    fill_trade_id: str | None = None
+    try:
+        if marketable:
+            outcome = _execute_fill(
+                conn, price_cache, ticker, side, quantity, limit_price, commission_bps
+            )
+            if outcome["status"] == "executed":
+                status = "filled"
+                filled_at = datetime.now(timezone.utc).isoformat()
+                fill_price = outcome["price"]
+                fill_trade_id = outcome["trade_id"]
+                # Spec §7: snapshot immediately after trade execution — joins
+                # the caller's transaction alongside the fill.
+                _record_snapshot(conn, price_cache)
+            elif outcome["status"] == "not_marketable":
+                # Price moved off the limit between check and execution —
+                # undo the trade writes and rest the order as open instead.
+                conn.execute("ROLLBACK TO SAVEPOINT place_order")
+            else:
+                # Fill failed validation (e.g. insufficient cash): store
+                # NOTHING for this order and report the failure.
+                conn.execute("ROLLBACK TO SAVEPOINT place_order")
+                conn.execute("RELEASE SAVEPOINT place_order")
+                return {"status": "failed", "ticker": ticker, "error": outcome["error"]}
+
+        conn.execute(
+            """
+            INSERT INTO orders (
+                id, user_id, ticker, side, quantity, kind, limit_price,
+                stop_price, time_in_force, expires_at, triggered_at,
+                status, reject_reason, created_at, filled_at, fill_price,
+                fill_trade_id
+            )
+            VALUES (?, 'default', ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, ?, ?, ?, ?)
+            """,
+            (
+                order_id, ticker, side, quantity, kind,
+                limit_price, stop_price, time_in_force,
+                expires_at, status, created_at, filled_at, fill_price,
+                fill_trade_id,
+            ),
+        )
+    except Exception:
+        # Unexpected error: unwind this order's writes, keep the caller's
+        # transaction (and any sibling writes) intact, and re-raise.
+        conn.execute("ROLLBACK TO SAVEPOINT place_order")
+        conn.execute("RELEASE SAVEPOINT place_order")
+        raise
+    conn.execute("RELEASE SAVEPOINT place_order")
+
+    return _order_dict(
+        order_id=order_id,
+        ticker=ticker,
+        side=side,
+        quantity=quantity,
+        kind=kind,
+        limit_price=limit_price,
+        stop_price=stop_price,
+        time_in_force=time_in_force,
+        expires_at=expires_at,
+        triggered_at=None,
+        status=status,
+        created_at=created_at,
+        filled_at=filled_at,
+        fill_price=fill_price,
+    )
 
 
 def create_orders_router(
@@ -506,115 +679,49 @@ def create_orders_router(
     async def place_order(body: PlaceOrderRequest) -> dict:
         """Place an order (limit, stop, or stop_limit).
 
-        Marketable LIMIT orders (buy: ask <= limit_price; sell: bid >=
-        limit_price) execute immediately through the same transactional path
-        as market orders — positions/cash/trades row/snapshot and the 'filled'
-        order row commit atomically. If the immediate fill fails validation
-        (e.g. insufficient cash), HTTP 400 is returned and NOTHING is stored.
-        Non-marketable limit orders and all stop/stop_limit orders are stored
-        as status 'open' for the fill loop. time_in_force 'day' stamps
-        expires_at = created_at + 24h (session close once M3 lands).
+        Thin HTTP wrapper over ``place_order_on_conn``. Marketable LIMIT
+        orders (buy: ask <= limit_price; sell: bid >= limit_price) execute
+        immediately through the same transactional path as market orders —
+        positions/cash/trades row/snapshot and the 'filled' order row commit
+        atomically. If placement fails validation (including the immediate
+        fill failing, e.g. insufficient cash), HTTP 400 is returned and
+        NOTHING is stored. Non-marketable limit orders and all
+        stop/stop_limit orders are stored as status 'open' for the fill loop.
+        time_in_force 'day' stamps expires_at = created_at + 24h (session
+        close once M3 lands).
         """
-        ticker = body.ticker.strip().upper()
-        side = body.side.lower()
-        kind = body.kind.lower()
-        time_in_force = body.time_in_force.lower()
-
-        quote = price_cache.get(ticker)
-        error = _validate_order_request(body, side, kind, time_in_force, quote)
-        if error is not None:
-            return JSONResponse(status_code=400, content={"error": error})
-
-        order_id = str(uuid.uuid4())
-        created_dt = datetime.now(timezone.utc)
-        created_at = created_dt.isoformat()
-        # 'day' orders expire 24 hours from placement until M3's session clock
-        # provides a real session close; 'gtc' orders never expire.
-        expires_at = (
-            (created_dt + DAY_ORDER_TTL).isoformat() if time_in_force == "day" else None
-        )
-        # Only limit orders can fill at placement. Stops never fill immediately:
-        # the wrong-side check above guarantees they are untriggered right now.
-        marketable = (
-            kind == "limit"
-            and _marketable_price(quote, side, body.limit_price) is not None
-        )
-
         conn = get_conn(db_path)
         try:
-            filled_at: str | None = None
-            fill_price: float | None = None
-            fill_trade_id: str | None = None
-            status = "open"
-
-            if marketable:
-                outcome = _execute_fill(
-                    conn, price_cache, ticker, side, body.quantity,
-                    body.limit_price, commission_bps,
-                )
-                if outcome["status"] == "executed":
-                    status = "filled"
-                    filled_at = datetime.now(timezone.utc).isoformat()
-                    fill_price = outcome["price"]
-                    fill_trade_id = outcome["trade_id"]
-                    _record_snapshot(conn, price_cache)
-                elif outcome["status"] == "not_marketable":
-                    # Price moved off the limit between check and execution —
-                    # undo the trade and rest the order as open instead.
-                    conn.rollback()
-                else:
-                    # Validation failure (e.g. insufficient cash): store NOTHING.
-                    conn.rollback()
-                    return JSONResponse(
-                        status_code=400, content={"error": outcome["error"]}
-                    )
-
-            conn.execute(
-                """
-                INSERT INTO orders (
-                    id, user_id, ticker, side, quantity, kind, limit_price,
-                    stop_price, time_in_force, expires_at, triggered_at,
-                    status, reject_reason, created_at, filled_at, fill_price,
-                    fill_trade_id
-                )
-                VALUES (?, 'default', ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, ?, ?, ?, ?)
-                """,
-                (
-                    order_id, ticker, side, body.quantity, kind,
-                    body.limit_price, body.stop_price, time_in_force,
-                    expires_at, status, created_at, filled_at, fill_price,
-                    fill_trade_id,
-                ),
+            result = place_order_on_conn(
+                conn,
+                price_cache,
+                ticker=body.ticker,
+                side=body.side,
+                quantity=body.quantity,
+                kind=body.kind,
+                limit_price=body.limit_price,
+                stop_price=body.stop_price,
+                time_in_force=body.time_in_force,
+                commission_bps=commission_bps,
             )
+            if result["status"] == "failed":
+                # place_order_on_conn already unwound its own writes; the
+                # rollback just releases any BEGIN IMMEDIATE it took.
+                conn.rollback()
+                return JSONResponse(status_code=400, content={"error": result["error"]})
             conn.commit()
         except Exception:
             conn.rollback()
             logger.exception(
                 "Unexpected error placing %s order %s %s %s (limit=%s stop=%s)",
-                kind, side, body.quantity, ticker, body.limit_price, body.stop_price,
+                body.kind, body.side, body.quantity, body.ticker,
+                body.limit_price, body.stop_price,
             )
             raise
         finally:
             conn.close()
 
-        return {
-            "order": _order_dict(
-                order_id=order_id,
-                ticker=ticker,
-                side=side,
-                quantity=body.quantity,
-                kind=kind,
-                limit_price=body.limit_price,
-                stop_price=body.stop_price,
-                time_in_force=time_in_force,
-                expires_at=expires_at,
-                triggered_at=None,
-                status=status,
-                created_at=created_at,
-                filled_at=filled_at,
-                fill_price=fill_price,
-            )
-        }
+        return {"order": result}
 
     @router.get("/orders")
     async def list_orders(status: str | None = None, limit: str | None = None) -> dict:

@@ -81,6 +81,7 @@ async def app_client(tmp_path, monkeypatch, fake_market_source):
     from app.routes.market import create_market_router
     from app.routes.orders import create_orders_router
     from app.routes.portfolio import create_portfolio_router
+    from app.routes.rules import create_rules_router
     from app.routes.watchlist import create_watchlist_router
 
     init_db(db_file)
@@ -100,6 +101,7 @@ async def app_client(tmp_path, monkeypatch, fake_market_source):
     test_app.include_router(create_stream_router(price_cache))
     test_app.include_router(create_portfolio_router(price_cache, db_file))
     test_app.include_router(create_orders_router(price_cache, db_file))
+    test_app.include_router(create_rules_router(price_cache, db_file))
     test_app.include_router(create_watchlist_router(price_cache, db_file))
     test_app.include_router(create_market_router(price_cache))
 
@@ -113,7 +115,9 @@ async def chat_client(tmp_path, monkeypatch, fake_market_source):
 
     Extends app_client with the chat router and sets LLM_MOCK=true so that
     chat tests never make real network calls to OpenRouter.
-    Includes all five routers: health, stream, portfolio, watchlist, chat.
+    Includes health, stream, portfolio, orders, rules, watchlist, and chat
+    routers (mirroring main.py) so chat-agent tests can verify order rows and
+    rule rows through the public endpoints.
     Installs a FakeMarketSource on app.state (as main.py's lifespan does).
     """
     db_file = str(tmp_path / "test.db")
@@ -125,7 +129,9 @@ async def chat_client(tmp_path, monkeypatch, fake_market_source):
     from app.market.seed_prices import SEED_PRICES
     from app.routes.chat import create_chat_router
     from app.routes.health import router as health_router
+    from app.routes.orders import create_orders_router
     from app.routes.portfolio import create_portfolio_router
+    from app.routes.rules import create_rules_router
     from app.routes.watchlist import create_watchlist_router
 
     init_db(db_file)
@@ -144,6 +150,8 @@ async def chat_client(tmp_path, monkeypatch, fake_market_source):
     test_app.include_router(health_router)
     test_app.include_router(create_stream_router(price_cache))
     test_app.include_router(create_portfolio_router(price_cache, db_file))
+    test_app.include_router(create_orders_router(price_cache, db_file))
+    test_app.include_router(create_rules_router(price_cache, db_file))
     test_app.include_router(create_watchlist_router(price_cache, db_file))
     test_app.include_router(create_chat_router(price_cache, db_file))
 

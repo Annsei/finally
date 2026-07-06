@@ -120,6 +120,11 @@ async def lifespan(app: FastAPI):
     orders_router = create_orders_router(price_cache, db_path, commission_bps)
     app.include_router(orders_router)
 
+    # Rules router (standing rules engine, M2.2)
+    from app.routes.rules import create_rules_router, rules_eval_loop
+    rules_router = create_rules_router(price_cache, db_path)
+    app.include_router(rules_router)
+
     # Watchlist router
     from app.routes.watchlist import create_watchlist_router
     watchlist_router = create_watchlist_router(price_cache, db_path)
@@ -150,10 +155,17 @@ async def lifespan(app: FastAPI):
     app.state.orders_fill_task = orders_fill_task
     logger.info("FinAlly startup: order fill background task started")
 
+    # Start background rules evaluator task (every ~1 second, M2.2)
+    rules_eval_task = asyncio.create_task(
+        rules_eval_loop(price_cache, db_path, commission_bps=commission_bps)
+    )
+    app.state.rules_eval_task = rules_eval_task
+    logger.info("FinAlly startup: rules evaluator background task started")
+
     yield
 
     logger.info("FinAlly shutdown: cancelling background tasks")
-    for task in (snapshot_task, orders_fill_task):
+    for task in (snapshot_task, orders_fill_task, rules_eval_task):
         task.cancel()
         try:
             await task

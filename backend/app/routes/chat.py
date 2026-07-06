@@ -1,8 +1,10 @@
 """Chat API routes for FinAlly.
 
 Provides:
-- POST /api/chat — LLM-powered chat with structured output; auto-executes trades
-  and watchlist changes; persists conversation history to chat_messages.
+- POST /api/chat — LLM-powered chat with structured output; auto-executes
+  trades, advanced orders (limit/stop/stop_limit — M2.1), standing rules
+  (M2.2), and watchlist changes; persists conversation history to
+  chat_messages.
 
 All routes are created via the factory function ``create_chat_router`` which
 closes over the shared ``PriceCache`` instance and the database path.
@@ -27,13 +29,45 @@ from pydantic import BaseModel
 
 from app.db.connection import get_conn
 from app.market.cache import PriceCache
+from app.routes.orders import place_order_on_conn
 from app.routes.portfolio import _record_snapshot, execute_trade_on_conn
+from app.routes.rules import create_rule_on_conn
 from app.routes.watchlist import apply_watchlist_change_on_conn, sync_market_source
 
 logger = logging.getLogger(__name__)
 
 MODEL = "openrouter/openai/gpt-oss-120b"
 EXTRA_BODY = {"provider": {"order": ["cerebras"]}}
+
+# System prompt for the assistant (M2: the AI is an agent — beyond immediate
+# market trades it can place resting limit/stop/stop_limit orders and create
+# standing rules). The portfolio context is appended per-request.
+SYSTEM_PROMPT = (
+    "You are FinAlly, an AI trading assistant. Be concise and data-driven. "
+    "Execute trades when asked. Always respond with valid structured JSON.\n\n"
+    "You act through four action arrays in your JSON response:\n"
+    "- 'trades': immediate market orders {ticker, side, quantity}.\n"
+    "- 'orders': resting limit/stop/stop-limit orders {ticker, side, quantity, "
+    "kind, limit_price?, stop_price?, time_in_force?}. kind is one of 'limit' "
+    "(limit_price required), 'stop' (stop_price required, market-on-trigger), "
+    "'stop_limit' (both required). time_in_force is 'gtc' (default) or 'day'. "
+    "Use resting orders whenever the user names a trigger price: 'buy X if it "
+    "drops to Y' means a limit buy with limit_price Y; 'protect it with a stop "
+    "at Z' means a sell stop with stop_price Z; 'take profit at W' means a "
+    "limit sell at W. A sell stop must be below the current price, a buy stop "
+    "above it. Limit orders already marketable at placement fill immediately.\n"
+    "- 'rules': standing one-shot automations {ticker, trigger_type, "
+    "threshold, side, quantity, description} evaluated continuously against "
+    "live quotes. trigger_type is exactly one of 'price_above', 'price_below', "
+    "'day_change_pct_above', 'day_change_pct_below'. threshold is a dollar "
+    "price for price_* triggers and a percent for day_change_pct_* triggers "
+    "(negative for drops — 'if NVDA drops 3% today, buy 5' means trigger_type "
+    "'day_change_pct_below' with threshold -3). When a rule fires it executes "
+    "a market trade once and moves to status 'fired' until the user re-arms "
+    "it. Always write a clear human-readable description, e.g. "
+    "'Buy 5 NVDA when day change <= -3%'.\n"
+    "- 'watchlist_changes': {ticker, action} with action 'add' or 'remove'."
+)
 
 
 # ---------------------------------------------------------------------------
@@ -56,10 +90,37 @@ class WatchlistChange(BaseModel):
     action: str  # "add" | "remove"
 
 
+class OrderInstruction(BaseModel):
+    """An advanced order the LLM asks to place (M2.1) — POST /orders fields."""
+
+    ticker: str
+    side: str  # "buy" | "sell"
+    quantity: float
+    kind: str  # "limit" | "stop" | "stop_limit"
+    limit_price: float | None = None
+    stop_price: float | None = None
+    # None tolerated (strict structured-output modes emit null for optionals);
+    # place_order_on_conn normalizes None/empty to "gtc".
+    time_in_force: str | None = None  # "day" | "gtc" (default "gtc")
+
+
+class RuleInstruction(BaseModel):
+    """A standing rule the LLM asks to create (M2.2) — POST /rules fields."""
+
+    ticker: str
+    trigger_type: str  # price_above | price_below | day_change_pct_above | day_change_pct_below
+    threshold: float
+    side: str  # "buy" | "sell"
+    quantity: float
+    description: str | None = None
+
+
 class ChatResponse(BaseModel):
     message: str
     trades: list[TradeInstruction] = []
     watchlist_changes: list[WatchlistChange] = []
+    orders: list[OrderInstruction] = []
+    rules: list[RuleInstruction] = []
 
 
 # ---------------------------------------------------------------------------
@@ -210,19 +271,24 @@ def create_chat_router(
     async def chat(body: ChatRequest, request: Request) -> dict:
         """Process a chat message: call LLM (or mock), auto-execute actions, persist.
 
-        Returns structured JSON with the assistant message, trade outcomes, and
-        watchlist change outcomes. Per-action validation failures are returned as
-        outcome dicts (status=failed) — they do NOT raise HTTP errors and do not
-        abort the remaining actions.
+        Returns structured JSON with the assistant message, trade outcomes,
+        watchlist change outcomes, and — when the turn contained them —
+        advanced-order outcomes ("orders": full order JSON for placed/filled,
+        failed dict otherwise) and rule outcomes ("rules":
+        {"status": "created", "rule": {...}} or failed dict). Per-action
+        validation failures are returned as outcome dicts (status=failed) —
+        they do NOT raise HTTP errors and do not abort the remaining actions.
 
         Ordering: watchlist changes are applied BEFORE trades, and each
         successful "add" is registered with the live market source
         immediately (add_ticker seeds the price cache) so a single turn like
-        "add PYPL and buy 5 shares" finds a price at trade time. Market
-        source removals stay AFTER the commit so an in-flight turn cannot
-        lose prices and a rollback cannot orphan the source state.
+        "add PYPL and buy 5 shares" finds a price at trade time. Advanced
+        orders are placed AFTER trades, then standing rules are created.
+        Market source removals stay AFTER the commit so an in-flight turn
+        cannot lose prices and a rollback cannot orphan the source state.
 
-        Transaction boundary: all executed trades, applied watchlist changes,
+        Transaction boundary: all executed trades, placed orders (including
+        immediate marketable fills), created rules, applied watchlist changes,
         and both chat_messages rows are committed atomically in ONE commit. An
         unexpected error anywhere before that commit rolls back everything —
         no half-applied chat turns — and any pre-commit market source adds are
@@ -253,11 +319,7 @@ def create_chat_router(
             messages: list[dict] = [
                 {
                     "role": "system",
-                    "content": (
-                        "You are FinAlly, an AI trading assistant. Be concise and data-driven. "
-                        "Execute trades when asked. Always respond with valid structured JSON.\n\n"
-                        f"Current portfolio:\n{context}"
-                    ),
+                    "content": f"{SYSTEM_PROMPT}\n\nCurrent portfolio:\n{context}",
                 }
             ]
             messages.extend(
@@ -328,10 +390,56 @@ def create_chat_router(
                 for t in parsed.trades
             ]
 
+            # Step 6b (M2.1): Place advanced orders AFTER trades, on the same
+            # shared connection/transaction — order rows (and any immediate
+            # marketable fill + its snapshot) commit atomically with the rest
+            # of the turn in Step 7. Per-order validation failures return
+            # {"status": "failed", ...} dicts and never abort the batch;
+            # placed/filled orders yield their full public order JSON.
+            order_outcomes = [
+                place_order_on_conn(
+                    conn,
+                    price_cache,
+                    ticker=o.ticker,
+                    side=o.side,
+                    quantity=o.quantity,
+                    kind=o.kind,
+                    limit_price=o.limit_price,
+                    stop_price=o.stop_price,
+                    time_in_force=o.time_in_force,
+                    commission_bps=commission_bps,
+                )
+                for o in parsed.orders
+            ]
+
+            # Step 6c (M2.2): Create standing rules on the shared connection —
+            # same single-transaction semantics and non-fatal per-rule
+            # failures as trades and orders.
+            rule_outcomes = [
+                create_rule_on_conn(
+                    conn,
+                    price_cache,
+                    ticker=r.ticker,
+                    trigger_type=r.trigger_type,
+                    threshold=r.threshold,
+                    side=r.side,
+                    quantity=r.quantity,
+                    description=r.description,
+                )
+                for r in parsed.rules
+            ]
+
             # Step 7: Persist both messages (T-02-12 — parameterized SQL)
             # Separate timestamps guarantee deterministic ORDER BY created_at ordering
             # even when both rows are written in the same request (WR-02).
+            # The "orders"/"rules" keys are appended only when the turn
+            # contained such instructions, keeping the LLM_MOCK response (no
+            # orders/rules) byte-identical for the E2E suite.
             actions = {"trades": trade_outcomes, "watchlist_changes": watch_outcomes}
+            if order_outcomes:
+                actions["orders"] = order_outcomes
+            if rule_outcomes:
+                actions["rules"] = rule_outcomes
             user_ts = datetime.now(timezone.utc).isoformat()
             conn.execute(
                 "INSERT INTO chat_messages (id, user_id, role, content, actions, created_at) "
@@ -368,12 +476,19 @@ def create_chat_router(
                 if outcome["status"] == "removed":
                     await sync_market_source(request, outcome["ticker"], "remove")
 
-            # Step 10: Return structured response
-            return {
+            # Step 10: Return structured response (mirrors the stored actions:
+            # "orders"/"rules" keys appear only when the turn contained them,
+            # keeping the LLM_MOCK payload byte-identical for E2E).
+            response_payload = {
                 "message": parsed.message,
                 "trades": trade_outcomes,
                 "watchlist_changes": watch_outcomes,
             }
+            if order_outcomes:
+                response_payload["orders"] = order_outcomes
+            if rule_outcomes:
+                response_payload["rules"] = rule_outcomes
+            return response_payload
 
         except Exception:
             conn.rollback()

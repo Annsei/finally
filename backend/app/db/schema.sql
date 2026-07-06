@@ -97,9 +97,33 @@ CREATE TABLE IF NOT EXISTS orders (
     fill_trade_id TEXT
 );
 
+-- Rules: standing one-shot automations evaluated every ~1s against live
+-- quotes (M2.2). trigger_type is one of 'price_above', 'price_below',
+-- 'day_change_pct_above', 'day_change_pct_below'; status is one of 'active',
+-- 'paused', 'fired'. Rules are one-shot: on firing they move to 'fired' (even
+-- when the resulting trade fails validation) and must be re-armed via
+-- PATCH /api/rules/{id} {"status": "active"} to fire again. init_db() executes
+-- this script on every startup, so pre-existing database volumes pick this
+-- table up idempotently via IF NOT EXISTS (new table — no column migration).
+CREATE TABLE IF NOT EXISTS rules (
+    id            TEXT PRIMARY KEY,
+    user_id       TEXT NOT NULL DEFAULT 'default',
+    ticker        TEXT NOT NULL,
+    description   TEXT NOT NULL,
+    trigger_type  TEXT NOT NULL,
+    threshold     REAL NOT NULL,
+    side          TEXT NOT NULL,
+    quantity      REAL NOT NULL,
+    status        TEXT NOT NULL DEFAULT 'active',
+    created_at    TEXT NOT NULL,
+    last_fired_at TEXT,
+    fire_count    INTEGER NOT NULL DEFAULT 0
+);
+
 -- Indexes for the hot query paths (chat history and P&L chart both filter by
--- user_id and order by timestamp; the fill loop scans open orders every
--- second). init_db() executes this script on every
+-- user_id and order by timestamp; the fill loop scans open orders and the
+-- rules evaluator scans active rules every second). init_db() executes this
+-- script on every
 -- startup, so existing databases pick these up idempotently via IF NOT EXISTS.
 CREATE INDEX IF NOT EXISTS idx_chat_messages_user_created
     ON chat_messages (user_id, created_at);
@@ -107,3 +131,5 @@ CREATE INDEX IF NOT EXISTS idx_portfolio_snapshots_user_recorded
     ON portfolio_snapshots (user_id, recorded_at);
 CREATE INDEX IF NOT EXISTS idx_orders_user_status
     ON orders (user_id, status);
+CREATE INDEX IF NOT EXISTS idx_rules_user_status
+    ON rules (user_id, status);
