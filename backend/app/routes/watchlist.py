@@ -20,6 +20,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from app.auth import get_current_user_id
 from app.db.connection import get_conn
 from app.market.cache import PriceCache
 
@@ -30,10 +31,23 @@ class AddTickerRequest(BaseModel):
     ticker: str
 
 
+def ticker_watched_by_anyone(conn: sqlite3.Connection, ticker: str) -> bool:
+    """True when ANY user still watches ``ticker`` (M4 market-source rule).
+
+    The market data source tracks the union of all users' watchlists, so a
+    ticker may be dropped from the source only when no user watches it.
+    """
+    row = conn.execute(
+        "SELECT 1 FROM watchlist WHERE ticker = ? LIMIT 1", (ticker,)
+    ).fetchone()
+    return row is not None
+
+
 def apply_watchlist_change_on_conn(
     conn: sqlite3.Connection,
     ticker: str,
     action: str,
+    user_id: str = "default",
 ) -> dict:
     """Apply a watchlist add or remove operation on an open SQLite connection.
 
@@ -51,6 +65,7 @@ def apply_watchlist_change_on_conn(
         conn: An open SQLite connection (caller manages lifecycle and commit).
         ticker: Ticker symbol (normalized with .strip().upper() internally).
         action: "add" or "remove" (normalized to lowercase internally).
+        user_id: Whose watchlist to mutate (M4 — defaults to the anonymous user).
 
     Returns:
         On add success:    {"status": "added",   "ticker": T, "action": "add"}
@@ -68,15 +83,15 @@ def apply_watchlist_change_on_conn(
 
     if action == "add":
         conn.execute(
-            "INSERT OR IGNORE INTO watchlist (id, user_id, ticker, added_at) VALUES (?, 'default', ?, ?)",
-            (str(uuid.uuid4()), ticker, datetime.now(timezone.utc).isoformat()),
+            "INSERT OR IGNORE INTO watchlist (id, user_id, ticker, added_at) VALUES (?, ?, ?, ?)",
+            (str(uuid.uuid4()), user_id, ticker, datetime.now(timezone.utc).isoformat()),
         )
         return {"status": "added", "ticker": ticker, "action": "add"}
 
     if action == "remove":
         conn.execute(
-            "DELETE FROM watchlist WHERE user_id = 'default' AND ticker = ?",
-            (ticker,),
+            "DELETE FROM watchlist WHERE user_id = ? AND ticker = ?",
+            (user_id, ticker),
         )
         return {"status": "removed", "ticker": ticker, "action": "remove"}
 
@@ -137,10 +152,12 @@ def create_watchlist_router(price_cache: PriceCache, db_path: str) -> APIRouter:
     @router.get("/")
     async def get_watchlist(request: Request) -> dict:
         """Return all watchlist tickers enriched with live price data from cache."""
+        user_id = get_current_user_id(request, db_path)
         conn = get_conn(db_path)
         try:
             rows = conn.execute(
-                "SELECT ticker, added_at FROM watchlist WHERE user_id = 'default' ORDER BY added_at ASC"
+                "SELECT ticker, added_at FROM watchlist WHERE user_id = ? ORDER BY added_at ASC",
+                (user_id,),
             ).fetchall()
 
             tickers = []
@@ -183,11 +200,12 @@ def create_watchlist_router(price_cache: PriceCache, db_path: str) -> APIRouter:
         if len(ticker) > 10:
             return JSONResponse(status_code=400, content={"error": "Ticker must be 10 characters or fewer"})
 
+        user_id = get_current_user_id(request, db_path)
         conn = get_conn(db_path)
         try:
             conn.execute(
-                "INSERT OR IGNORE INTO watchlist (id, user_id, ticker, added_at) VALUES (?, 'default', ?, ?)",
-                (str(uuid.uuid4()), ticker, datetime.now(timezone.utc).isoformat()),
+                "INSERT OR IGNORE INTO watchlist (id, user_id, ticker, added_at) VALUES (?, ?, ?, ?)",
+                (str(uuid.uuid4()), user_id, ticker, datetime.now(timezone.utc).isoformat()),
             )
             conn.commit()
         finally:
@@ -199,28 +217,33 @@ def create_watchlist_router(price_cache: PriceCache, db_path: str) -> APIRouter:
 
     @router.delete("/{ticker}")
     async def remove_ticker(ticker: str, request: Request) -> dict:
-        """Remove a ticker from the watchlist and stop tracking it in the market source.
+        """Remove a ticker from the caller's watchlist.
 
         Idempotent — returns 200 even if the ticker was not in the watchlist.
         Ticker is normalized to uppercase.
 
-        The DB row is deleted and committed first, then the live market data
-        source stops simulating/streaming the ticker. If the source call fails
-        the DB change stands (see ``sync_market_source``).
+        The DB row is deleted and committed first. The live market data
+        source stops simulating/streaming the ticker ONLY when no user
+        watches it anymore (M4 — the source tracks the union of all users'
+        watchlists). If the source call fails the DB change stands (see
+        ``sync_market_source``).
         """
         ticker = ticker.strip().upper()
 
+        user_id = get_current_user_id(request, db_path)
         conn = get_conn(db_path)
         try:
             conn.execute(
-                "DELETE FROM watchlist WHERE user_id = 'default' AND ticker = ?",
-                (ticker,),
+                "DELETE FROM watchlist WHERE user_id = ? AND ticker = ?",
+                (user_id, ticker),
             )
             conn.commit()
+            still_watched = ticker_watched_by_anyone(conn, ticker)
         finally:
             conn.close()
 
-        await sync_market_source(request, ticker, "remove")
+        if not still_watched:
+            await sync_market_source(request, ticker, "remove")
 
         return {"status": "ok", "ticker": ticker}
 

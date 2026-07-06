@@ -118,7 +118,8 @@ def _mount_static_files(app: FastAPI) -> None:
 
 
 async def _snapshot_loop(price_cache: PriceCache, db_path: str, interval: int = 30) -> None:
-    """Background task: record a portfolio snapshot every ``interval`` seconds.
+    """Background task: record a portfolio snapshot PER USER every ``interval``
+    seconds (M4 — one row per users_profile row, single commit per cycle).
 
     Runs indefinitely until cancelled via ``asyncio.CancelledError``.
     """
@@ -126,10 +127,10 @@ async def _snapshot_loop(price_cache: PriceCache, db_path: str, interval: int = 
         try:
             conn = get_conn(db_path)
             try:
-                from app.routes.portfolio import _record_snapshot
-                _record_snapshot(conn, price_cache)
-                # _record_snapshot does not commit (caller owns the
-                # transaction) — commit our own snapshot here.
+                from app.routes.portfolio import record_snapshots_for_all_users
+                record_snapshots_for_all_users(conn, price_cache)
+                # The helper does not commit (caller owns the transaction) —
+                # commit this cycle's snapshots here.
                 conn.commit()
             finally:
                 conn.close()
@@ -159,10 +160,11 @@ async def lifespan(app: FastAPI):
     price_cache = PriceCache()
     source = create_market_data_source(price_cache, session_clock)
 
-    # Start market data with tickers from DB watchlist, falling back to the
-    # default watchlist (the 10 equities — crypto joins via watchlist adds).
+    # Start market data with the UNION of every user's watchlist (M4 — the
+    # source tracks all users' tickers), falling back to the default
+    # watchlist (the 10 equities — crypto joins via watchlist adds).
     conn = get_conn(db_path)
-    rows = conn.execute("SELECT ticker FROM watchlist WHERE user_id = 'default'").fetchall()
+    rows = conn.execute("SELECT DISTINCT ticker FROM watchlist").fetchall()
     tickers = [row["ticker"] for row in rows]
     conn.close()
     if not tickers:
@@ -209,6 +211,18 @@ async def lifespan(app: FastAPI):
     from app.routes.market import create_market_router
     market_router = create_market_router(price_cache, session_clock)
     app.include_router(market_router)
+
+    # Auth router (M4.1 — name-only login, cookie session)
+    from app.routes.auth import create_auth_router
+    app.include_router(create_auth_router(db_path))
+
+    # Leaderboard router (M4.2)
+    from app.routes.leaderboard import create_leaderboard_router
+    app.include_router(create_leaderboard_router(price_cache, db_path))
+
+    # Seasons router (M4.3 — reset + archive)
+    from app.routes.seasons import create_seasons_router
+    app.include_router(create_seasons_router(price_cache, db_path))
 
     # Mount static files LAST — must not shadow /api/* routes.
     _mount_static_files(app)

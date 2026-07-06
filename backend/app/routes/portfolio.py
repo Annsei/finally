@@ -24,6 +24,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from app.auth import get_current_user_id
 from app.db.connection import get_conn
 from app.market.cache import PriceCache
 from app.market.seed_prices import asset_class_for, sector_for
@@ -42,8 +43,10 @@ class TradeRequest(BaseModel):
     side: str  # "buy" or "sell"
 
 
-def _record_snapshot(conn: sqlite3.Connection, price_cache: PriceCache) -> None:
-    """Compute current total portfolio value and insert a snapshot row.
+def _record_snapshot(
+    conn: sqlite3.Connection, price_cache: PriceCache, user_id: str = "default"
+) -> None:
+    """Compute a user's current total portfolio value and insert a snapshot row.
 
     Does NOT commit — the caller owns the transaction boundary and must
     commit (or roll back) the inserted row.
@@ -51,14 +54,15 @@ def _record_snapshot(conn: sqlite3.Connection, price_cache: PriceCache) -> None:
     Args:
         conn: An open SQLite connection (caller manages lifecycle and commit).
         price_cache: Live price cache for current market prices.
+        user_id: The user to snapshot (M4 — defaults to the anonymous user).
     """
     row = conn.execute(
-        "SELECT cash_balance FROM users_profile WHERE id = 'default'"
+        "SELECT cash_balance FROM users_profile WHERE id = ?", (user_id,)
     ).fetchone()
     cash_balance: float = row["cash_balance"] if row else 0.0
 
     positions = conn.execute(
-        "SELECT ticker, quantity FROM positions WHERE user_id = 'default'"
+        "SELECT ticker, quantity FROM positions WHERE user_id = ?", (user_id,)
     ).fetchall()
 
     total_value = cash_balance + sum(
@@ -67,9 +71,25 @@ def _record_snapshot(conn: sqlite3.Connection, price_cache: PriceCache) -> None:
     )
 
     conn.execute(
-        "INSERT INTO portfolio_snapshots (id, user_id, total_value, recorded_at) VALUES (?, 'default', ?, ?)",
-        (str(uuid.uuid4()), total_value, datetime.now(timezone.utc).isoformat()),
+        "INSERT INTO portfolio_snapshots (id, user_id, total_value, recorded_at) VALUES (?, ?, ?, ?)",
+        (str(uuid.uuid4()), user_id, total_value, datetime.now(timezone.utc).isoformat()),
     )
+
+
+def record_snapshots_for_all_users(
+    conn: sqlite3.Connection, price_cache: PriceCache
+) -> int:
+    """Insert one portfolio snapshot per user profile (M4 snapshot task).
+
+    Does NOT commit — the caller owns the transaction boundary. Returns the
+    number of users snapshotted.
+    """
+    user_ids = [
+        row["id"] for row in conn.execute("SELECT id FROM users_profile ORDER BY id")
+    ]
+    for user_id in user_ids:
+        _record_snapshot(conn, price_cache, user_id)
+    return len(user_ids)
 
 
 # Sharpe needs a minimally meaningful equity curve (M3.4 contract: null below
@@ -128,6 +148,7 @@ def execute_trade_on_conn(
     quantity: float,
     commission_bps: float = 0.0,
     session_clock: SessionClock | None = None,
+    user_id: str = "default",
 ) -> dict:
     """Execute a market order on an open SQLite connection.
 
@@ -162,6 +183,8 @@ def execute_trade_on_conn(
             NOT threaded through the order fill loop or the rules engine —
             resting-order semantics are unchanged (frozen quotes mean nothing
             crosses while closed).
+        user_id: The user whose cash/positions/trades this trade touches
+            (M4 — defaults to the anonymous 'default' user).
 
     Fill price: buys fill at the cached ask, sells at the cached bid, falling
     back to the last price when bid/ask are absent or equal (zero spread).
@@ -219,7 +242,7 @@ def execute_trade_on_conn(
         conn.execute("BEGIN IMMEDIATE")
 
     user_row = conn.execute(
-        "SELECT cash_balance FROM users_profile WHERE id = 'default'"
+        "SELECT cash_balance FROM users_profile WHERE id = ?", (user_id,)
     ).fetchone()
     cash_balance: float = user_row["cash_balance"] if user_row else 0.0
 
@@ -238,8 +261,8 @@ def execute_trade_on_conn(
 
         # Deduct cash: notional plus commission
         conn.execute(
-            "UPDATE users_profile SET cash_balance = cash_balance - ? WHERE id = 'default'",
-            (cost + commission,),
+            "UPDATE users_profile SET cash_balance = cash_balance - ? WHERE id = ?",
+            (cost + commission, user_id),
         )
 
         # Commission folds into the cost basis: the per-share cost of THIS lot
@@ -253,20 +276,20 @@ def execute_trade_on_conn(
         conn.execute(
             """
             INSERT INTO positions (id, user_id, ticker, quantity, avg_cost, updated_at)
-            VALUES (?, 'default', ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(user_id, ticker) DO UPDATE SET
                 avg_cost = (avg_cost * quantity + excluded.avg_cost * excluded.quantity)
                            / (quantity + excluded.quantity),
                 quantity = quantity + excluded.quantity,
                 updated_at = excluded.updated_at
             """,
-            (position_id, ticker, quantity, effective_cost, now),
+            (position_id, user_id, ticker, quantity, effective_cost, now),
         )
 
     else:  # sell
         pos_row = conn.execute(
-            "SELECT quantity, avg_cost FROM positions WHERE user_id = 'default' AND ticker = ?",
-            (ticker,),
+            "SELECT quantity, avg_cost FROM positions WHERE user_id = ? AND ticker = ?",
+            (user_id, ticker),
         ).fetchone()
         current_qty: float = pos_row["quantity"] if pos_row else 0.0
         avg_cost_at_sale: float = pos_row["avg_cost"] if pos_row else 0.0
@@ -276,8 +299,8 @@ def execute_trade_on_conn(
 
         # Add cash proceeds: notional minus commission
         conn.execute(
-            "UPDATE users_profile SET cash_balance = cash_balance + ? WHERE id = 'default'",
-            (cost - commission,),
+            "UPDATE users_profile SET cash_balance = cash_balance + ? WHERE id = ?",
+            (cost - commission, user_id),
         )
 
         realized_pnl = round(
@@ -290,20 +313,20 @@ def execute_trade_on_conn(
         # epsilon as fully closed so no ghost position row lingers.
         if new_qty <= 1e-9:
             conn.execute(
-                "DELETE FROM positions WHERE user_id = 'default' AND ticker = ?",
-                (ticker,),
+                "DELETE FROM positions WHERE user_id = ? AND ticker = ?",
+                (user_id, ticker),
             )
         else:
             conn.execute(
-                "UPDATE positions SET quantity = ?, updated_at = ? WHERE user_id = 'default' AND ticker = ?",
-                (new_qty, now, ticker),
+                "UPDATE positions SET quantity = ?, updated_at = ? WHERE user_id = ? AND ticker = ?",
+                (new_qty, now, user_id, ticker),
             )
 
     # Insert trade log entry (commission always stored; realized_pnl NULL on buys)
     conn.execute(
         "INSERT INTO trades (id, user_id, ticker, side, quantity, price, commission, realized_pnl, executed_at)"
-        " VALUES (?, 'default', ?, ?, ?, ?, ?, ?, ?)",
-        (trade_id, ticker, side, quantity, current_price, commission, realized_pnl, now),
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (trade_id, user_id, ticker, side, quantity, current_price, commission, realized_pnl, now),
     )
 
     return {
@@ -343,21 +366,24 @@ def create_portfolio_router(
     @router.get("/")
     async def get_portfolio(request: Request) -> dict:
         """Return cash balance, positions, total value, and lifetime realized P&L."""
+        user_id = get_current_user_id(request, db_path)
         conn = get_conn(db_path)
         try:
             user_row = conn.execute(
-                "SELECT cash_balance FROM users_profile WHERE id = 'default'"
+                "SELECT cash_balance FROM users_profile WHERE id = ?", (user_id,)
             ).fetchone()
             cash_balance: float = user_row["cash_balance"] if user_row else 0.0
 
             realized_row = conn.execute(
                 "SELECT COALESCE(SUM(realized_pnl), 0.0) AS total FROM trades "
-                "WHERE user_id = 'default'"
+                "WHERE user_id = ?",
+                (user_id,),
             ).fetchone()
             realized_pnl: float = round(realized_row["total"] or 0.0, 2)
 
             position_rows = conn.execute(
-                "SELECT ticker, quantity, avg_cost FROM positions WHERE user_id = 'default'"
+                "SELECT ticker, quantity, avg_cost FROM positions WHERE user_id = ?",
+                (user_id,),
             ).fetchall()
 
             positions = []
@@ -405,16 +431,18 @@ def create_portfolio_router(
         ``{"error": "Market closed"}``.
         On success returns trade confirmation with status="ok" and trade_id.
         """
+        user_id = get_current_user_id(request, db_path)
         conn = get_conn(db_path)
         try:
             outcome = execute_trade_on_conn(
                 conn, price_cache, body.ticker, body.side, body.quantity,
                 commission_bps=commission_bps, session_clock=session_clock,
+                user_id=user_id,
             )
             if outcome["status"] == "executed":
                 # Record portfolio snapshot immediately after the trade and
                 # commit both atomically (spec §7).
-                _record_snapshot(conn, price_cache)
+                _record_snapshot(conn, price_cache, user_id)
                 conn.commit()
             else:
                 # Validation failures write nothing; rollback releases any
@@ -471,6 +499,7 @@ def create_portfolio_router(
                 )
         limit_value = max(1, min(500, limit_value))
 
+        user_id = get_current_user_id(request, db_path)
         conn = get_conn(db_path)
         try:
             rows = conn.execute(
@@ -478,11 +507,11 @@ def create_portfolio_router(
                 SELECT id, ticker, side, quantity, price, commission,
                        realized_pnl, executed_at
                 FROM trades
-                WHERE user_id = 'default'
+                WHERE user_id = ?
                 ORDER BY executed_at DESC, rowid DESC
                 LIMIT ?
                 """,
-                (limit_value,),
+                (user_id, limit_value),
             ).fetchall()
             return {
                 "trades": [
@@ -505,16 +534,18 @@ def create_portfolio_router(
     @router.get("/history")
     async def get_portfolio_history(request: Request) -> dict:
         """Return portfolio value snapshots in ascending chronological order."""
+        user_id = get_current_user_id(request, db_path)
         conn = get_conn(db_path)
         try:
             rows = conn.execute(
                 """
                 SELECT total_value, recorded_at
                 FROM portfolio_snapshots
-                WHERE user_id = 'default'
+                WHERE user_id = ?
                 ORDER BY recorded_at ASC
                 LIMIT 500
-                """
+                """,
+                (user_id,),
             ).fetchall()
             return {
                 "snapshots": [
@@ -547,19 +578,22 @@ def create_portfolio_router(
         rows are sorted by value descending. Cheap to compute per request —
         no caching.
         """
+        user_id = get_current_user_id(request, db_path)
         conn = get_conn(db_path)
         try:
             totals = conn.execute(
                 "SELECT COUNT(*) AS total, "
                 "COALESCE(SUM(CASE WHEN side = 'sell' THEN 1 ELSE 0 END), 0) AS sells, "
                 "COALESCE(SUM(realized_pnl), 0.0) AS realized "
-                "FROM trades WHERE user_id = 'default'"
+                "FROM trades WHERE user_id = ?",
+                (user_id,),
             ).fetchone()
 
             pnl_sells = conn.execute(
                 "SELECT ticker, side, quantity, price, realized_pnl, executed_at "
-                "FROM trades WHERE user_id = 'default' "
-                "AND side = 'sell' AND realized_pnl IS NOT NULL"
+                "FROM trades WHERE user_id = ? "
+                "AND side = 'sell' AND realized_pnl IS NOT NULL",
+                (user_id,),
             ).fetchall()
 
             win_rate: float | None = None
@@ -590,18 +624,20 @@ def create_portfolio_router(
                 row["total_value"]
                 for row in conn.execute(
                     "SELECT total_value FROM portfolio_snapshots "
-                    "WHERE user_id = 'default' ORDER BY recorded_at ASC, rowid ASC"
+                    "WHERE user_id = ? ORDER BY recorded_at ASC, rowid ASC",
+                    (user_id,),
                 )
             ]
 
             user_row = conn.execute(
-                "SELECT cash_balance FROM users_profile WHERE id = 'default'"
+                "SELECT cash_balance FROM users_profile WHERE id = ?", (user_id,)
             ).fetchone()
             cash_balance: float = user_row["cash_balance"] if user_row else 0.0
 
             sector_values: dict[str, float] = {"cash": cash_balance}
             for row in conn.execute(
-                "SELECT ticker, quantity FROM positions WHERE user_id = 'default'"
+                "SELECT ticker, quantity FROM positions WHERE user_id = ?",
+                (user_id,),
             ):
                 sector = sector_for(row["ticker"])
                 value = row["quantity"] * (price_cache.get_price(row["ticker"]) or 0.0)

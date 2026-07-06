@@ -59,9 +59,10 @@ def settle_session_close(price_cache: PriceCache, db_path: str) -> dict:
     conn = get_conn(db_path)
     try:
         conn.execute("BEGIN IMMEDIATE")
+        # ALL users' open equity DAY orders expire at the close (M4).
         rows = conn.execute(
             "SELECT id, ticker FROM orders "
-            "WHERE user_id = 'default' AND status = 'open' AND time_in_force = 'day'"
+            "WHERE status = 'open' AND time_in_force = 'day'"
         ).fetchall()
         for row in rows:
             if asset_class_for(row["ticker"]) != "equity":

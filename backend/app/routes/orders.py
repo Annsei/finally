@@ -60,10 +60,11 @@ import sqlite3
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from app.auth import get_current_user_id
 from app.db.connection import get_conn
 from app.market.cache import PriceCache
 from app.market.models import PriceUpdate
@@ -151,7 +152,7 @@ def _order_row_to_dict(row: sqlite3.Row) -> dict:
 
 
 _ORDER_SELECT_COLUMNS = (
-    "id, ticker, side, quantity, kind, limit_price, stop_price, "
+    "id, user_id, ticker, side, quantity, kind, limit_price, stop_price, "
     "time_in_force, expires_at, triggered_at, status, reject_reason, "
     "created_at, filled_at, fill_price"
 )
@@ -218,6 +219,7 @@ def _execute_fill(
     quantity: float,
     limit_price: float | None,
     commission_bps: float,
+    user_id: str = "default",
 ) -> dict:
     """Execute the trade for a triggered/marketable order within the caller's transaction.
 
@@ -227,10 +229,12 @@ def _execute_fill(
     limit, returns ``{"status": "not_marketable"}`` — the caller must roll back
     and leave the order open. Plain stop orders (limit_price is None) fill at
     whatever the market gives (market-on-trigger). Does NOT commit; the caller
-    owns the transaction boundary.
+    owns the transaction boundary. The trade lands on ``user_id``'s cash and
+    positions (M4 — the fill loop passes the order's own user).
     """
     outcome = execute_trade_on_conn(
-        conn, price_cache, ticker, side, quantity, commission_bps=commission_bps
+        conn, price_cache, ticker, side, quantity, commission_bps=commission_bps,
+        user_id=user_id,
     )
     if outcome["status"] == "executed" and limit_price is not None:
         price = outcome["price"]
@@ -254,7 +258,7 @@ def _apply_fill_outcome(
     orders.
     """
     if outcome["status"] == "executed":
-        _record_snapshot(conn, price_cache)
+        _record_snapshot(conn, price_cache, order["user_id"])
         filled_at = datetime.now(timezone.utc).isoformat()
         cur = conn.execute(
             """
@@ -352,7 +356,8 @@ def _try_fill_order(
             return "skipped"  # Untriggered — stays open.
         # Market-on-trigger: fill at the ask/bid with no limit guard.
         outcome = _execute_fill(
-            conn, price_cache, ticker, side, quantity, None, commission_bps
+            conn, price_cache, ticker, side, quantity, None, commission_bps,
+            user_id=order["user_id"],
         )
         return _apply_fill_outcome(conn, price_cache, order, outcome)
 
@@ -376,7 +381,8 @@ def _try_fill_order(
         return "skipped"  # Not marketable yet.
 
     outcome = _execute_fill(
-        conn, price_cache, ticker, side, quantity, limit_price, commission_bps
+        conn, price_cache, ticker, side, quantity, limit_price, commission_bps,
+        user_id=order["user_id"],
     )
     return _apply_fill_outcome(conn, price_cache, order, outcome)
 
@@ -384,11 +390,12 @@ def _try_fill_order(
 def process_open_orders_once(
     db_path: str, price_cache: PriceCache, commission_bps: float = 0.0
 ) -> dict[str, int]:
-    """One scan pass over all open orders: expire, trigger, and fill.
+    """One scan pass over ALL users' open orders: expire, trigger, and fill.
 
     Opens (and always closes) its own connection. Each order is processed in
     its own transaction — one bad order (or a DB lock error on it) is logged
-    and does not stop the pass. Orders are processed oldest-first.
+    and does not stop the pass. Orders are processed oldest-first. Fills land
+    on each order's own user (cash, position, trade row, snapshot) — M4.
 
     Returns:
         Counts for observability/tests:
@@ -403,7 +410,7 @@ def process_open_orders_once(
             f"""
             SELECT {_ORDER_SELECT_COLUMNS}
             FROM orders
-            WHERE user_id = 'default' AND status = 'open'
+            WHERE status = 'open'
             ORDER BY created_at ASC, rowid ASC
             """
         ).fetchall()
@@ -517,6 +524,7 @@ def place_order_on_conn(
     stop_price: float | None,
     time_in_force: str | None,
     commission_bps: float = 0.0,
+    user_id: str = "default",
 ) -> dict:
     """Place an order (limit / stop / stop_limit) on an open SQLite connection.
 
@@ -551,6 +559,8 @@ def place_order_on_conn(
         time_in_force: "day" | "gtc"; None/empty defaults to "gtc" (LLM
             structured outputs may emit null for optional fields).
         commission_bps: Commission in basis points applied to immediate fills.
+        user_id: Owner of the order — immediate fills and later fill-loop
+            fills land on this user's cash/positions (M4).
     """
     ticker = ticker.strip().upper()
     side = side.lower()
@@ -599,7 +609,8 @@ def place_order_on_conn(
     try:
         if marketable:
             outcome = _execute_fill(
-                conn, price_cache, ticker, side, quantity, limit_price, commission_bps
+                conn, price_cache, ticker, side, quantity, limit_price,
+                commission_bps, user_id=user_id,
             )
             if outcome["status"] == "executed":
                 status = "filled"
@@ -608,7 +619,7 @@ def place_order_on_conn(
                 fill_trade_id = outcome["trade_id"]
                 # Spec §7: snapshot immediately after trade execution — joins
                 # the caller's transaction alongside the fill.
-                _record_snapshot(conn, price_cache)
+                _record_snapshot(conn, price_cache, user_id)
             elif outcome["status"] == "not_marketable":
                 # Price moved off the limit between check and execution —
                 # undo the trade writes and rest the order as open instead.
@@ -628,10 +639,10 @@ def place_order_on_conn(
                 status, reject_reason, created_at, filled_at, fill_price,
                 fill_trade_id
             )
-            VALUES (?, 'default', ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, ?, ?, ?, ?)
             """,
             (
-                order_id, ticker, side, quantity, kind,
+                order_id, user_id, ticker, side, quantity, kind,
                 limit_price, stop_price, time_in_force,
                 expires_at, status, created_at, filled_at, fill_price,
                 fill_trade_id,
@@ -680,7 +691,7 @@ def create_orders_router(
     router = APIRouter(prefix="/api/portfolio", tags=["orders"])
 
     @router.post("/orders")
-    async def place_order(body: PlaceOrderRequest) -> dict:
+    async def place_order(body: PlaceOrderRequest, request: Request) -> dict:
         """Place an order (limit, stop, or stop_limit).
 
         Thin HTTP wrapper over ``place_order_on_conn``. Marketable LIMIT
@@ -694,6 +705,7 @@ def create_orders_router(
         time_in_force 'day' stamps expires_at = created_at + 24h; equity day
         orders additionally expire at session close in session mode (M3.1).
         """
+        user_id = get_current_user_id(request, db_path)
         conn = get_conn(db_path)
         try:
             result = place_order_on_conn(
@@ -707,6 +719,7 @@ def create_orders_router(
                 stop_price=body.stop_price,
                 time_in_force=body.time_in_force,
                 commission_bps=commission_bps,
+                user_id=user_id,
             )
             if result["status"] == "failed":
                 # place_order_on_conn already unwound its own writes; the
@@ -728,7 +741,9 @@ def create_orders_router(
         return {"order": result}
 
     @router.get("/orders")
-    async def list_orders(status: str | None = None, limit: str | None = None) -> dict:
+    async def list_orders(
+        request: Request, status: str | None = None, limit: str | None = None
+    ) -> dict:
         """List orders, newest first (created_at DESC, rowid DESC tie-break).
 
         Query params:
@@ -760,12 +775,13 @@ def create_orders_router(
                 )
         limit_value = max(1, min(500, limit_value))
 
+        user_id = get_current_user_id(request, db_path)
         query = f"""
             SELECT {_ORDER_SELECT_COLUMNS}
             FROM orders
-            WHERE user_id = 'default'
+            WHERE user_id = ?
         """
-        params: list = []
+        params: list = [user_id]
         if status_value != "all":
             query += " AND status = ?"
             params.append(status_value)
@@ -780,13 +796,15 @@ def create_orders_router(
             conn.close()
 
     @router.delete("/orders/{order_id}")
-    async def cancel_order(order_id: str) -> dict:
+    async def cancel_order(order_id: str, request: Request) -> dict:
         """Cancel an open order.
 
-        Returns the cancelled order. Unknown ids return HTTP 404; orders that
-        are not open (filled/cancelled/rejected/expired) return HTTP 400.
+        Returns the cancelled order. Unknown ids return HTTP 404 (including
+        another user's order — ids are never disclosed across users); orders
+        that are not open (filled/cancelled/rejected/expired) return HTTP 400.
         BEGIN IMMEDIATE serializes the status check against a concurrent fill.
         """
+        user_id = get_current_user_id(request, db_path)
         conn = get_conn(db_path)
         try:
             conn.execute("BEGIN IMMEDIATE")
@@ -794,9 +812,9 @@ def create_orders_router(
                 f"""
                 SELECT {_ORDER_SELECT_COLUMNS}
                 FROM orders
-                WHERE id = ? AND user_id = 'default'
+                WHERE id = ? AND user_id = ?
                 """,
-                (order_id,),
+                (order_id, user_id),
             ).fetchone()
             if row is None:
                 conn.rollback()

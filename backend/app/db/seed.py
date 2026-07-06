@@ -28,10 +28,11 @@ def seed_db(conn: sqlite3.Connection) -> None:
     """
     now = datetime.now(timezone.utc).isoformat()
 
-    # Default user profile
+    # Default user profile (the anonymous user displays as 'Guest' — M4.1)
     conn.execute(
-        "INSERT OR IGNORE INTO users_profile (id, cash_balance, created_at) VALUES (?, ?, ?)",
-        ("default", 10000.0, now),
+        "INSERT OR IGNORE INTO users_profile (id, cash_balance, created_at, display_name) "
+        "VALUES (?, ?, ?, ?)",
+        ("default", 10000.0, now, "Guest"),
     )
 
     # Default watchlist — the 10 default equities (crypto seeds exist in

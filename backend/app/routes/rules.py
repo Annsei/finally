@@ -48,10 +48,11 @@ import sqlite3
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from app.auth import get_current_user_id
 from app.db.connection import get_conn
 from app.market.cache import PriceCache
 from app.market.models import PriceUpdate
@@ -70,7 +71,7 @@ RULE_STATUSES = {"active", "paused", "fired"}
 PATCHABLE_STATUSES = {"active", "paused"}
 
 _RULE_SELECT_COLUMNS = (
-    "id, ticker, description, trigger_type, threshold, side, quantity, "
+    "id, user_id, ticker, description, trigger_type, threshold, side, quantity, "
     "status, created_at, last_fired_at, fire_count"
 )
 
@@ -129,6 +130,7 @@ def create_rule_on_conn(
     side: str,
     quantity: float,
     description: str | None = None,
+    user_id: str = "default",
 ) -> dict:
     """Validate and insert one rule on an open SQLite connection.
 
@@ -152,6 +154,8 @@ def create_rule_on_conn(
         side: "buy" or "sell" (normalized to lowercase internally).
         quantity: Number of shares to trade on fire (must be > 0).
         description: Optional human summary; None/blank gets a generated one.
+        user_id: Owner of the rule — evaluator fires execute on this user's
+            portfolio (M4).
     """
     ticker = ticker.strip().upper()
     side = side.lower()
@@ -192,9 +196,10 @@ def create_rule_on_conn(
         INSERT INTO rules (id, user_id, ticker, description, trigger_type,
             threshold, side, quantity, status, created_at, last_fired_at,
             fire_count)
-        VALUES (?, 'default', ?, ?, ?, ?, ?, ?, 'active', ?, NULL, 0)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, NULL, 0)
         """,
-        (rule_id, ticker, description, trigger_type, threshold, side, quantity, created_at),
+        (rule_id, user_id, ticker, description, trigger_type, threshold, side, quantity,
+         created_at),
     )
     return {
         "status": "created",
@@ -257,9 +262,10 @@ def _fire_rule_if_triggered(
     if not _rule_triggered(quote, rule["trigger_type"], rule["threshold"]):
         return "skipped"
 
-    # Market trade at the current quote. execute_trade_on_conn issues BEGIN
-    # IMMEDIATE (no transaction is open here) and never raises on validation
-    # failure; validation failures write nothing.
+    # Market trade at the current quote, on the RULE'S OWN user (M4).
+    # execute_trade_on_conn issues BEGIN IMMEDIATE (no transaction is open
+    # here) and never raises on validation failure; validation failures write
+    # nothing.
     outcome = execute_trade_on_conn(
         conn,
         price_cache,
@@ -267,6 +273,7 @@ def _fire_rule_if_triggered(
         rule["side"],
         rule["quantity"],
         commission_bps=commission_bps,
+        user_id=rule["user_id"],
     )
 
     now = datetime.now(timezone.utc).isoformat()
@@ -286,7 +293,7 @@ def _fire_rule_if_triggered(
 
     if outcome["status"] == "executed":
         # Spec §7: snapshot immediately after trade execution — same commit.
-        _record_snapshot(conn, price_cache)
+        _record_snapshot(conn, price_cache, rule["user_id"])
         content = (
             f"Rule fired: {rule['description']} — executed at ${outcome['price']:.2f}."
         )
@@ -296,8 +303,8 @@ def _fire_rule_if_triggered(
     actions = json.dumps({"trades": [outcome], "rule_id": rule["id"]})
     conn.execute(
         "INSERT INTO chat_messages (id, user_id, role, content, actions, kind, created_at) "
-        "VALUES (?, 'default', 'assistant', ?, ?, 'rule', ?)",
-        (str(uuid.uuid4()), content, actions, now),
+        "VALUES (?, ?, 'assistant', ?, ?, 'rule', ?)",
+        (str(uuid.uuid4()), rule["user_id"], content, actions, now),
     )
     conn.commit()
 
@@ -314,12 +321,13 @@ def _fire_rule_if_triggered(
 def process_rules_once(
     db_path: str, price_cache: PriceCache, commission_bps: float = 0.0
 ) -> dict[str, int]:
-    """One scan pass over all active rules: fire triggered rules.
+    """One scan pass over ALL users' active rules: fire triggered rules.
 
     Opens (and always closes) its own connection. Each rule is processed in
     its own transaction — one bad rule (or a DB lock error on it) is logged
     and does not stop the pass (same isolation discipline as the orders fill
-    loop). Rules are processed oldest-first.
+    loop). Rules are processed oldest-first. Fired trades, snapshots, and the
+    activation chat message land on each rule's own user (M4).
 
     Returns:
         Counts for observability/tests:
@@ -334,7 +342,7 @@ def process_rules_once(
             f"""
             SELECT {_RULE_SELECT_COLUMNS}
             FROM rules
-            WHERE user_id = 'default' AND status = 'active'
+            WHERE status = 'active'
             ORDER BY created_at ASC, rowid ASC
             """
         ).fetchall()
@@ -395,7 +403,7 @@ def create_rules_router(price_cache: PriceCache, db_path: str) -> APIRouter:
     router = APIRouter(prefix="/api/rules", tags=["rules"])
 
     @router.get("")
-    async def list_rules(status: str | None = None) -> dict:
+    async def list_rules(request: Request, status: str | None = None) -> dict:
         """List rules, newest first (created_at DESC, rowid DESC tie-break).
 
         Query params:
@@ -411,12 +419,13 @@ def create_rules_router(price_cache: PriceCache, db_path: str) -> APIRouter:
                 },
             )
 
+        user_id = get_current_user_id(request, db_path)
         query = f"""
             SELECT {_RULE_SELECT_COLUMNS}
             FROM rules
-            WHERE user_id = 'default'
+            WHERE user_id = ?
         """
-        params: list = []
+        params: list = [user_id]
         if status_value != "all":
             query += " AND status = ?"
             params.append(status_value)
@@ -430,7 +439,7 @@ def create_rules_router(price_cache: PriceCache, db_path: str) -> APIRouter:
             conn.close()
 
     @router.post("")
-    async def create_rule(body: CreateRuleRequest) -> dict:
+    async def create_rule(body: CreateRuleRequest, request: Request) -> dict:
         """Create a standing rule (status 'active').
 
         Thin HTTP wrapper over ``create_rule_on_conn``. Validation failures
@@ -438,6 +447,7 @@ def create_rules_router(price_cache: PriceCache, db_path: str) -> APIRouter:
         ``description`` is omitted a summary like "Buy 5 NVDA when day change
         <= -3%" is generated.
         """
+        user_id = get_current_user_id(request, db_path)
         conn = get_conn(db_path)
         try:
             result = create_rule_on_conn(
@@ -449,6 +459,7 @@ def create_rules_router(price_cache: PriceCache, db_path: str) -> APIRouter:
                 side=body.side,
                 quantity=body.quantity,
                 description=body.description,
+                user_id=user_id,
             )
             if result["status"] == "failed":
                 conn.rollback()
@@ -467,11 +478,12 @@ def create_rules_router(price_cache: PriceCache, db_path: str) -> APIRouter:
         return {"rule": result["rule"]}
 
     @router.patch("/{rule_id}")
-    async def update_rule(rule_id: str, body: UpdateRuleRequest) -> dict:
+    async def update_rule(rule_id: str, body: UpdateRuleRequest, request: Request) -> dict:
         """Set a rule's status to 'active' (re-arm a fired/paused rule) or 'paused'.
 
-        Unknown ids return HTTP 404; statuses other than 'active'/'paused'
-        return HTTP 400 ('fired' is set only by the evaluator).
+        Unknown ids (including another user's rules) return HTTP 404;
+        statuses other than 'active'/'paused' return HTTP 400 ('fired' is set
+        only by the evaluator).
         """
         new_status = body.status.lower()
         if new_status not in PATCHABLE_STATUSES:
@@ -479,13 +491,14 @@ def create_rules_router(price_cache: PriceCache, db_path: str) -> APIRouter:
                 status_code=400, content={"error": "status must be 'active' or 'paused'"}
             )
 
+        user_id = get_current_user_id(request, db_path)
         conn = get_conn(db_path)
         try:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 f"SELECT {_RULE_SELECT_COLUMNS} FROM rules "
-                "WHERE id = ? AND user_id = 'default'",
-                (rule_id,),
+                "WHERE id = ? AND user_id = ?",
+                (rule_id, user_id),
             ).fetchone()
             if row is None:
                 conn.rollback()
@@ -506,15 +519,16 @@ def create_rules_router(price_cache: PriceCache, db_path: str) -> APIRouter:
         return {"rule": result}
 
     @router.delete("/{rule_id}")
-    async def delete_rule(rule_id: str) -> dict:
+    async def delete_rule(rule_id: str, request: Request) -> dict:
         """Hard-delete a rule. Returns the deleted rule; unknown ids return 404."""
+        user_id = get_current_user_id(request, db_path)
         conn = get_conn(db_path)
         try:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 f"SELECT {_RULE_SELECT_COLUMNS} FROM rules "
-                "WHERE id = ? AND user_id = 'default'",
-                (rule_id,),
+                "WHERE id = ? AND user_id = ?",
+                (rule_id, user_id),
             ).fetchone()
             if row is None:
                 conn.rollback()

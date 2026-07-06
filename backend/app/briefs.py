@@ -10,11 +10,12 @@ and runs TWO passes per cycle:
    ``NARRATIVE_COOLDOWN_SECONDS`` globally; skipped events keep their
    template headline forever (they are consumed, never retried).
 
-2. AI briefs (M2.3): for each NEW event whose ticker the user holds or
-   watches, ask the LLM for a one-sentence, actionable take and push it into
-   the chat panel as an unsolicited assistant message with kind='brief'
-   (actions NULL — the frontend labels briefs by their kind, so the stored
-   content carries no prefix).
+2. AI briefs (M2.3, per-user since M4): for each NEW event whose ticker ANY
+   user holds or watches, ask the LLM for ONE one-sentence, actionable take
+   and push it into each eligible user's chat panel as an unsolicited
+   assistant message with kind='brief' (actions NULL — the frontend labels
+   briefs by their kind, so the stored content carries no prefix). Eligible
+   users are capped at MAX_BRIEF_USERS_PER_EVENT per event to bound cost.
 
 Brief throttling (module constants):
 - Global: at most one brief per BRIEF_GLOBAL_COOLDOWN_SECONDS across all
@@ -64,6 +65,12 @@ EXTRA_BODY = {"provider": {"order": ["cerebras"]}}
 BRIEF_GLOBAL_COOLDOWN_SECONDS = 60.0
 # …and at most one brief per ticker every five minutes.
 BRIEF_TICKER_COOLDOWN_SECONDS = 300.0
+# M4 cost cap: ONE brief text is generated per event (one LLM call) and its
+# row is written for each user who holds or watches the ticker, capped at
+# this many users per event so a popular ticker cannot multiply LLM/chat
+# volume unboundedly. Eligible users beyond the cap get no brief for that
+# event (deterministic: users are ordered by user_id).
+MAX_BRIEF_USERS_PER_EVENT = 3
 # Cadence of the background watcher.
 BRIEFS_WATCH_INTERVAL_SECONDS = 2.0
 # At most one LLM narrative enrichment per 10s globally (M3.2a). Events
@@ -340,14 +347,18 @@ async def process_events_for_briefs_once(
     New events (ids not yet in ``state.seen_event_ids``) are processed oldest
     first. Every new event is consumed this pass regardless of outcome:
 
-    - Ticker neither held nor watched     -> "skipped_irrelevant"
+    - No user holds or watches the ticker  -> "skipped_irrelevant"
     - Global or per-ticker cooldown active -> "skipped_throttled"
     - LLM call failed / empty content      -> "skipped_llm_error" (no row)
-    - Otherwise an assistant chat_messages row (kind='brief', actions NULL)
-      is inserted and committed            -> "briefed"
+    - Otherwise ONE brief text is generated (single LLM call) and an
+      assistant chat_messages row (kind='brief', actions NULL) is inserted
+      for each eligible user — every user who holds or watches the ticker,
+      capped at ``MAX_BRIEF_USERS_PER_EVENT`` (M4 cost bound) — and
+      committed                            -> "briefed" (counted per event)
 
     Throttle timestamps advance only on a successful brief, so a failed LLM
-    call does not burn the cooldown budget.
+    call does not burn the cooldown budget. Throttles stay GLOBAL across all
+    users (they exist to cap LLM cost, not per-user chat volume).
 
     Args:
         price_cache: Shared cache (source of events, quotes, positions P&L).
@@ -376,27 +387,26 @@ async def process_events_for_briefs_once(
 
     conn = get_conn(db_path)
     try:
-        watched = {
-            row["ticker"]
-            for row in conn.execute(
-                "SELECT ticker FROM watchlist WHERE user_id = 'default'"
-            )
-        }
-        positions = {
-            row["ticker"]: row
-            for row in conn.execute(
-                "SELECT ticker, quantity, avg_cost FROM positions "
-                "WHERE user_id = 'default'"
-            )
-        }
-
         for event in new_events:
             # Consumed no matter the outcome below — throttled/irrelevant/
             # failed events are never queued for a later pass.
             state.seen_event_ids.add(event.id)
             ticker = event.ticker
 
-            if ticker not in watched and ticker not in positions:
+            # Eligible users: everyone who watches OR holds the ticker,
+            # ordered by user_id for determinism, capped per event (M4).
+            eligible = [
+                row["user_id"]
+                for row in conn.execute(
+                    "SELECT user_id FROM ("
+                    " SELECT user_id FROM watchlist WHERE ticker = ?"
+                    " UNION"
+                    " SELECT user_id FROM positions WHERE ticker = ?"
+                    ") ORDER BY user_id LIMIT ?",
+                    (ticker, ticker, MAX_BRIEF_USERS_PER_EVENT),
+                )
+            ]
+            if not eligible:
                 counts["skipped_irrelevant"] += 1
                 continue
 
@@ -415,21 +425,35 @@ async def process_events_for_briefs_once(
                 counts["skipped_throttled"] += 1
                 continue
 
-            text = await _generate_brief_text(price_cache, positions.get(ticker), event)
+            # ONE LLM call per event: the prompt uses the first eligible
+            # HOLDER's position for context (or "watching, no position").
+            position_row = conn.execute(
+                "SELECT ticker, quantity, avg_cost FROM positions "
+                "WHERE ticker = ? AND user_id IN ({placeholders}) "
+                "ORDER BY user_id LIMIT 1".format(
+                    placeholders=",".join("?" * len(eligible))
+                ),
+                (ticker, *eligible),
+            ).fetchone()
+            text = await _generate_brief_text(price_cache, position_row, event)
             if text is None:
                 counts["skipped_llm_error"] += 1
                 continue
 
-            conn.execute(
-                "INSERT INTO chat_messages (id, user_id, role, content, actions, kind, created_at) "
-                "VALUES (?, 'default', 'assistant', ?, NULL, 'brief', ?)",
-                (str(uuid.uuid4()), text, datetime.now(timezone.utc).isoformat()),
-            )
+            created_at = datetime.now(timezone.utc).isoformat()
+            for user_id in eligible:
+                conn.execute(
+                    "INSERT INTO chat_messages (id, user_id, role, content, actions, kind, created_at) "
+                    "VALUES (?, ?, 'assistant', ?, NULL, 'brief', ?)",
+                    (str(uuid.uuid4()), user_id, text, created_at),
+                )
             conn.commit()
             state.last_brief_ts = ts
             state.last_ticker_brief_ts[ticker] = ts
             counts["briefed"] += 1
-            logger.info("AI brief posted for %s: %s", ticker, text)
+            logger.info(
+                "AI brief posted for %s to %d user(s): %s", ticker, len(eligible), text
+            )
     finally:
         conn.close()
     return counts

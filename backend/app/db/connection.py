@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import logging
 import os
+import secrets
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -68,6 +70,12 @@ _TRADES_NEW_COLUMNS: tuple[tuple[str, str], ...] = (
 # rows are ordinary conversation turns, so the default 'chat' is exactly right.
 _CHAT_MESSAGES_NEW_COLUMNS: tuple[tuple[str, str], ...] = (
     ("kind", "TEXT NOT NULL DEFAULT 'chat'"),
+)
+# M4.1: login display name (original casing; row id is the lowercased name).
+# Pre-existing rows get NULL; the anonymous 'default' row is stamped 'Guest'
+# by _migrate_schema so /api/auth/me and the leaderboard always have a name.
+_USERS_PROFILE_NEW_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("display_name", "TEXT"),
 )
 
 # Rebuild target for the orders table: identical to schema.sql. Used only when
@@ -139,6 +147,14 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     added = _add_missing_columns(conn, "orders", _ORDERS_NEW_COLUMNS)
     added += _add_missing_columns(conn, "trades", _TRADES_NEW_COLUMNS)
     added += _add_missing_columns(conn, "chat_messages", _CHAT_MESSAGES_NEW_COLUMNS)
+    added += _add_missing_columns(conn, "users_profile", _USERS_PROFILE_NEW_COLUMNS)
+
+    # M4.1: the anonymous 'default' user displays as 'Guest'. Idempotent —
+    # only fills a missing name (pre-M4 rows migrated above get NULL).
+    named = conn.execute(
+        "UPDATE users_profile SET display_name = 'Guest' "
+        "WHERE id = 'default' AND display_name IS NULL"
+    ).rowcount
 
     limit_price_col = _table_columns(conn, "orders").get("limit_price")
     rebuilt = limit_price_col is not None and limit_price_col["notnull"]
@@ -154,13 +170,40 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             "CREATE INDEX IF NOT EXISTS idx_orders_user_status ON orders (user_id, status)"
         )
 
-    if added or rebuilt:
+    if added or rebuilt or named:
         conn.commit()
         logger.info(
             "Schema migration applied: added columns %s%s",
             added or "(none)",
             "; rebuilt orders table for nullable limit_price" if rebuilt else "",
         )
+
+
+def _ensure_arena_state(conn: sqlite3.Connection) -> None:
+    """Ensure M4 singleton state exists. Idempotent; runs on every startup.
+
+    - ``app_meta['session_secret']``: HMAC key for the ``finally_session``
+      cookie, generated once at first boot (stdlib ``secrets``).
+    - ``seasons``: season 1 is inserted when the table is empty so the
+      leaderboard always has a current (ended_at IS NULL) season.
+    """
+    row = conn.execute(
+        "SELECT value FROM app_meta WHERE key = 'session_secret'"
+    ).fetchone()
+    if row is None:
+        conn.execute(
+            "INSERT OR IGNORE INTO app_meta (key, value) VALUES ('session_secret', ?)",
+            (secrets.token_hex(32),),
+        )
+
+    season_count = conn.execute("SELECT COUNT(*) FROM seasons").fetchone()[0]
+    if season_count == 0:
+        conn.execute(
+            "INSERT INTO seasons (started_at) VALUES (?)",
+            (datetime.now(timezone.utc).isoformat(),),
+        )
+
+    conn.commit()
 
 
 def init_db(db_path: str = DB_PATH) -> None:
@@ -180,6 +223,7 @@ def init_db(db_path: str = DB_PATH) -> None:
         schema_sql = _SCHEMA_FILE.read_text(encoding="utf-8")
         conn.executescript(schema_sql)
         _migrate_schema(conn)
+        _ensure_arena_state(conn)
         logger.debug("Schema applied successfully")
 
         if _needs_seed(conn):

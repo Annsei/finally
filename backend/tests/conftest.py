@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from contextlib import AsyncExitStack
+from types import SimpleNamespace
+
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI
@@ -95,11 +98,14 @@ async def app_client(tmp_path, monkeypatch, fake_market_source):
     from app.db.connection import init_db
     from app.market import PriceCache, create_stream_router
     from app.market.seed_prices import SEED_PRICES
+    from app.routes.auth import create_auth_router
     from app.routes.health import router as health_router
+    from app.routes.leaderboard import create_leaderboard_router
     from app.routes.market import create_market_router
     from app.routes.orders import create_orders_router
     from app.routes.portfolio import create_portfolio_router
     from app.routes.rules import create_rules_router
+    from app.routes.seasons import create_seasons_router
     from app.routes.watchlist import create_watchlist_router
 
     init_db(db_file)
@@ -122,6 +128,9 @@ async def app_client(tmp_path, monkeypatch, fake_market_source):
     test_app.include_router(create_rules_router(price_cache, db_file))
     test_app.include_router(create_watchlist_router(price_cache, db_file))
     test_app.include_router(create_market_router(price_cache))
+    test_app.include_router(create_auth_router(db_file))
+    test_app.include_router(create_leaderboard_router(price_cache, db_file))
+    test_app.include_router(create_seasons_router(price_cache, db_file))
 
     async with AsyncClient(transport=ASGITransport(app=test_app), base_url="http://test") as client:
         yield client
@@ -175,3 +184,79 @@ async def chat_client(tmp_path, monkeypatch, fake_market_source):
 
     async with AsyncClient(transport=ASGITransport(app=test_app), base_url="http://test") as client:
         yield client
+
+
+@pytest_asyncio.fixture
+async def arena(tmp_path, monkeypatch, fake_market_source):
+    """Multi-user arena app (M4): every router registered, LLM_MOCK=true.
+
+    Yields a SimpleNamespace with:
+    - ``app``: the FastAPI test app (all routers incl. auth/chat/leaderboard/
+      seasons, FakeMarketSource on app.state — mirrors main.py's lifespan)
+    - ``db_file``: path to the isolated temp SQLite DB
+    - ``price_cache``: the app's PriceCache (seeded with SEED_PRICES)
+    - ``market_source``: the FakeMarketSource (started with the seeded
+      watchlist union, as main.py does)
+    - ``make_client()``: async factory returning an independent AsyncClient
+      with its OWN cookie jar — call once per simulated user (plus one for
+      anonymous), so isolation tests can act as several users at once.
+    """
+    db_file = str(tmp_path / "arena.db")
+    monkeypatch.setenv("DB_PATH", db_file)
+    monkeypatch.setenv("LLM_MOCK", "true")
+
+    from app.db.connection import get_conn, init_db
+    from app.market import PriceCache, create_stream_router
+    from app.market.seed_prices import SEED_PRICES
+    from app.routes.auth import create_auth_router
+    from app.routes.chat import create_chat_router
+    from app.routes.health import router as health_router
+    from app.routes.leaderboard import create_leaderboard_router
+    from app.routes.market import create_market_router
+    from app.routes.orders import create_orders_router
+    from app.routes.portfolio import create_portfolio_router
+    from app.routes.rules import create_rules_router
+    from app.routes.seasons import create_seasons_router
+    from app.routes.watchlist import create_watchlist_router
+
+    init_db(db_file)
+
+    price_cache = PriceCache()
+    for ticker, price in SEED_PRICES.items():
+        price_cache.update(ticker, price)
+
+    fake_market_source.price_cache = price_cache
+    # Start the source with the union of all users' watchlists (main.py M4).
+    conn = get_conn(db_file)
+    tickers = [row["ticker"] for row in conn.execute("SELECT DISTINCT ticker FROM watchlist")]
+    conn.close()
+    await fake_market_source.start(tickers)
+
+    test_app = FastAPI()
+    test_app.state.market_source = fake_market_source
+    test_app.include_router(health_router)
+    test_app.include_router(create_stream_router(price_cache))
+    test_app.include_router(create_portfolio_router(price_cache, db_file))
+    test_app.include_router(create_orders_router(price_cache, db_file))
+    test_app.include_router(create_rules_router(price_cache, db_file))
+    test_app.include_router(create_watchlist_router(price_cache, db_file))
+    test_app.include_router(create_chat_router(price_cache, db_file))
+    test_app.include_router(create_market_router(price_cache))
+    test_app.include_router(create_auth_router(db_file))
+    test_app.include_router(create_leaderboard_router(price_cache, db_file))
+    test_app.include_router(create_seasons_router(price_cache, db_file))
+
+    async with AsyncExitStack() as stack:
+
+        async def make_client() -> AsyncClient:
+            return await stack.enter_async_context(
+                AsyncClient(transport=ASGITransport(app=test_app), base_url="http://test")
+            )
+
+        yield SimpleNamespace(
+            app=test_app,
+            db_file=db_file,
+            price_cache=price_cache,
+            market_source=fake_market_source,
+            make_client=make_client,
+        )

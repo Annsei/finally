@@ -2,11 +2,23 @@
 -- All tables use user_id defaulting to "default" for single-user use
 -- while keeping the door open for future multi-user support.
 
--- User profile: cash balance and account state
+-- User profile: cash balance and account state.
+-- display_name (M4.1) is the login name with its original casing; the row id
+-- is the lowercased name. The anonymous 'default' row displays as 'Guest'.
+-- NOTE: new columns here must also be added to _migrate_schema() in
+-- connection.py — CREATE TABLE IF NOT EXISTS does not evolve existing tables.
 CREATE TABLE IF NOT EXISTS users_profile (
     id           TEXT PRIMARY KEY,
     cash_balance REAL NOT NULL DEFAULT 10000.0,
-    created_at   TEXT NOT NULL
+    created_at   TEXT NOT NULL,
+    display_name TEXT
+);
+
+-- App-level key/value metadata (M4.1). Holds the HMAC session secret
+-- ('session_secret'), generated once at first boot by init_db().
+CREATE TABLE IF NOT EXISTS app_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
 );
 
 -- Watchlist: tickers the user wants to track
@@ -128,6 +140,26 @@ CREATE TABLE IF NOT EXISTS rules (
     created_at    TEXT NOT NULL,
     last_fired_at TEXT,
     fire_count    INTEGER NOT NULL DEFAULT 0
+);
+
+-- Seasons (M4.3): one row per competitive season. Exactly one season has
+-- ended_at IS NULL (the current one); init_db() inserts season 1 when the
+-- table is empty. POST /api/season/reset stamps ended_at and inserts the next.
+CREATE TABLE IF NOT EXISTS seasons (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at TEXT NOT NULL,
+    ended_at   TEXT
+);
+
+-- Season results (M4.3): final standings archived by POST /api/season/reset.
+CREATE TABLE IF NOT EXISTS season_results (
+    season_id   INTEGER NOT NULL,
+    user_id     TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    final_value REAL NOT NULL,
+    return_pct  REAL NOT NULL,
+    rank        INTEGER NOT NULL,
+    PRIMARY KEY (season_id, user_id)
 );
 
 -- Indexes for the hot query paths (chat history and P&L chart both filter by

@@ -417,12 +417,15 @@ class TestRulesEvaluatorLifecycle:
         real_execute = rules_module.execute_trade_on_conn
         calls = {"count": 0}
 
-        def exploding_execute(conn, price_cache, ticker, side, quantity, commission_bps=0.0):
+        def exploding_execute(
+            conn, price_cache, ticker, side, quantity, commission_bps=0.0, **kwargs
+        ):
             calls["count"] += 1
             if calls["count"] == 1:
                 raise RuntimeError("boom on first rule")
             return real_execute(
-                conn, price_cache, ticker, side, quantity, commission_bps=commission_bps
+                conn, price_cache, ticker, side, quantity,
+                commission_bps=commission_bps, **kwargs
             )
 
         monkeypatch.setattr(rules_module, "execute_trade_on_conn", exploding_execute)

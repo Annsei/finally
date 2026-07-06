@@ -56,8 +56,10 @@ class TestExecuteTradeOnConnImport:
         params = list(sig.parameters.keys())
         assert params == [
             "conn", "price_cache", "ticker", "side", "quantity", "commission_bps",
-            "session_clock",
+            "session_clock", "user_id",
         ]
+        # Anonymous default — legacy callers keep pre-M4 single-user behavior
+        assert sig.parameters["user_id"].default == "default"
         # Commission-free by default — legacy callers keep pre-M1 behavior
         assert sig.parameters["commission_bps"].default == 0.0
         # No session clock by default — legacy callers keep pre-M3 behavior

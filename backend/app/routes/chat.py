@@ -32,13 +32,18 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from app.auth import get_current_user_id
 from app.db.connection import get_conn
 from app.market.cache import PriceCache
 from app.market.session import SessionClock
 from app.routes.orders import place_order_on_conn
 from app.routes.portfolio import _record_snapshot, execute_trade_on_conn
 from app.routes.rules import create_rule_on_conn
-from app.routes.watchlist import apply_watchlist_change_on_conn, sync_market_source
+from app.routes.watchlist import (
+    apply_watchlist_change_on_conn,
+    sync_market_source,
+    ticker_watched_by_anyone,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -145,6 +150,7 @@ class ChatResponse(BaseModel):
 def _assemble_portfolio_context(
     conn: sqlite3.Connection,
     price_cache: PriceCache,
+    user_id: str = "default",
 ) -> str:
     """Build a compact portfolio context string for injection into the system prompt.
 
@@ -163,13 +169,14 @@ def _assemble_portfolio_context(
     """
     # Cash balance
     user_row = conn.execute(
-        "SELECT cash_balance FROM users_profile WHERE id = 'default'"
+        "SELECT cash_balance FROM users_profile WHERE id = ?", (user_id,)
     ).fetchone()
     cash: float = user_row["cash_balance"] if user_row else 0.0
 
     # Positions with P&L
     position_rows = conn.execute(
-        "SELECT ticker, quantity, avg_cost FROM positions WHERE user_id = 'default'"
+        "SELECT ticker, quantity, avg_cost FROM positions WHERE user_id = ?",
+        (user_id,),
     ).fetchall()
 
     lines: list[str] = []
@@ -192,7 +199,8 @@ def _assemble_portfolio_context(
 
     # Watchlist tickers enriched with live prices from the cache (spec §9)
     watchlist_rows = conn.execute(
-        "SELECT ticker FROM watchlist WHERE user_id = 'default' ORDER BY added_at ASC"
+        "SELECT ticker FROM watchlist WHERE user_id = ? ORDER BY added_at ASC",
+        (user_id,),
     ).fetchall()
     watchlist_parts: list[str] = []
     for r in watchlist_rows:
@@ -228,6 +236,7 @@ def _assemble_portfolio_context(
 def _assemble_review_context(
     conn: sqlite3.Connection,
     price_cache: PriceCache,
+    user_id: str = "default",
 ) -> tuple[str, int]:
     """Build the daily-review context string for the M2.4 review prompt.
 
@@ -254,10 +263,10 @@ def _assemble_review_context(
         """
         SELECT ticker, side, quantity, price, commission, realized_pnl
         FROM trades
-        WHERE user_id = 'default' AND substr(executed_at, 1, 10) = ?
+        WHERE user_id = ? AND substr(executed_at, 1, 10) = ?
         ORDER BY executed_at ASC, rowid ASC
         """,
-        (today,),
+        (user_id, today),
     ).fetchall()
     trade_lines = [
         f"{t['side']} {t['quantity']:g} {t['ticker']} @ ${t['price']:.2f}"
@@ -276,11 +285,11 @@ def _assemble_review_context(
         """
         SELECT description, last_fired_at
         FROM rules
-        WHERE user_id = 'default' AND last_fired_at IS NOT NULL
+        WHERE user_id = ? AND last_fired_at IS NOT NULL
               AND substr(last_fired_at, 1, 10) = ?
         ORDER BY last_fired_at ASC
         """,
-        (today,),
+        (user_id, today),
     ).fetchall()
     rules_block = (
         "\n".join(f"{r['description']} (fired {r['last_fired_at']})" for r in rule_rows)
@@ -290,17 +299,19 @@ def _assemble_review_context(
 
     # Current portfolio: cash, positions with unrealized + day P&L, totals
     user_row = conn.execute(
-        "SELECT cash_balance FROM users_profile WHERE id = 'default'"
+        "SELECT cash_balance FROM users_profile WHERE id = ?", (user_id,)
     ).fetchone()
     cash: float = user_row["cash_balance"] if user_row else 0.0
     realized_row = conn.execute(
         "SELECT COALESCE(SUM(realized_pnl), 0.0) AS total FROM trades "
-        "WHERE user_id = 'default'"
+        "WHERE user_id = ?",
+        (user_id,),
     ).fetchone()
     lifetime_realized = round(realized_row["total"] or 0.0, 2)
 
     position_rows = conn.execute(
-        "SELECT ticker, quantity, avg_cost FROM positions WHERE user_id = 'default'"
+        "SELECT ticker, quantity, avg_cost FROM positions WHERE user_id = ?",
+        (user_id,),
     ).fetchall()
     position_lines: list[str] = []
     market_value = 0.0
@@ -389,16 +400,18 @@ def create_chat_router(
         Returns:
             {"messages": [{"role", "content", "actions", "kind", "created_at"}, ...]}
         """
+        user_id = get_current_user_id(request, db_path)
         conn = get_conn(db_path)
         try:
             rows = conn.execute(
                 """
                 SELECT role, content, actions, kind, created_at
                 FROM chat_messages
-                WHERE user_id = 'default'
+                WHERE user_id = ?
                 ORDER BY created_at DESC
                 LIMIT 20
-                """
+                """,
+                (user_id,),
             ).fetchall()
             messages = list(reversed([
                 {
@@ -447,6 +460,7 @@ def create_chat_router(
         LLM errors (when LLM_MOCK=false) return HTTP 500 with
         ``{"error": "LLM unavailable"}``.
         """
+        user_id = get_current_user_id(request, db_path)
         conn = get_conn(db_path)
         # Tickers registered with the market source before the commit this
         # turn — used to reconcile the source if the transaction rolls back.
@@ -459,14 +473,15 @@ def create_chat_router(
             # the recent history. GET /api/chat/ still returns every kind.
             rows = conn.execute(
                 "SELECT role, content FROM chat_messages "
-                "WHERE user_id = 'default' "
+                "WHERE user_id = ? "
                 "AND kind NOT IN ('brief', 'rule', 'review') "
-                "ORDER BY created_at DESC LIMIT 20"
+                "ORDER BY created_at DESC LIMIT 20",
+                (user_id,),
             ).fetchall()
             history = list(reversed(rows))
 
             # Step 2: Assemble portfolio context (D-01/D-02)
-            context = _assemble_portfolio_context(conn, price_cache)
+            context = _assemble_portfolio_context(conn, price_cache, user_id)
 
             # Step 3: Build messages list for LLM
             messages: list[dict] = [
@@ -521,7 +536,9 @@ def create_chat_router(
             # rollback cannot orphan the source state.
             watch_outcomes: list[dict] = []
             for w in parsed.watchlist_changes:
-                outcome = apply_watchlist_change_on_conn(conn, w.ticker, w.action)
+                outcome = apply_watchlist_change_on_conn(
+                    conn, w.ticker, w.action, user_id=user_id
+                )
                 watch_outcomes.append(outcome)
                 if outcome["status"] == "added":
                     source_adds.append(outcome["ticker"])
@@ -540,6 +557,7 @@ def create_chat_router(
                     t.quantity,
                     commission_bps=commission_bps,
                     session_clock=session_clock,
+                    user_id=user_id,
                 )
                 for t in parsed.trades
             ]
@@ -562,6 +580,7 @@ def create_chat_router(
                     stop_price=o.stop_price,
                     time_in_force=o.time_in_force,
                     commission_bps=commission_bps,
+                    user_id=user_id,
                 )
                 for o in parsed.orders
             ]
@@ -579,6 +598,7 @@ def create_chat_router(
                     side=r.side,
                     quantity=r.quantity,
                     description=r.description,
+                    user_id=user_id,
                 )
                 for r in parsed.rules
             ]
@@ -597,14 +617,14 @@ def create_chat_router(
             user_ts = datetime.now(timezone.utc).isoformat()
             conn.execute(
                 "INSERT INTO chat_messages (id, user_id, role, content, actions, kind, created_at) "
-                "VALUES (?, 'default', 'user', ?, NULL, 'chat', ?)",
-                (str(uuid.uuid4()), body.message, user_ts),
+                "VALUES (?, ?, 'user', ?, NULL, 'chat', ?)",
+                (str(uuid.uuid4()), user_id, body.message, user_ts),
             )
             asst_ts = datetime.now(timezone.utc).isoformat()
             conn.execute(
                 "INSERT INTO chat_messages (id, user_id, role, content, actions, kind, created_at) "
-                "VALUES (?, 'default', 'assistant', ?, ?, 'chat', ?)",
-                (str(uuid.uuid4()), parsed.message, json.dumps(actions), asst_ts),
+                "VALUES (?, ?, 'assistant', ?, ?, 'chat', ?)",
+                (str(uuid.uuid4()), user_id, parsed.message, json.dumps(actions), asst_ts),
             )
             # Single atomic commit: all trades + watchlist changes + both
             # chat messages succeed or fail together.
@@ -616,18 +636,21 @@ def create_chat_router(
             # the already-committed chat turn.
             if any(t["status"] == "executed" for t in trade_outcomes):
                 try:
-                    _record_snapshot(conn, price_cache)
+                    _record_snapshot(conn, price_cache, user_id)
                     conn.commit()
                 except Exception:
                     logger.exception("Post-trade snapshot failed (chat turn already committed)")
 
             # Step 9: Sync watchlist REMOVALS to the live market data source
-            # so removed tickers stop simulating/streaming. Adds were already
-            # synced in Step 5 (pre-trade). Runs after the commit — DB is the
-            # source of truth and the sync is best-effort (failures logged
-            # inside the helper).
+            # so removed tickers stop simulating/streaming — but only when NO
+            # user still watches the ticker (M4: the source tracks the union
+            # of all users' watchlists). Adds were already synced in Step 5
+            # (pre-trade). Runs after the commit — DB is the source of truth
+            # and the sync is best-effort (failures logged inside the helper).
             for outcome in watch_outcomes:
-                if outcome["status"] == "removed":
+                if outcome["status"] == "removed" and not ticker_watched_by_anyone(
+                    conn, outcome["ticker"]
+                ):
                     await sync_market_source(request, outcome["ticker"], "remove")
 
             # Step 10: Return structured response (mirrors the stored actions:
@@ -649,16 +672,12 @@ def create_chat_router(
             # Best-effort reconcile: successful adds were registered with the
             # market source BEFORE the commit (Step 5). After a rollback the
             # DB may no longer contain those tickers — remove any such ticker
-            # from the source so it matches the DB again. Tickers still in the
-            # watchlist (idempotent re-adds of already-watched tickers) keep
-            # streaming.
+            # from the source so it matches the DB again. Tickers still in
+            # ANY user's watchlist (idempotent re-adds of already-watched
+            # tickers, or tickers other users watch) keep streaming.
             for added_ticker in source_adds:
                 try:
-                    row = conn.execute(
-                        "SELECT 1 FROM watchlist WHERE user_id = 'default' AND ticker = ?",
-                        (added_ticker,),
-                    ).fetchone()
-                    if row is None:
+                    if not ticker_watched_by_anyone(conn, added_ticker):
                         await sync_market_source(request, added_ticker, "remove")
                 except Exception:
                     logger.exception(
@@ -670,7 +689,7 @@ def create_chat_router(
             conn.close()
 
     @router.post("/review")
-    async def daily_review() -> dict:
+    async def daily_review(request: Request) -> dict:
         """Generate the daily AI review on demand (M2.4). No request body.
 
         Assembles today's activity (trades, rule firings, portfolio state,
@@ -687,9 +706,10 @@ def create_chat_router(
         When ``LLM_MOCK=true`` a deterministic review with the real trade
         count interpolated is returned — no network call.
         """
+        user_id = get_current_user_id(request, db_path)
         conn = get_conn(db_path)
         try:
-            context, trade_count = _assemble_review_context(conn, price_cache)
+            context, trade_count = _assemble_review_context(conn, price_cache, user_id)
 
             if os.getenv("LLM_MOCK", "false").lower() == "true":
                 text = (
@@ -728,8 +748,8 @@ def create_chat_router(
 
             conn.execute(
                 "INSERT INTO chat_messages (id, user_id, role, content, actions, kind, created_at) "
-                "VALUES (?, 'default', 'assistant', ?, NULL, 'review', ?)",
-                (str(uuid.uuid4()), text, datetime.now(timezone.utc).isoformat()),
+                "VALUES (?, ?, 'assistant', ?, NULL, 'review', ?)",
+                (str(uuid.uuid4()), user_id, text, datetime.now(timezone.utc).isoformat()),
             )
             conn.commit()
             return {"message": text, "kind": "review"}

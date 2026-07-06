@@ -34,7 +34,9 @@ class TestApplyWatchlistChangeOnConnImport:
         from app.routes.watchlist import apply_watchlist_change_on_conn
         sig = inspect.signature(apply_watchlist_change_on_conn)
         params = list(sig.parameters.keys())
-        assert params == ["conn", "ticker", "action"]
+        assert params == ["conn", "ticker", "action", "user_id"]
+        # Anonymous default — legacy callers keep pre-M4 single-user behavior
+        assert sig.parameters["user_id"].default == "default"
 
 
 class TestApplyWatchlistChangeOnConnFailurePaths:

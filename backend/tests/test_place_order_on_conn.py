@@ -73,6 +73,7 @@ class TestPlaceOrderOnConnSignature:
         assert params == [
             "conn", "price_cache", "ticker", "side", "quantity", "kind",
             "limit_price", "stop_price", "time_in_force", "commission_bps",
+            "user_id",
         ]
         for name in params[2:]:
             assert sig.parameters[name].kind is inspect.Parameter.KEYWORD_ONLY
