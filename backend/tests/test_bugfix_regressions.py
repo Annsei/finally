@@ -196,11 +196,15 @@ class TestChatTransactionBoundary:
         real_execute = chat_module.execute_trade_on_conn
         calls = {"count": 0}
 
-        def exploding_execute(conn, price_cache, ticker, side, quantity, commission_bps=0.0):
+        def exploding_execute(
+            conn, price_cache, ticker, side, quantity, commission_bps=0.0, **kwargs
+        ):
             calls["count"] += 1
             if calls["count"] >= 2:
                 raise RuntimeError("boom mid-batch")
-            return real_execute(conn, price_cache, ticker, side, quantity, commission_bps)
+            return real_execute(
+                conn, price_cache, ticker, side, quantity, commission_bps, **kwargs
+            )
 
         monkeypatch.setattr(chat_module, "execute_trade_on_conn", exploding_execute)
 

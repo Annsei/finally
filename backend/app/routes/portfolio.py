@@ -23,8 +23,14 @@ from pydantic import BaseModel
 
 from app.db.connection import get_conn
 from app.market.cache import PriceCache
+from app.market.seed_prices import asset_class_for
+from app.market.session import SessionClock
 
 logger = logging.getLogger(__name__)
+
+# Error message for market orders on equities while the session is closed
+# (M3.1). Contract fixed — the frontend and chat tests match on this string.
+MARKET_CLOSED_ERROR = "Market closed"
 
 
 class TradeRequest(BaseModel):
@@ -70,6 +76,7 @@ def execute_trade_on_conn(
     side: str,
     quantity: float,
     commission_bps: float = 0.0,
+    session_clock: SessionClock | None = None,
 ) -> dict:
     """Execute a market order on an open SQLite connection.
 
@@ -96,6 +103,14 @@ def execute_trade_on_conn(
         commission_bps: Commission in basis points of notional (0 = free).
             Read once from FINALLY_COMMISSION_BPS at app startup and passed
             down; never read from the environment here.
+        session_clock: Session clock (M3.1). When provided and the market is
+            CLOSED, market orders on EQUITY tickers are rejected with
+            "Market closed" (equity quotes are frozen while closed — a fill
+            would execute at a stale price). Crypto trades 24/7. With no
+            clock, or a 24/7 clock, nothing is ever rejected. Deliberately
+            NOT threaded through the order fill loop or the rules engine —
+            resting-order semantics are unchanged (frozen quotes mean nothing
+            crosses while closed).
 
     Fill price: buys fill at the cached ask, sells at the cached bid, falling
     back to the last price when bid/ask are absent or equal (zero spread).
@@ -128,6 +143,16 @@ def execute_trade_on_conn(
     # Validate quantity
     if quantity <= 0:
         return {"status": "failed", "ticker": ticker, "error": "Quantity must be greater than 0"}
+
+    # M3.1: reject equity market orders while the session is closed — the
+    # quote is frozen at the close, so a fill would execute at a stale price.
+    # Crypto trades 24/7; in 24/7 mode (no sessions) is_open is always True.
+    if (
+        session_clock is not None
+        and not session_clock.is_open
+        and asset_class_for(ticker) == "equity"
+    ):
+        return {"status": "failed", "ticker": ticker, "error": MARKET_CLOSED_ERROR}
 
     # Fill at the quote: buy at ask, sell at bid. When the source supplies no
     # quote, bid == ask == price (model default) and the fill is at the price.
@@ -243,7 +268,10 @@ def execute_trade_on_conn(
 
 
 def create_portfolio_router(
-    price_cache: PriceCache, db_path: str, commission_bps: float = 0.0
+    price_cache: PriceCache,
+    db_path: str,
+    commission_bps: float = 0.0,
+    session_clock: SessionClock | None = None,
 ) -> APIRouter:
     """Factory: build the portfolio APIRouter with injected dependencies.
 
@@ -252,6 +280,9 @@ def create_portfolio_router(
         db_path: Path to the SQLite database file.
         commission_bps: Commission in basis points of notional applied to every
             fill (FINALLY_COMMISSION_BPS, read once at app startup in main.py).
+        session_clock: Session clock (M3.1) — equity market orders are
+            rejected with HTTP 400 "Market closed" while the session is
+            closed. None (or a 24/7 clock) never rejects.
 
     Returns:
         A configured FastAPI APIRouter ready to be registered with ``app.include_router``.
@@ -318,14 +349,16 @@ def create_portfolio_router(
         Thin wrapper over ``execute_trade_on_conn``. On success the trade and
         its post-trade portfolio snapshot are committed together in a single
         transaction. Validation errors return HTTP 400 with
-        ``{"error": "message"}``; nothing is committed in that case.
+        ``{"error": "message"}``; nothing is committed in that case. Equity
+        market orders while the session is closed (M3.1) return HTTP 400
+        ``{"error": "Market closed"}``.
         On success returns trade confirmation with status="ok" and trade_id.
         """
         conn = get_conn(db_path)
         try:
             outcome = execute_trade_on_conn(
                 conn, price_cache, body.ticker, body.side, body.quantity,
-                commission_bps=commission_bps,
+                commission_bps=commission_bps, session_clock=session_clock,
             )
             if outcome["status"] == "executed":
                 # Record portfolio snapshot immediately after the trade and

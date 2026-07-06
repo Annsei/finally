@@ -12,7 +12,7 @@ import sqlite3
 import uuid
 from datetime import datetime, timezone
 
-from app.market.seed_prices import SEED_PRICES
+from app.market.seed_prices import DEFAULT_WATCHLIST
 
 logger = logging.getLogger(__name__)
 
@@ -34,8 +34,9 @@ def seed_db(conn: sqlite3.Connection) -> None:
         ("default", 10000.0, now),
     )
 
-    # Default watchlist — one row per ticker in SEED_PRICES
-    tickers = list(SEED_PRICES.keys())
+    # Default watchlist — the 10 default equities (crypto seeds exist in
+    # SEED_PRICES but join only via an explicit watchlist add, M3.3)
+    tickers = list(DEFAULT_WATCHLIST)
     for ticker in tickers:
         conn.execute(
             "INSERT OR IGNORE INTO watchlist (id, user_id, ticker, added_at) VALUES (?, ?, ?, ?)",

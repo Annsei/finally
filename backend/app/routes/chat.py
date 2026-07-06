@@ -34,6 +34,7 @@ from pydantic import BaseModel
 
 from app.db.connection import get_conn
 from app.market.cache import PriceCache
+from app.market.session import SessionClock
 from app.routes.orders import place_order_on_conn
 from app.routes.portfolio import _record_snapshot, execute_trade_on_conn
 from app.routes.rules import create_rule_on_conn
@@ -353,7 +354,10 @@ def _assemble_review_context(
 
 
 def create_chat_router(
-    price_cache: PriceCache, db_path: str, commission_bps: float = 0.0
+    price_cache: PriceCache,
+    db_path: str,
+    commission_bps: float = 0.0,
+    session_clock: SessionClock | None = None,
 ) -> APIRouter:
     """Factory: build the chat APIRouter with injected dependencies.
 
@@ -363,6 +367,10 @@ def create_chat_router(
         commission_bps: Commission in basis points of notional applied to every
             fill — chat-executed trades pay the same commission as manual ones
             (FINALLY_COMMISSION_BPS, read once at app startup in main.py).
+        session_clock: Session clock (M3.1) — chat-executed market trades on
+            equities inherit the same "Market closed" rejection as manual
+            trades via the shared ``execute_trade_on_conn`` helper (returned
+            as a failed trade outcome, never an HTTP error).
 
     Returns:
         A configured FastAPI APIRouter ready to be registered with ``app.include_router``.
@@ -531,6 +539,7 @@ def create_chat_router(
                     t.side.lower(),
                     t.quantity,
                     commission_bps=commission_bps,
+                    session_clock=session_clock,
                 )
                 for t in parsed.trades
             ]

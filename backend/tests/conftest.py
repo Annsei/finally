@@ -10,6 +10,24 @@ from httpx import ASGITransport, AsyncClient
 from app.market import MarketDataSource, PriceCache
 
 
+class FakeTime:
+    """Deterministic, manually-advanced time source for SessionClock tests.
+
+    Pass an instance as ``SessionClock(..., now=fake_time)`` and drive
+    transitions with ``fake_time.advance(seconds)`` + ``clock.tick()`` —
+    no sleeping. Importable helper (not a fixture) shared by session tests.
+    """
+
+    def __init__(self, start: float = 1_000.0) -> None:
+        self.now = start
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
 class FakeMarketSource(MarketDataSource):
     """In-memory MarketDataSource test double that records add/remove calls.
 

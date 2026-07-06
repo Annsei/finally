@@ -16,12 +16,15 @@ from .seed_prices import (
     CORRELATION_GROUPS,
     CROSS_GROUP_CORR,
     DEFAULT_PARAMS,
+    INTRA_CRYPTO_CORR,
     INTRA_FINANCE_CORR,
     INTRA_TECH_CORR,
     SEED_PRICES,
     TICKER_PARAMS,
     TSLA_CORR,
+    asset_class_for,
 )
+from .session import SessionClock
 
 logger = logging.getLogger(__name__)
 
@@ -117,10 +120,16 @@ class GBMSimulator:
 
     # --- Public API ---
 
-    def step(self) -> dict[str, float]:
-        """Advance all tickers by one time step. Returns {ticker: new_price}.
+    def step(self, only: set[str] | None = None) -> dict[str, float]:
+        """Advance tickers by one time step. Returns {ticker: new_price}.
 
         This is the hot path — called every 500ms. Keep it fast.
+
+        Args:
+            only: When given, only tickers in this set advance (and appear in
+                the result); all others keep their current price untouched.
+                Used while the session is closed to tick crypto 24/7 while
+                equity prices stay frozen (M3.1/M3.3). None advances all.
         """
         n = len(self._tickers)
         if n == 0:
@@ -137,6 +146,8 @@ class GBMSimulator:
 
         result: dict[str, float] = {}
         for i, ticker in enumerate(self._tickers):
+            if only is not None and ticker not in only:
+                continue  # Frozen (e.g. equity while the session is closed)
             params = self._params[ticker]
             mu = params["mu"]
             sigma = params["sigma"]
@@ -230,6 +241,7 @@ class GBMSimulator:
         """
         tech = CORRELATION_GROUPS["tech"]
         finance = CORRELATION_GROUPS["finance"]
+        crypto = CORRELATION_GROUPS["crypto"]
 
         # TSLA is in tech set but behaves independently
         if t1 == "TSLA" or t2 == "TSLA":
@@ -239,6 +251,8 @@ class GBMSimulator:
             return INTRA_TECH_CORR
         if t1 in finance and t2 in finance:
             return INTRA_FINANCE_CORR
+        if t1 in crypto and t2 in crypto:
+            return INTRA_CRYPTO_CORR
 
         return CROSS_GROUP_CORR
 
@@ -248,6 +262,14 @@ class SimulatorDataSource(MarketDataSource):
 
     Runs a background asyncio task that calls GBMSimulator.step() every
     `update_interval` seconds and writes results to the PriceCache.
+
+    Session awareness (M3.1/M3.3): when a ``session_clock`` is provided and
+    the market is CLOSED, only crypto tickers advance and write to the cache
+    — equity prices freeze at their last value (no cache updates at all, so
+    per-ticker records, bars, and the version counter stay put for them).
+    Without a clock (or with a 24/7 clock) everything ticks continuously.
+    ``add_ticker`` still seeds a first price even while closed so a
+    just-watched ticker is immediately quotable in the UI.
     """
 
     def __init__(
@@ -255,10 +277,12 @@ class SimulatorDataSource(MarketDataSource):
         price_cache: PriceCache,
         update_interval: float = 0.5,
         event_probability: float = 0.001,
+        session_clock: SessionClock | None = None,
     ) -> None:
         self._cache = price_cache
         self._interval = update_interval
         self._event_prob = event_probability
+        self._session_clock = session_clock
         self._sim: GBMSimulator | None = None
         self._task: asyncio.Task | None = None
 
@@ -318,12 +342,26 @@ class SimulatorDataSource(MarketDataSource):
             ask=ask,
         )
 
+    def _active_tickers(self) -> set[str] | None:
+        """Tickers allowed to tick right now.
+
+        None means "all" (market open, or no session clock). While the
+        session is closed only crypto tickers advance — equities freeze.
+        """
+        if self._session_clock is None or self._session_clock.is_open:
+            return None
+        return {
+            ticker
+            for ticker in (self._sim.get_tickers() if self._sim else [])
+            if asset_class_for(ticker) == "crypto"
+        }
+
     async def _run_loop(self) -> None:
         """Core loop: step the simulation, write to cache, sleep."""
         while True:
             try:
                 if self._sim:
-                    prices = self._sim.step()
+                    prices = self._sim.step(only=self._active_tickers())
                     for ticker, price in prices.items():
                         self._write_tick(ticker, price)
             except Exception:

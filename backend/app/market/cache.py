@@ -44,6 +44,9 @@ class PriceCache:
         self._events: deque[MarketEvent] = deque(maxlen=EVENT_BUFFER_SIZE)
         # Per-ticker update-timestamp of the last recorded event (cooldown).
         self._last_event_ts: dict[str, float] = {}
+        # Official session closes stamped at market close (M3.1); consumed by
+        # roll_session() at the next open to become each ticker's prev_close.
+        self._settled_closes: dict[str, float] = {}
 
     def update(
         self,
@@ -224,6 +227,68 @@ class PriceCache:
                 items = items[-limit:]
             return [dict(bar) for bar in items]
 
+    def settle_close(self, tickers: list[str]) -> dict[str, float]:
+        """Stamp each ticker's current price as its official session close (M3.1).
+
+        Called by the settlement hook when the market closes. The stamped
+        close is held internally and becomes the ticker's ``prev_close`` when
+        ``roll_session()`` runs at the next open. Live quotes are NOT touched
+        — while the market is closed the frozen quote keeps showing the
+        finished session's day change, exactly like a real after-hours tape.
+
+        Tickers absent from the cache are skipped. Returns the stamped
+        closes as ``{ticker: close}``.
+        """
+        with self._lock:
+            closes: dict[str, float] = {}
+            for ticker in tickers:
+                update = self._prices.get(ticker)
+                if update is not None:
+                    self._settled_closes[ticker] = update.price
+                    closes[ticker] = update.price
+            return closes
+
+    def roll_session(self, tickers: list[str], timestamp: float | None = None) -> None:
+        """Reset day-session state for ``tickers`` at market open (M3.1).
+
+        For each ticker present in the cache, replaces its record with a
+        fresh-session baseline: ``prev_close`` becomes the close stamped by
+        ``settle_close()`` (falling back to the current price — identical for
+        equities, whose quotes freeze while closed), ``day_high``/``day_low``
+        reset to that close, ``previous_price`` resets to the current price
+        (first tick of the new session is 'flat'), and per-tick ``volume``
+        resets to 0. Quote (bid/ask) carries over. The version counter bumps
+        once so SSE clients receive the reset baseline immediately.
+
+        The cache stays the single owner of session state — sources never
+        write prev_close/day extremes themselves in simulator mode.
+        """
+        with self._lock:
+            ts = timestamp if timestamp is not None else time.time()
+            rolled = False
+            for ticker in tickers:
+                update = self._prices.get(ticker)
+                close = self._settled_closes.pop(ticker, None)
+                if update is None:
+                    continue
+                if close is None:
+                    close = update.price
+                self._prices[ticker] = PriceUpdate(
+                    ticker=ticker,
+                    price=update.price,
+                    previous_price=update.price,
+                    timestamp=ts,
+                    prev_close=close,
+                    day_high=max(update.price, close),
+                    day_low=min(update.price, close),
+                    volume=0.0,
+                    bid=update.bid,
+                    ask=update.ask,
+                )
+                rolled = True
+            if rolled:
+                self._version += 1
+
     def get(self, ticker: str) -> PriceUpdate | None:
         """Get the latest price for a single ticker, or None if unknown."""
         with self._lock:
@@ -250,6 +315,7 @@ class PriceCache:
             self._prices.pop(ticker, None)
             self._bars.pop(ticker, None)
             self._last_event_ts.pop(ticker, None)
+            self._settled_closes.pop(ticker, None)
 
     @property
     def version(self) -> int:

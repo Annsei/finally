@@ -45,8 +45,11 @@ current bid, a BUY stop above the current ask (otherwise it would trigger
 instantly and it is really a market order).
 
 Time-in-force: ``gtc`` (default) never expires; ``day`` sets expires_at to
-created_at + 24h (this becomes session close once M3's session clock lands).
-The fill loop marks open orders past expires_at as status ``expired``.
+created_at + 24h. The fill loop marks open orders past expires_at as status
+``expired``. With the session clock active (M3.1), open EQUITY day orders are
+additionally expired at session close by the settlement hook
+(``app.settlement.settle_session_close``), which supersedes the 24h TTL for
+them; crypto day orders keep the 24h behavior (crypto trades 24/7).
 """
 
 from __future__ import annotations
@@ -72,8 +75,9 @@ ORDER_STATUSES = {"open", "filled", "cancelled", "rejected", "expired"}
 ORDER_KINDS = {"limit", "stop", "stop_limit"}
 TIME_IN_FORCE_VALUES = {"day", "gtc"}
 
-# 'day' orders live 24 hours from placement for now; once M3.1's session clock
-# lands this becomes expiry at session close (PLATFORM_ROADMAP M1.2 / M3.1).
+# 'day' orders live at most 24 hours from placement. In session mode (M3.1)
+# equity day orders are expired earlier — at session close — by the settlement
+# hook; this TTL remains the backstop for crypto and for 24/7 mode.
 DAY_ORDER_TTL = timedelta(hours=24)
 
 
@@ -687,8 +691,8 @@ def create_orders_router(
         fill failing, e.g. insufficient cash), HTTP 400 is returned and
         NOTHING is stored. Non-marketable limit orders and all
         stop/stop_limit orders are stored as status 'open' for the fill loop.
-        time_in_force 'day' stamps expires_at = created_at + 24h (session
-        close once M3 lands).
+        time_in_force 'day' stamps expires_at = created_at + 24h; equity day
+        orders additionally expire at session close in session mode (M3.1).
         """
         conn = get_conn(db_path)
         try:

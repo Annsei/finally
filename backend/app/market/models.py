@@ -5,6 +5,8 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 
+from .seed_prices import asset_class_for
+
 
 @dataclass(frozen=True, slots=True)
 class MarketEvent:
@@ -100,6 +102,11 @@ class PriceUpdate:
         return "flat"
 
     @property
+    def asset_class(self) -> str:
+        """'crypto' for the crypto set (BTC/ETH), 'equity' for everything else."""
+        return asset_class_for(self.ticker)
+
+    @property
     def day_change(self) -> float:
         """Absolute price change vs the previous session close."""
         return round(self.price - self.prev_close, 4)
@@ -129,4 +136,5 @@ class PriceUpdate:
             "volume": self.volume,
             "bid": self.bid,
             "ask": self.ask,
+            "asset_class": self.asset_class,
         }

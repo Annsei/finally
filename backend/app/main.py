@@ -19,10 +19,20 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from app.db.connection import get_conn, init_db
-from app.market import PriceCache, create_market_data_source, create_stream_router
-from app.market.seed_prices import SEED_PRICES
+from app.market import (
+    PriceCache,
+    SessionClock,
+    create_market_data_source,
+    create_stream_router,
+    session_clock_loop,
+)
+from app.market.seed_prices import DEFAULT_WATCHLIST
 
 logger = logging.getLogger(__name__)
+
+# Session clock defaults (M3.1): 30-minute open sessions, 2-minute breaks.
+DEFAULT_SESSION_OPEN_SECONDS = 1800.0
+DEFAULT_SESSION_BREAK_SECONDS = 120.0
 
 
 def _read_commission_bps() -> float:
@@ -45,6 +55,58 @@ def _read_commission_bps() -> float:
         logger.warning("Negative FINALLY_COMMISSION_BPS=%r — using 0.0", raw)
         return 0.0
     return value
+
+
+def _read_session_config() -> tuple[float, float] | None:
+    """Parse the session-clock env config (M3.1). Read ONCE at app startup.
+
+    Reads ``FINALLY_SESSION_OPEN_SECONDS`` (default 1800) and
+    ``FINALLY_SESSION_BREAK_SECONDS`` (default 120). If either value is
+    unparsable or <= 0 the market runs in 24/7 mode (always open, no
+    transitions) — returns None in that case, otherwise
+    ``(open_seconds, break_seconds)``.
+    """
+    values: list[float] = []
+    for name, default in (
+        ("FINALLY_SESSION_OPEN_SECONDS", DEFAULT_SESSION_OPEN_SECONDS),
+        ("FINALLY_SESSION_BREAK_SECONDS", DEFAULT_SESSION_BREAK_SECONDS),
+    ):
+        raw = os.getenv(name, "").strip()
+        if not raw:
+            values.append(default)
+            continue
+        try:
+            value = float(raw)
+        except ValueError:
+            logger.warning("Invalid %s=%r — using 24/7 market mode", name, raw)
+            return None
+        if value <= 0:
+            logger.info("%s=%r is <= 0 — using 24/7 market mode", name, raw)
+            return None
+        values.append(value)
+    return values[0], values[1]
+
+
+def _create_session_clock() -> SessionClock:
+    """Build the app's SessionClock from the environment (M3.1).
+
+    Real market data (MASSIVE_API_KEY active) forces 24/7 mode regardless of
+    the session env vars — the simulator's session cycle makes no sense
+    against live quotes. Otherwise the env config decides (see
+    ``_read_session_config``).
+    """
+    massive_active = bool(os.getenv("MASSIVE_API_KEY", "").strip())
+    session_config = None if massive_active else _read_session_config()
+    if session_config is None:
+        reason = "Massive API active" if massive_active else "env config"
+        logger.info("FinAlly startup: session clock in 24/7 mode (%s)", reason)
+        return SessionClock()
+    logger.info(
+        "FinAlly startup: session clock enabled (open=%ss, break=%ss)",
+        session_config[0],
+        session_config[1],
+    )
+    return SessionClock(*session_config)
 
 
 def _mount_static_files(app: FastAPI) -> None:
@@ -89,30 +151,38 @@ async def lifespan(app: FastAPI):
     logger.info("FinAlly startup: initializing database at %s", db_path)
     init_db(db_path)
 
+    # Session clock (M3.1): open/close cycle from env, 24/7 when disabled or
+    # when real market data is active. Starts OPEN with session_id 1.
+    session_clock = _create_session_clock()
+
     logger.info("FinAlly startup: creating price cache and market data source")
     price_cache = PriceCache()
-    source = create_market_data_source(price_cache)
+    source = create_market_data_source(price_cache, session_clock)
 
-    # Start market data with tickers from DB watchlist, falling back to SEED_PRICES
+    # Start market data with tickers from DB watchlist, falling back to the
+    # default watchlist (the 10 equities — crypto joins via watchlist adds).
     conn = get_conn(db_path)
     rows = conn.execute("SELECT ticker FROM watchlist WHERE user_id = 'default'").fetchall()
     tickers = [row["ticker"] for row in rows]
     conn.close()
     if not tickers:
-        tickers = list(SEED_PRICES.keys())
+        tickers = list(DEFAULT_WATCHLIST)
     await source.start(tickers)
     logger.info("FinAlly startup: market data source started with %d tickers", len(tickers))
 
     # Store on app.state for access in request handlers
     app.state.price_cache = price_cache
     app.state.market_source = source
+    app.state.session_clock = session_clock
 
     # Register routers that depend on price_cache inside lifespan (factory pattern)
     app.include_router(create_stream_router(price_cache))
 
     # Portfolio router
     from app.routes.portfolio import create_portfolio_router
-    portfolio_router = create_portfolio_router(price_cache, db_path, commission_bps)
+    portfolio_router = create_portfolio_router(
+        price_cache, db_path, commission_bps, session_clock
+    )
     app.include_router(portfolio_router)
 
     # Orders router (limit / stop / stop_limit)
@@ -132,12 +202,12 @@ async def lifespan(app: FastAPI):
 
     # Chat router
     from app.routes.chat import create_chat_router
-    chat_router = create_chat_router(price_cache, db_path, commission_bps)
+    chat_router = create_chat_router(price_cache, db_path, commission_bps, session_clock)
     app.include_router(chat_router)
 
-    # Market data router (history backfill)
+    # Market data router (history backfill, events, session state)
     from app.routes.market import create_market_router
-    market_router = create_market_router(price_cache)
+    market_router = create_market_router(price_cache, session_clock)
     app.include_router(market_router)
 
     # Mount static files LAST — must not shadow /api/* routes.
@@ -168,10 +238,29 @@ async def lifespan(app: FastAPI):
     app.state.briefs_watch_task = briefs_watch_task
     logger.info("FinAlly startup: AI briefs watcher background task started")
 
+    background_tasks = [snapshot_task, orders_fill_task, rules_eval_task, briefs_watch_task]
+
+    # Start the session clock driver (every ~1 second, M3.1) — settlement at
+    # close (stamp closes + expire equity DAY orders), day-state roll at open.
+    # Skipped entirely in 24/7 mode (the clock never transitions).
+    if not session_clock.always_open:
+        from app.settlement import roll_session_open, settle_session_close
+        session_clock_task = asyncio.create_task(
+            session_clock_loop(
+                session_clock,
+                on_close=lambda: settle_session_close(price_cache, db_path),
+                on_open=lambda: roll_session_open(price_cache),
+            ),
+            name="session-clock-loop",
+        )
+        app.state.session_clock_task = session_clock_task
+        background_tasks.append(session_clock_task)
+        logger.info("FinAlly startup: session clock background task started")
+
     yield
 
     logger.info("FinAlly shutdown: cancelling background tasks")
-    for task in (snapshot_task, orders_fill_task, rules_eval_task, briefs_watch_task):
+    for task in background_tasks:
         task.cancel()
         try:
             await task

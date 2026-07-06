@@ -7,9 +7,12 @@ Provides:
 - GET /api/market/events — recent market events (sudden >=1% single-tick
   moves) detected in the PriceCache funnel, newest first. Feeds the
   scrolling news ticker.
+- GET /api/market/session — current trading-session state from the
+  SessionClock (M3.1). Drives the Header session badge and lets the frontend
+  render open/closed state and a countdown to the next transition.
 
 All routes are created via the factory function ``create_market_router`` which
-closes over the shared ``PriceCache`` instance.
+closes over the shared ``PriceCache`` instance and the ``SessionClock``.
 """
 
 from __future__ import annotations
@@ -20,6 +23,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from app.market.cache import DEFAULT_HISTORY_CAPACITY, EVENT_BUFFER_SIZE, PriceCache
+from app.market.session import SessionClock
 
 logger = logging.getLogger(__name__)
 
@@ -27,16 +31,37 @@ DEFAULT_HISTORY_LIMIT = 3600  # ~1h of 1-second bars
 DEFAULT_EVENTS_LIMIT = 20
 
 
-def create_market_router(price_cache: PriceCache) -> APIRouter:
+def create_market_router(
+    price_cache: PriceCache, session_clock: SessionClock | None = None
+) -> APIRouter:
     """Factory: build the market APIRouter with injected dependencies.
 
     Args:
         price_cache: Shared in-memory price cache (owns the OHLCV ring buffers).
+        session_clock: Session clock backing GET /session (M3.1). When omitted
+            a fresh 24/7 clock is used (always open, next_transition_at null)
+            so the endpoint contract holds in tests and legacy wiring.
 
     Returns:
         A configured FastAPI APIRouter ready to be registered with ``app.include_router``.
     """
+    if session_clock is None:
+        session_clock = SessionClock()  # 24/7 mode
+
     router = APIRouter(prefix="/api/market", tags=["market"])
+
+    @router.get("/session")
+    async def get_session() -> dict:
+        """Return the current trading-session state (M3.1).
+
+        Response shape (contract fixed — frontend built in parallel):
+            {"state": "open" | "closed",
+             "session_id": int,           # starts at 1, bumps on each reopen
+             "state_since": float,        # Unix seconds current state began
+             "next_transition_at": float | null,  # null in 24/7 mode
+             "now": float}                # server clock, for countdowns
+        """
+        return session_clock.snapshot()
 
     @router.get("/history")
     async def get_history(
