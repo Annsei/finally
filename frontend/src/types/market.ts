@@ -216,9 +216,12 @@ export interface WatchlistOutcome {
 }
 
 // GET /api/chat/ response message item:
+export type ChatMessageKind = 'chat' | 'brief' | 'review' | 'rule';
+
 export interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
+  kind?: ChatMessageKind; // agent-initiated messages: market briefs, reviews, rule firings
   actions: {
     trades: TradeOutcome[];
     watchlist_changes: WatchlistOutcome[];

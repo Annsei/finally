@@ -339,6 +339,63 @@ describe('ChatPanel', () => {
   });
 
   // -------------------------------------------------------------------------
+  // M2.3/2.4: agent-initiated message kinds + on-demand daily review
+  // -------------------------------------------------------------------------
+  it('Test 6: brief/review/rule messages render labeled variants', () => {
+    const messages: ChatMessage[] = [
+      { role: 'assistant', content: 'NVDA spiked +3.4% — you hold 5 shares.', kind: 'brief', actions: null, created_at: '2026-07-06T01:00:00Z' },
+      { role: 'assistant', content: 'You made 3 trades today...', kind: 'review', actions: null, created_at: '2026-07-06T02:00:00Z' },
+      { role: 'assistant', content: 'Rule fired: Buy 2 NVDA...', kind: 'rule', actions: null, created_at: '2026-07-06T03:00:00Z' },
+      { role: 'assistant', content: 'Plain reply.', kind: 'chat', actions: null, created_at: '2026-07-06T04:00:00Z' },
+    ];
+    (useSWR as jest.Mock).mockReturnValue({ data: { messages }, mutate: mockMutateHistory });
+
+    renderPanel();
+
+    expect(screen.getByTestId('chat-kind-brief').textContent).toBe('Market Brief');
+    expect(screen.getByTestId('chat-kind-review').textContent).toBe('Daily Review');
+    expect(screen.getByTestId('chat-kind-rule').textContent).toBe('Rule');
+    // Plain chat messages get no label
+    expect(screen.queryByTestId('chat-kind-chat')).toBeNull();
+  });
+
+  it('Test 7: Review button POSTs /api/chat/review and refreshes history', async () => {
+    global.fetch = jest.fn().mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ message: '[MOCK REVIEW] ...', kind: 'review' }),
+    });
+
+    renderPanel();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('chat-review-button'));
+    });
+
+    expect(global.fetch).toHaveBeenCalledWith('/api/chat/review', { method: 'POST' });
+    await waitFor(() => {
+      expect(mockMutateHistory).toHaveBeenCalled();
+    });
+  });
+
+  it('Test 7b: failed review surfaces the inline error', async () => {
+    global.fetch = jest.fn().mockResolvedValueOnce({
+      ok: false,
+      status: 500,
+      json: async () => ({ error: 'LLM unavailable' }),
+    });
+
+    renderPanel();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('chat-review-button'));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('chat-error').textContent).toBe('LLM unavailable');
+    });
+  });
+
+  // -------------------------------------------------------------------------
   // Test 4b (FIX 2): HTTP error response surfaces an inline error message
   // -------------------------------------------------------------------------
   it('Test 4b: POST /api/chat/ returning 5xx surfaces inline error and clears loading', async () => {

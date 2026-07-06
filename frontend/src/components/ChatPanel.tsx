@@ -116,6 +116,13 @@ function RuleBadge({ outcome }: { outcome: ChatRuleOutcome }) {
   );
 }
 
+// Agent-initiated message styling by kind (M2.3/2.4): briefs, reviews, rules
+const KIND_META: Record<string, { label: string; border: string }> = {
+  brief: { label: 'Market Brief', border: '#209dd7' },
+  review: { label: 'Daily Review', border: '#ecad0a' },
+  rule: { label: 'Rule', border: '#b07cc6' },
+};
+
 function WatchlistBadge({ change }: { change: WatchlistOutcome }) {
   // Failed outcomes carry only {status, ticker, error} — no action
   if (change.status === 'failed') {
@@ -212,6 +219,31 @@ export default function ChatPanel({ open, onToggle, onNewTrade }: Props) {
     }
   };
 
+  // M2.4: on-demand daily review — stored server-side as a kind='review' message
+  const handleReview = async () => {
+    if (loading) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch('/api/chat/review', { method: 'POST' });
+      if (!res.ok) {
+        let detail = '';
+        try {
+          const body = await res.json();
+          detail = body?.error ?? body?.detail ?? '';
+        } catch {
+          // Non-JSON error body — fall through to generic message
+        }
+        throw new Error(detail || `Review failed (${res.status})`);
+      }
+      await mutateHistory();
+    } catch (e) {
+      setError(e instanceof Error && e.message ? e.message : 'Something went wrong. Please try again.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter') {
       void handleSubmit();
@@ -227,6 +259,18 @@ export default function ChatPanel({ open, onToggle, onNewTrade }: Props) {
         <span className="text-xs font-semibold text-terminal-muted uppercase tracking-wide">
           FinAlly AI
         </span>
+        {open && (
+          <button
+            type="button"
+            data-testid="chat-review-button"
+            onClick={() => void handleReview()}
+            disabled={loading}
+            title="Ask FinAlly for a daily portfolio review"
+            className="ml-auto mr-2 text-[10px] font-semibold uppercase tracking-wider text-terminal-muted hover:text-terminal-accent disabled:opacity-50 transition-colors"
+          >
+            Review
+          </button>
+        )}
         <button
           onClick={onToggle}
           className="text-terminal-muted hover:text-terminal-text text-sm leading-none px-1"
@@ -243,19 +287,28 @@ export default function ChatPanel({ open, onToggle, onNewTrade }: Props) {
             Ask FinAlly to analyze your portfolio, suggest trades, or manage your watchlist.
           </p>
         ) : (
-          messages.map((msg, idx) => (
+          messages.map((msg, idx) => {
+            const kindMeta =
+              msg.role === 'assistant' && msg.kind ? KIND_META[msg.kind] : undefined;
+            return (
             <div
               key={idx}
               className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'}`}
             >
               {/* Message bubble — content rendered as React text child (T-4-02: no dangerouslySetInnerHTML) */}
               <div
-                className={`max-w-full px-3 py-2 rounded text-sm leading-relaxed ${
-                  msg.role === 'user'
-                    ? 'bg-terminal-surface text-terminal-text'
-                    : 'bg-terminal-surface text-terminal-text'
-                }`}
+                className="max-w-full px-3 py-2 rounded text-sm leading-relaxed bg-terminal-surface text-terminal-text"
+                style={kindMeta ? { borderLeft: `2px solid ${kindMeta.border}` } : undefined}
               >
+                {kindMeta && (
+                  <span
+                    data-testid={`chat-kind-${msg.kind}`}
+                    className="block text-[10px] font-semibold uppercase tracking-wider mb-0.5"
+                    style={{ color: kindMeta.border }}
+                  >
+                    {kindMeta.label}
+                  </span>
+                )}
                 {msg.content}
               </div>
 
@@ -277,7 +330,8 @@ export default function ChatPanel({ open, onToggle, onNewTrade }: Props) {
                 </div>
               )}
             </div>
-          ))
+            );
+          })
         )}
 
         {/* Loading indicator */}
