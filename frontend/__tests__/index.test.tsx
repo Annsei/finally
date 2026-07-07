@@ -84,6 +84,16 @@ describe('Dashboard index page', () => {
     expect(root.className).toContain('bg-terminal-bg');
   });
 
+  it('Test 5b (M5.1): layout locks to the viewport — page never scrolls, panels do', () => {
+    // min-h-screen let long chat history stretch the whole page, defeating
+    // ChatPanel's internal overflow-y-auto (user report: 聊天框大小需固定).
+    const { container } = render(<Dashboard />);
+    const root = container.firstChild as HTMLElement;
+    expect(root.className).toContain('h-screen');
+    expect(root.className).toContain('overflow-hidden');
+    expect(root.className).not.toContain('min-h-screen');
+  });
+
   it('Test 6: all 6 Phase 4 panels mount once a ticker is auto-selected', () => {
     // MainChart only renders when a ticker is selected (FIX 7) — provide watchlist data
     mockUseSWR.mockImplementation((key: any) => {

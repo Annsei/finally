@@ -96,7 +96,11 @@ export default function Dashboard() {
   }, []);
 
   return (
-    <div className="min-h-screen bg-terminal-bg text-terminal-text font-mono flex flex-col">
+    // h-screen + overflow-hidden locks the terminal to the viewport: the page
+    // itself never scrolls — each column (watchlist, center, chat history)
+    // scrolls internally instead. min-h-screen let long chat history stretch
+    // the whole page, defeating ChatPanel's internal overflow-y-auto.
+    <div className="h-screen overflow-hidden bg-terminal-bg text-terminal-text font-mono flex flex-col">
       <Header />
       <NewsTicker />
       <div className="flex gap-4 p-4 flex-1 min-h-0 overflow-hidden">
