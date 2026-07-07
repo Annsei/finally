@@ -107,6 +107,29 @@ The schema carried `user_id` from day one; this milestone cashes that in.
    but don't build it until concurrency hurts. Optional: deploy/ Terraform for
    App Runner (PLAN.md stretch goal). (M)
 
+## M5 — Strategy backtester — COMPLETE 2026-07-07 (65757bf/680804e)
+## (post-roadmap; inspired by tickflow-stock-panel)
+
+Contract: `planning/M5_BACKTEST_CONTRACT.md`. Closes the M2 loop: AI
+proposes a rule → backtest validates it on simulated history → user arms
+it live. Stateless compute — no schema migration.
+Shipped: pytest 621 / jest 174 / E2E 11-of-11 in docker; live real-LLM
+check parsed a one-sentence Chinese ask into an exact 10-run Monte Carlo
+backtest instruction.
+
+1. **Backtest engine** — dependency-free per-bar state machine over
+   synthetic GBM history (ticker's own mu/sigma, seeded/reproducible):
+   daily re-armed buy-entry trigger (rules-engine semantics), conservative
+   intrabar TP/SL exits (SL first), spread+commission fill math, equity
+   curve vs buy-and-hold baseline, rejection counters. (L)
+2. **`POST /api/backtest`** — synchronous endpoint; Monte Carlo `runs`
+   (1–50 consecutive seeds) with median-representative run + p5/p95
+   distribution summary. (S)
+3. **AI runs backtests** — chat structured output gains `backtests`;
+   outcomes render as chat badges with compact stats. (M)
+4. **Backtest tab** — config form (prefillable from a rule's "test"
+   button), stat cards, equity-vs-baseline chart, trades list. (M)
+
 ## Explicitly out of scope (unchanged judgment)
 
 - Options chains, real L2 order book / matching engine, HFT-style latency work
