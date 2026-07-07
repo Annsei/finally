@@ -27,13 +27,22 @@ from pydantic import BaseModel
 from app.auth import get_current_user_id
 from app.db.connection import get_conn
 from app.market.cache import PriceCache
+from app.market.profiles import MarketProfile
 from app.market.seed_prices import asset_class_for, sector_for
 from app.market.session import SessionClock
+from app.mechanics import (
+    compute_fee,
+    lot_size_error,
+    market_closed_message,
+    t1_applies,
+    t1_sell_error,
+)
 
 logger = logging.getLogger(__name__)
 
 # Error message for market orders on equities while the session is closed
 # (M3.1). Contract fixed — the frontend and chat tests match on this string.
+# Localized per profile via mechanics.market_closed_message (CN-2 §5: 休市中).
 MARKET_CLOSED_ERROR = "Market closed"
 
 
@@ -150,6 +159,40 @@ def execute_trade_on_conn(
     session_clock: SessionClock | None = None,
     user_id: str = "default",
 ) -> dict:
+    """Legacy market-order entry point — the pre-CN-2 public signature, frozen.
+
+    This 8-parameter form is the stable contract every pre-CN-2 caller (and the
+    signature regression tests) depends on; it delegates to the profile-aware
+    :func:`_execute_trade_on_conn` with the neutral (us/None) profile, so its
+    behavior is byte-identical to the pre-CN-2 path. CN-2 callers that need
+    A-share mechanics call ``_execute_trade_on_conn`` directly with a profile
+    (the single additive hook — CN2 contract §0), keeping this signature
+    untouched.
+    """
+    return _execute_trade_on_conn(
+        conn,
+        price_cache,
+        ticker,
+        side,
+        quantity,
+        commission_bps=commission_bps,
+        session_clock=session_clock,
+        user_id=user_id,
+        profile=None,
+    )
+
+
+def _execute_trade_on_conn(
+    conn: sqlite3.Connection,
+    price_cache: PriceCache,
+    ticker: str,
+    side: str,
+    quantity: float,
+    commission_bps: float = 0.0,
+    session_clock: SessionClock | None = None,
+    user_id: str = "default",
+    profile: MarketProfile | None = None,
+) -> dict:
     """Execute a market order on an open SQLite connection.
 
     Validates and executes a buy or sell trade against the provided connection.
@@ -185,6 +228,23 @@ def execute_trade_on_conn(
             crosses while closed).
         user_id: The user whose cash/positions/trades this trade touches
             (M4 — defaults to the anonymous 'default' user).
+        profile: Active market profile (CN-2). None or a neutral profile (us:
+            lot_size 1, t_plus 0, min_commission/stamp 0, locale en-US) is
+            behavior-identical to the pre-CN-2 path — every A-share check below
+            is driven purely by profile field values. When it carries A-share
+            values, buys must be whole board lots (整手), the T+1 lock blocks
+            same-session resale of shares bought today, the commission floor and
+            sell-side stamp tax apply, and rejection messages are Chinese.
+
+    A-share mechanics (all no-ops for None/us — CN-2 §1-§3):
+        - 整手 (lot): buy ``quantity`` must be a multiple of ``profile.lot_size``.
+        - T+1: active when ``profile.t_plus > 0`` and the session clock cycles
+          (disabled in 24/7 mode — locked shares would never unlock). A buy adds
+          its quantity to ``positions.t1_locked``; a sell may only dispose of
+          ``quantity - t1_locked`` shares.
+        - Fee: ``max(min_commission, notional*bps/1e4)`` plus a sell-only stamp
+          tax of ``notional*stamp_tax_bps_sell/1e4``, folded into the same
+          ``trades.commission`` column and P&L math as before.
 
     Fill price: buys fill at the cached ask, sells at the cached bid, falling
     back to the last price when bid/ask are absent or equal (zero spread).
@@ -218,15 +278,26 @@ def execute_trade_on_conn(
     if quantity <= 0:
         return {"status": "failed", "ticker": ticker, "error": "Quantity must be greater than 0"}
 
+    # CN-2 §3: A-share buys must be whole board lots (整手). No-op for us/None
+    # (lot_size <= 1) and for sells (odd-lot sells are legal).
+    lot_error = lot_size_error(profile, side, quantity)
+    if lot_error is not None:
+        return {"status": "failed", "ticker": ticker, "error": lot_error}
+
     # M3.1: reject equity market orders while the session is closed — the
     # quote is frozen at the close, so a fill would execute at a stale price.
     # Crypto trades 24/7; in 24/7 mode (no sessions) is_open is always True.
+    # CN-2 §5: the rejection message is localized (休市中) via the profile.
     if (
         session_clock is not None
         and not session_clock.is_open
         and asset_class_for(ticker) == "equity"
     ):
-        return {"status": "failed", "ticker": ticker, "error": MARKET_CLOSED_ERROR}
+        return {
+            "status": "failed",
+            "ticker": ticker,
+            "error": market_closed_message(profile),
+        }
 
     # Fill at the quote: buy at ask, sell at bid. When the source supplies no
     # quote, bid == ask == price (model default) and the fill is at the price.
@@ -249,11 +320,17 @@ def execute_trade_on_conn(
     trade_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
     cost = quantity * current_price  # notional at the fill price
-    # Commission on the notional, rounded to cents. When commission_bps is 0
-    # (the default) every formula below reduces exactly to the pre-commission
-    # math (x + 0.0 == x in IEEE 754), keeping legacy behavior bit-identical.
-    commission = round(cost * commission_bps / 10000.0, 2) if commission_bps else 0.0
+    # Total fee on the notional, rounded to cents (CN-2 §1). With commission_bps
+    # 0 and a None/us profile this reduces exactly to 0.0, and with a nonzero
+    # bps and no floor/stamp it reduces to the pre-CN-2 round(notional*bps/1e4)
+    # math — legacy behavior stays bit-identical. cn adds the ¥5 floor and, on
+    # sells, the stamp tax.
+    commission = compute_fee(cost, side, commission_bps, profile)
     realized_pnl: float | None = None
+
+    # T+1 is active only with a positive t_plus AND a cycling session clock;
+    # 24/7 mode disables it (locked shares would never unlock). No-op for us.
+    t1_active = t1_applies(profile, session_clock)
 
     if side == "buy":
         if cash_balance < cost + commission:
@@ -286,9 +363,18 @@ def execute_trade_on_conn(
             (position_id, user_id, ticker, quantity, effective_cost, now),
         )
 
+        # CN-2 §2: lock today's bought shares until the next session. Runs only
+        # when T+1 is active, so us/None never touches t1_locked.
+        if t1_active:
+            conn.execute(
+                "UPDATE positions SET t1_locked = t1_locked + ? "
+                "WHERE user_id = ? AND ticker = ?",
+                (quantity, user_id, ticker),
+            )
+
     else:  # sell
         pos_row = conn.execute(
-            "SELECT quantity, avg_cost FROM positions WHERE user_id = ? AND ticker = ?",
+            "SELECT quantity, avg_cost, t1_locked FROM positions WHERE user_id = ? AND ticker = ?",
             (user_id, ticker),
         ).fetchone()
         current_qty: float = pos_row["quantity"] if pos_row else 0.0
@@ -296,6 +382,19 @@ def execute_trade_on_conn(
 
         if current_qty < quantity:
             return {"status": "failed", "ticker": ticker, "error": "Insufficient shares to sell"}
+
+        # CN-2 §2: only shares NOT bought today may be sold. sellable =
+        # held - locked; a request above that is a T+1 rejection (any positive
+        # sell quantity, including odd lots, is otherwise legal).
+        if t1_active:
+            locked: float = pos_row["t1_locked"] if pos_row else 0.0
+            sellable = current_qty - locked
+            if quantity > sellable:
+                return {
+                    "status": "failed",
+                    "ticker": ticker,
+                    "error": t1_sell_error(profile, sellable),
+                }
 
         # Add cash proceeds: notional minus commission
         conn.execute(
@@ -346,6 +445,7 @@ def create_portfolio_router(
     db_path: str,
     commission_bps: float = 0.0,
     session_clock: SessionClock | None = None,
+    profile: MarketProfile | None = None,
 ) -> APIRouter:
     """Factory: build the portfolio APIRouter with injected dependencies.
 
@@ -357,6 +457,9 @@ def create_portfolio_router(
         session_clock: Session clock (M3.1) — equity market orders are
             rejected with HTTP 400 "Market closed" while the session is
             closed. None (or a 24/7 clock) never rejects.
+        profile: Active market profile (CN-2) — drives the 整手/T+1/fee/locale
+            mechanics in ``execute_trade_on_conn``. None or a neutral (us)
+            profile is behavior-identical to the pre-CN-2 route.
 
     Returns:
         A configured FastAPI APIRouter ready to be registered with ``app.include_router``.
@@ -434,10 +537,10 @@ def create_portfolio_router(
         user_id = get_current_user_id(request, db_path)
         conn = get_conn(db_path)
         try:
-            outcome = execute_trade_on_conn(
+            outcome = _execute_trade_on_conn(
                 conn, price_cache, body.ticker, body.side, body.quantity,
                 commission_bps=commission_bps, session_clock=session_clock,
-                user_id=user_id,
+                user_id=user_id, profile=profile,
             )
             if outcome["status"] == "executed":
                 # Record portfolio snapshot immediately after the trade and

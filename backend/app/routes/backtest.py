@@ -85,6 +85,7 @@ def create_backtest_router(
             runs=body.runs,
             seed=body.seed,
             universe=universe,
+            profile=profile,
         )
         if outcome["status"] == "failed":
             return JSONResponse(status_code=400, content={"error": outcome["error"]})
@@ -94,6 +95,7 @@ def create_backtest_router(
             commission_bps=commission_bps,
             end_time=time.time(),
             starting_cash=starting_cash,
+            profile=profile,
         )
 
     return router

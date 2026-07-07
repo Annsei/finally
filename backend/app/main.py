@@ -13,6 +13,7 @@ import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -26,7 +27,7 @@ from app.market import (
     create_stream_router,
     session_clock_loop,
 )
-from app.market.profiles import resolve_market_profile
+from app.market.profiles import MarketProfile, resolve_market_profile
 
 logger = logging.getLogger(__name__)
 
@@ -35,17 +36,20 @@ DEFAULT_SESSION_OPEN_SECONDS = 1800.0
 DEFAULT_SESSION_BREAK_SECONDS = 120.0
 
 
-def _read_commission_bps() -> float:
-    """Parse FINALLY_COMMISSION_BPS from the environment (default 0.0).
+def _read_commission_bps(profile: MarketProfile | None = None) -> float:
+    """Parse FINALLY_COMMISSION_BPS from the environment (CN-2 §1).
 
     Read ONCE at app startup and passed down to routers and the fill loop like
     the other config (db_path, price_cache) — helpers never read the env
-    themselves. Invalid or negative values log a warning and fall back to 0.0
-    (commission-free, the pre-M1 behavior).
+    themselves. An explicit env value always wins. When the env is unset/empty,
+    the active profile's ``default_commission_bps`` is used (cn=2.5) so A-share
+    commission applies by default; with no profile (or the us profile, whose
+    default is 0.0) this stays the pre-M1 commission-free behavior. Invalid or
+    negative values log a warning and fall back to 0.0.
     """
     raw = os.getenv("FINALLY_COMMISSION_BPS", "").strip()
     if not raw:
-        return 0.0
+        return profile.default_commission_bps if profile is not None else 0.0
     try:
         value = float(raw)
     except ValueError:
@@ -87,13 +91,18 @@ def _read_session_config() -> tuple[float, float] | None:
     return values[0], values[1]
 
 
-def _create_session_clock() -> SessionClock:
-    """Build the app's SessionClock from the environment (M3.1).
+def _create_session_clock(profile: MarketProfile | None = None) -> SessionClock:
+    """Build the app's SessionClock from the environment (M3.1 / CN-2 §5).
 
     Real market data (MASSIVE_API_KEY active) forces 24/7 mode regardless of
     the session env vars — the simulator's session cycle makes no sense
     against live quotes. Otherwise the env config decides (see
     ``_read_session_config``).
+
+    CN-2 §5: when the active profile has ``midday_break`` and the session clock
+    is enabled, the lunch break length equals the parsed
+    ``FINALLY_SESSION_BREAK_SECONDS`` (default 120), turning the day into the
+    four-phase am -> midday -> pm -> closed cycle.
     """
     massive_active = bool(os.getenv("MASSIVE_API_KEY", "").strip())
     session_config = None if massive_active else _read_session_config()
@@ -101,12 +110,19 @@ def _create_session_clock() -> SessionClock:
         reason = "Massive API active" if massive_active else "env config"
         logger.info("FinAlly startup: session clock in 24/7 mode (%s)", reason)
         return SessionClock()
-    logger.info(
-        "FinAlly startup: session clock enabled (open=%ss, break=%ss)",
-        session_config[0],
-        session_config[1],
+    open_seconds, break_seconds = session_config
+    midday_break_seconds = (
+        break_seconds if profile is not None and profile.midday_break else 0.0
     )
-    return SessionClock(*session_config)
+    logger.info(
+        "FinAlly startup: session clock enabled (open=%ss, break=%ss, midday=%ss)",
+        open_seconds,
+        break_seconds,
+        midday_break_seconds,
+    )
+    return SessionClock(
+        open_seconds, break_seconds, midday_break_seconds=midday_break_seconds
+    )
 
 
 def _mount_static_files(app: FastAPI) -> None:
@@ -145,15 +161,18 @@ async def _snapshot_loop(price_cache: PriceCache, db_path: str, interval: int = 
 async def lifespan(app: FastAPI):
     """Manage application lifecycle: start/stop market data and initialize DB."""
     db_path = os.getenv("DB_PATH", "db/finally.db")
-    commission_bps = _read_commission_bps()
-    if commission_bps:
-        logger.info("FinAlly startup: commission enabled at %s bps", commission_bps)
 
     # Market profile (CN-1): FINALLY_MARKET read ONCE here (default 'us') and
     # injected everywhere — universe into the data source, seed cash into DB
-    # seeding and the seasons/leaderboard/backtest factories.
+    # seeding and the seasons/leaderboard/backtest factories, and (CN-2) the
+    # 整手/涨跌停/T+1/fee/午休 mechanics into every trade-executing factory/loop.
     profile = resolve_market_profile()
     logger.info("FinAlly startup: market profile '%s' active", profile.key)
+
+    # Commission (CN-2 §1): env wins, else the profile default (cn=2.5 万分).
+    commission_bps = _read_commission_bps(profile)
+    if commission_bps:
+        logger.info("FinAlly startup: commission enabled at %s bps", commission_bps)
 
     logger.info("FinAlly startup: initializing database at %s", db_path)
     init_db(
@@ -162,12 +181,23 @@ async def lifespan(app: FastAPI):
         default_watchlist=list(profile.universe.default_watchlist),
     )
 
-    # Session clock (M3.1): open/close cycle from env, 24/7 when disabled or
-    # when real market data is active. Starts OPEN with session_id 1.
-    session_clock = _create_session_clock()
+    # Session clock (M3.1 / CN-2 §5): open/close cycle from env (four-phase with
+    # a midday break for cn), 24/7 when disabled or real market data is active.
+    session_clock = _create_session_clock(profile)
+
+    # CN-2 §2: in 24/7 mode there is no "next trading day", so T+1 can never
+    # unlock — disable it on the profile handed to the background loops (which
+    # receive no session clock). The portfolio/chat routes keep the full profile
+    # and rely on the session clock in ``t1_applies``; both agree in every mode.
+    if session_clock.always_open and profile.t_plus > 0:
+        trading_profile = replace(profile, t_plus=0)
+        logger.info("FinAlly startup: 24/7 mode — T+1 disabled for background loops")
+    else:
+        trading_profile = profile
 
     logger.info("FinAlly startup: creating price cache and market data source")
-    price_cache = PriceCache()
+    # CN-2 §4: the price-limit function funnels every tick through the clamp.
+    price_cache = PriceCache(limit_pct_fn=profile.price_limit_pct)
     source = create_market_data_source(price_cache, session_clock, profile.universe)
 
     # Start market data with the UNION of every user's watchlist (M4 — the
@@ -192,21 +222,24 @@ async def lifespan(app: FastAPI):
     # Register routers that depend on price_cache inside lifespan (factory pattern)
     app.include_router(create_stream_router(price_cache))
 
-    # Portfolio router
+    # Portfolio router — full profile + session clock (t1_applies handles 24/7).
     from app.routes.portfolio import create_portfolio_router
     portfolio_router = create_portfolio_router(
-        price_cache, db_path, commission_bps, session_clock
+        price_cache, db_path, commission_bps, session_clock, profile
     )
     app.include_router(portfolio_router)
 
-    # Orders router (limit / stop / stop_limit)
+    # Orders router (limit / stop / stop_limit) — the placement path has no
+    # session clock, so it uses the 24/7-neutralized trading_profile.
     from app.routes.orders import create_orders_router, orders_fill_loop
-    orders_router = create_orders_router(price_cache, db_path, commission_bps)
+    orders_router = create_orders_router(
+        price_cache, db_path, commission_bps, trading_profile
+    )
     app.include_router(orders_router)
 
-    # Rules router (standing rules engine, M2.2)
+    # Rules router (standing rules engine, M2.2) — profile drives the 整手 check.
     from app.routes.rules import create_rules_router, rules_eval_loop
-    rules_router = create_rules_router(price_cache, db_path)
+    rules_router = create_rules_router(price_cache, db_path, trading_profile)
     app.include_router(rules_router)
 
     # Backtest router (M5 — stateless strategy backtester, no DB access)
@@ -218,9 +251,12 @@ async def lifespan(app: FastAPI):
     watchlist_router = create_watchlist_router(price_cache, db_path)
     app.include_router(watchlist_router)
 
-    # Chat router
+    # Chat router — full profile + session clock (AI trades gate on the clock
+    # like manual ones; AI backtests use the full profile's T+1/fees).
     from app.routes.chat import create_chat_router
-    chat_router = create_chat_router(price_cache, db_path, commission_bps, session_clock)
+    chat_router = create_chat_router(
+        price_cache, db_path, commission_bps, session_clock, profile
+    )
     app.include_router(chat_router)
 
     # Market data router (history backfill, events, session state)
@@ -256,16 +292,21 @@ async def lifespan(app: FastAPI):
     app.state.snapshot_task = snapshot_task
     logger.info("FinAlly startup: portfolio snapshot background task started")
 
-    # Start background order fill task (every ~1 second)
+    # Start background order fill task (every ~1 second) — background fills obey
+    # A-share fees/T+1 via the 24/7-neutralized trading_profile.
     orders_fill_task = asyncio.create_task(
-        orders_fill_loop(price_cache, db_path, commission_bps=commission_bps)
+        orders_fill_loop(
+            price_cache, db_path, commission_bps=commission_bps, profile=trading_profile
+        )
     )
     app.state.orders_fill_task = orders_fill_task
     logger.info("FinAlly startup: order fill background task started")
 
     # Start background rules evaluator task (every ~1 second, M2.2)
     rules_eval_task = asyncio.create_task(
-        rules_eval_loop(price_cache, db_path, commission_bps=commission_bps)
+        rules_eval_loop(
+            price_cache, db_path, commission_bps=commission_bps, profile=trading_profile
+        )
     )
     app.state.rules_eval_task = rules_eval_task
     logger.info("FinAlly startup: rules evaluator background task started")
@@ -287,7 +328,8 @@ async def lifespan(app: FastAPI):
             session_clock_loop(
                 session_clock,
                 on_close=lambda: settle_session_close(price_cache, db_path),
-                on_open=lambda: roll_session_open(price_cache),
+                # CN-2 §2: db_path lets the open hook release the T+1 lock.
+                on_open=lambda: roll_session_open(price_cache, db_path),
             ),
             name="session-clock-loop",
         )

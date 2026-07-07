@@ -56,7 +56,19 @@ from app.auth import get_current_user_id
 from app.db.connection import get_conn
 from app.market.cache import PriceCache
 from app.market.models import PriceUpdate
-from app.routes.portfolio import _record_snapshot, execute_trade_on_conn
+from app.market.profiles import MarketProfile
+from app.mechanics import lot_size_error
+
+# Bind the profile-aware trade impl to the legacy module name: rule fills must
+# pass a market ``profile`` (CN-2), and the existing per-rule-error-isolation
+# test monkeypatches ``rules.execute_trade_on_conn``. The public wrapper stays
+# frozen in app.routes.portfolio for pre-CN-2 callers.
+from app.routes.portfolio import (
+    _execute_trade_on_conn as execute_trade_on_conn,
+)
+from app.routes.portfolio import (
+    _record_snapshot,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +143,7 @@ def create_rule_on_conn(
     quantity: float,
     description: str | None = None,
     user_id: str = "default",
+    profile: MarketProfile | None = None,
 ) -> dict:
     """Validate and insert one rule on an open SQLite connection.
 
@@ -156,6 +169,9 @@ def create_rule_on_conn(
         description: Optional human summary; None/blank gets a generated one.
         user_id: Owner of the rule — evaluator fires execute on this user's
             portfolio (M4).
+        profile: Active market profile (CN-2). Buy rules must specify a whole
+            board lot (整手); the T+1/fee mechanics apply when the rule fires
+            through ``execute_trade_on_conn``. None/us is a no-op.
     """
     ticker = ticker.strip().upper()
     side = side.lower()
@@ -167,6 +183,10 @@ def create_rule_on_conn(
         return {"status": "failed", "ticker": ticker, "error": "Side must be 'buy' or 'sell'"}
     if quantity <= 0:
         return {"status": "failed", "ticker": ticker, "error": "Quantity must be greater than 0"}
+    # CN-2 §3: a buy rule must fire a whole board lot (整手). No-op for us/None.
+    lot_error = lot_size_error(profile, side, quantity)
+    if lot_error is not None:
+        return {"status": "failed", "ticker": ticker, "error": lot_error}
     if trigger_type not in TRIGGER_TYPES:
         return {
             "status": "failed",
@@ -242,6 +262,7 @@ def _fire_rule_if_triggered(
     price_cache: PriceCache,
     rule: sqlite3.Row,
     commission_bps: float,
+    profile: MarketProfile | None = None,
 ) -> str:
     """Evaluate one active rule. Returns 'fired', 'trade_failed', or 'skipped'.
 
@@ -274,6 +295,7 @@ def _fire_rule_if_triggered(
         rule["quantity"],
         commission_bps=commission_bps,
         user_id=rule["user_id"],
+        profile=profile,
     )
 
     now = datetime.now(timezone.utc).isoformat()
@@ -319,7 +341,10 @@ def _fire_rule_if_triggered(
 
 
 def process_rules_once(
-    db_path: str, price_cache: PriceCache, commission_bps: float = 0.0
+    db_path: str,
+    price_cache: PriceCache,
+    commission_bps: float = 0.0,
+    profile: MarketProfile | None = None,
 ) -> dict[str, int]:
     """One scan pass over ALL users' active rules: fire triggered rules.
 
@@ -348,7 +373,9 @@ def process_rules_once(
         ).fetchall()
         for row in active_rows:
             try:
-                result = _fire_rule_if_triggered(conn, price_cache, row, commission_bps)
+                result = _fire_rule_if_triggered(
+                    conn, price_cache, row, commission_bps, profile
+                )
             except Exception:
                 try:
                     conn.rollback()
@@ -369,15 +396,18 @@ async def rules_eval_loop(
     db_path: str,
     interval: float = 1.0,
     commission_bps: float = 0.0,
+    profile: MarketProfile | None = None,
 ) -> None:
     """Background task: evaluate active rules every ``interval`` seconds.
 
     Runs indefinitely until cancelled via ``asyncio.CancelledError``. Any other
     exception (bad rule, DB lock, etc.) is logged and the loop continues.
+    ``profile`` (CN-2) applies A-share fees/T+1 to rule-fired trades; main.py
+    passes a t_plus-neutralized profile in 24/7 mode.
     """
     while True:
         try:
-            process_rules_once(db_path, price_cache, commission_bps)
+            process_rules_once(db_path, price_cache, commission_bps, profile)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -390,12 +420,18 @@ async def rules_eval_loop(
 # ---------------------------------------------------------------------------
 
 
-def create_rules_router(price_cache: PriceCache, db_path: str) -> APIRouter:
+def create_rules_router(
+    price_cache: PriceCache,
+    db_path: str,
+    profile: MarketProfile | None = None,
+) -> APIRouter:
     """Factory: build the rules APIRouter with injected dependencies.
 
     Args:
         price_cache: Shared in-memory price cache populated by the market data source.
         db_path: Path to the SQLite database file.
+        profile: Active market profile (CN-2) — enforces the 整手 buy-lot check
+            on rule creation. None/us is a no-op.
 
     Returns:
         A configured FastAPI APIRouter ready to be registered with ``app.include_router``.
@@ -460,6 +496,7 @@ def create_rules_router(price_cache: PriceCache, db_path: str) -> APIRouter:
                 quantity=body.quantity,
                 description=body.description,
                 user_id=user_id,
+                profile=profile,
             )
             if result["status"] == "failed":
                 conn.rollback()

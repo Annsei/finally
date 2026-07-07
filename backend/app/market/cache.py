@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 import uuid
 from collections import deque
+from collections.abc import Callable
 from dataclasses import replace
 from threading import Lock
 
@@ -24,6 +25,11 @@ EVENT_COOLDOWN_SECONDS = 30.0
 EVENT_BUFFER_SIZE = 100
 
 
+def _clamp(value: float, low: float, high: float) -> float:
+    """Clamp ``value`` into ``[low, high]`` (CN-2 §4 price-limit band)."""
+    return min(max(value, low), high)
+
+
 class PriceCache:
     """Thread-safe in-memory cache of the latest price for each ticker.
 
@@ -32,7 +38,18 @@ class PriceCache:
     and the market history endpoint (1-second OHLCV ring buffer).
     """
 
-    def __init__(self, history_capacity: int = DEFAULT_HISTORY_CAPACITY) -> None:
+    def __init__(
+        self,
+        history_capacity: int = DEFAULT_HISTORY_CAPACITY,
+        limit_pct_fn: Callable[[str], float | None] | None = None,
+    ) -> None:
+        # Per-ticker daily price-limit percent (CN-2 §4). When provided and the
+        # ticker has a session prev_close, ``update()``/``roll_session()`` derive
+        # the [limit_down, limit_up] band and clamp the price (and bid/ask) into
+        # it — the single funnel every market source writes through, so the
+        # simulator's ticks, random events, and sector bursts are all bounded.
+        # None (us) disables clamping entirely — the pre-CN-2 behavior.
+        self._limit_pct_fn = limit_pct_fn
         self._prices: dict[str, PriceUpdate] = {}
         self._lock = Lock()
         self._version: int = 0  # Monotonically increasing; bumped on every update
@@ -100,6 +117,20 @@ class PriceCache:
             else:
                 session_prev_close = rounded_price
 
+            # CN-2 §4: derive today's price-limit band from prev_close and clamp
+            # the price BEFORE the buffers/extremes see it — a封板 tick lands
+            # exactly on limit_up/limit_down. us (no fn) yields (None, None), so
+            # nothing below changes and the SSE payload is unchanged.
+            limit_up, limit_down = self._limits_for(ticker, session_prev_close)
+            rounded_bid = round(bid, 2) if bid is not None else None
+            rounded_ask = round(ask, 2) if ask is not None else None
+            if limit_up is not None:
+                rounded_price = _clamp(rounded_price, limit_down, limit_up)
+                if rounded_bid is not None:
+                    rounded_bid = _clamp(rounded_bid, limit_down, limit_up)
+                if rounded_ask is not None:
+                    rounded_ask = _clamp(rounded_ask, limit_down, limit_up)
+
             if day_high is not None:
                 session_high = round(day_high, 2)
             elif prev is not None:
@@ -123,14 +154,37 @@ class PriceCache:
                 day_high=session_high,
                 day_low=session_low,
                 volume=tick_volume,
-                bid=round(bid, 2) if bid is not None else None,
-                ask=round(ask, 2) if ask is not None else None,
+                bid=rounded_bid,
+                ask=rounded_ask,
+                limit_up=limit_up,
+                limit_down=limit_down,
             )
             self._prices[ticker] = update
             self._version += 1
             self._record_bar(ticker, rounded_price, ts, tick_volume)
             self._maybe_record_event(update)
             return update
+
+    def _limits_for(
+        self, ticker: str, prev_close: float | None
+    ) -> tuple[float | None, float | None]:
+        """Today's [limit_down, limit_up] band for a ticker (CN-2 §4).
+
+        Returns ``(limit_up, limit_down)`` when a price-limit function is
+        configured and yields a percent for a ticker with a positive
+        prev_close; ``(None, None)`` otherwise (always so for us). Rounded to
+        cents, symmetric around prev_close.
+
+        Must be called with self._lock held.
+        """
+        if self._limit_pct_fn is None or prev_close is None or prev_close <= 0:
+            return None, None
+        pct = self._limit_pct_fn(ticker)
+        if pct is None:
+            return None, None
+        limit_up = round(prev_close * (1.0 + pct / 100.0), 2)
+        limit_down = round(prev_close * (1.0 - pct / 100.0), 2)
+        return limit_up, limit_down
 
     def _maybe_record_event(self, update: PriceUpdate) -> None:
         """Record a MarketEvent when a tick's move crosses the event threshold.
@@ -291,6 +345,10 @@ class PriceCache:
                     continue
                 if close is None:
                     close = update.price
+                # CN-2 §4: recompute the price-limit band against the new
+                # session prev_close so the rolled baseline already carries
+                # today's ceiling/floor (us yields None, None — unchanged).
+                limit_up, limit_down = self._limits_for(ticker, close)
                 self._prices[ticker] = PriceUpdate(
                     ticker=ticker,
                     price=update.price,
@@ -302,6 +360,8 @@ class PriceCache:
                     volume=0.0,
                     bid=update.bid,
                     ask=update.ask,
+                    limit_up=limit_up,
+                    limit_down=limit_down,
                 )
                 rolled = True
             if rolled:

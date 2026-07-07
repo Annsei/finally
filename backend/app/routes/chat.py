@@ -33,12 +33,23 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from app.auth import get_current_user_id
-from app.backtest import normalize_backtest_config, run_backtest
+from app.backtest import STARTING_CASH, normalize_backtest_config, run_backtest
 from app.db.connection import get_conn
 from app.market.cache import PriceCache
+from app.market.profiles import MarketProfile
 from app.market.session import SessionClock
-from app.routes.orders import place_order_on_conn
-from app.routes.portfolio import _record_snapshot, execute_trade_on_conn
+
+# Bind the profile-aware placement impl to the legacy module name: chat
+# auto-exec must pass a market ``profile`` (CN-2), and existing rollback tests
+# monkeypatch ``chat.place_order_on_conn``. The public wrapper stays frozen in
+# app.routes.orders for pre-CN-2 callers.
+from app.routes.orders import _place_order_on_conn as place_order_on_conn
+from app.routes.portfolio import (
+    _execute_trade_on_conn as execute_trade_on_conn,
+)
+from app.routes.portfolio import (
+    _record_snapshot,
+)
 from app.routes.rules import create_rule_on_conn
 from app.routes.watchlist import (
     apply_watchlist_change_on_conn,
@@ -398,6 +409,7 @@ def create_chat_router(
     db_path: str,
     commission_bps: float = 0.0,
     session_clock: SessionClock | None = None,
+    profile: MarketProfile | None = None,
 ) -> APIRouter:
     """Factory: build the chat APIRouter with injected dependencies.
 
@@ -411,11 +423,20 @@ def create_chat_router(
             equities inherit the same "Market closed" rejection as manual
             trades via the shared ``execute_trade_on_conn`` helper (returned
             as a failed trade outcome, never an HTTP error).
+        profile: Active market profile (CN-2) — AI-executed trades, orders,
+            rules, and backtests obey the same 整手/涨跌停/T+1/fee mechanics as
+            the REST routes, threaded through the shared helpers. None/us is a
+            no-op.
 
     Returns:
         A configured FastAPI APIRouter ready to be registered with ``app.include_router``.
     """
     router = APIRouter(prefix="/api/chat", tags=["chat"])
+    universe = profile.universe if profile is not None else None
+    # Mirror routes/backtest.py: AI-run backtests open the same account the
+    # REST route does — the active profile's seed cash (CN=¥100k), else the
+    # US $10,000. None/us keeps run_backtest's default value-for-value.
+    starting_cash = profile.seed_cash if profile is not None else STARTING_CASH
 
     @router.get("/")
     async def get_chat_history(request: Request) -> dict:
@@ -613,6 +634,7 @@ def create_chat_router(
                     commission_bps=commission_bps,
                     session_clock=session_clock,
                     user_id=user_id,
+                    profile=profile,
                 )
                 for t in parsed.trades
             ]
@@ -636,6 +658,7 @@ def create_chat_router(
                     time_in_force=o.time_in_force,
                     commission_bps=commission_bps,
                     user_id=user_id,
+                    profile=profile,
                 )
                 for o in parsed.orders
             ]
@@ -654,6 +677,7 @@ def create_chat_router(
                     quantity=r.quantity,
                     description=r.description,
                     user_id=user_id,
+                    profile=profile,
                 )
                 for r in parsed.rules
             ]
@@ -677,12 +701,18 @@ def create_chat_router(
                     stop_loss_pct=b.stop_loss_pct,
                     days=b.days,
                     runs=b.runs,
+                    universe=universe,
+                    profile=profile,
                 )
                 if normalized["status"] == "failed":
                     backtest_outcomes.append(normalized)
                     continue
                 result = await asyncio.to_thread(
-                    run_backtest, normalized["config"], commission_bps=commission_bps
+                    run_backtest,
+                    normalized["config"],
+                    commission_bps=commission_bps,
+                    starting_cash=starting_cash,
+                    profile=profile,
                 )
                 backtest_outcomes.append(
                     {

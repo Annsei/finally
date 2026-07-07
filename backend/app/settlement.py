@@ -87,8 +87,37 @@ def settle_session_close(price_cache: PriceCache, db_path: str) -> dict:
     return {"closes": closes, "expired_orders": expired}
 
 
-def roll_session_open(price_cache: PriceCache) -> None:
-    """Roll equity day-session state at reopen. Runs once per closed→open transition."""
+def roll_session_open(price_cache: PriceCache, db_path: str | None = None) -> None:
+    """Roll equity day-session state at reopen. Runs once per closed→open transition.
+
+    Args:
+        price_cache: shared cache — equity day state (prev_close/extremes/price
+            band) is rolled to the settled close.
+        db_path: when provided (CN-2 §2), the T+1 lock is released at the new
+            session: ``UPDATE positions SET t1_locked = 0 WHERE t1_locked > 0``
+            on a dedicated connection. Failures are isolated so a T+1-unlock
+            error never blocks the prev_close roll. None (us/pre-CN-2) skips the
+            unlock entirely.
+    """
     equity_tickers = _tracked_equity_tickers(price_cache)
     price_cache.roll_session(equity_tickers)
     logger.info("Session open: rolled day state for %d equity tickers", len(equity_tickers))
+
+    if db_path is None:
+        return
+    # T+1 unlock (CN-2 §2): shares bought in the prior session become sellable.
+    # Isolated from the price roll above — a DB error here must not undo it.
+    try:
+        conn = get_conn(db_path)
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            unlocked = conn.execute(
+                "UPDATE positions SET t1_locked = 0 WHERE t1_locked > 0"
+            ).rowcount
+            conn.commit()
+        finally:
+            conn.close()
+        if unlocked:
+            logger.info("Session open: released T+1 lock on %d positions", unlocked)
+    except Exception:
+        logger.exception("Session open: T+1 unlock failed — continuing")

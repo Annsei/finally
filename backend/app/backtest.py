@@ -56,9 +56,11 @@ import time
 import numpy as np
 
 from app.market.cache import PriceCache
+from app.market.profiles import MarketProfile
 from app.market.seed_prices import DEFAULT_PARAMS, SEED_PRICES, TICKER_PARAMS
 from app.market.simulator import GBMSimulator, spread_bps_for
 from app.market.universe import MarketUniverse
+from app.mechanics import lot_size_error
 from app.routes.rules import TRIGGER_TYPES
 
 STARTING_CASH = 10_000.0
@@ -91,6 +93,7 @@ def normalize_backtest_config(
     runs: int | None = None,
     seed: int | None = None,
     universe: MarketUniverse | None = None,
+    profile: MarketProfile | None = None,
 ) -> dict:
     """Validate and normalize raw backtest fields (contract §1).
 
@@ -116,6 +119,9 @@ def normalize_backtest_config(
             fallback and GBM params come from it (the resolved params ride
             the config as a ``"params"`` key); None keeps the US constants
             and the exact pre-CN-1 config shape.
+        profile: Optional market profile (CN-2). Enforces the 整手 buy-lot
+            check (buy-entry only, so the same zh message as §3); None/us is a
+            no-op. Fee/T+1 semantics ride ``run_backtest``'s ``profile``.
 
     Returns:
         ``{"status": "ok", "config": {...}}`` with the normalized config
@@ -143,6 +149,11 @@ def normalize_backtest_config(
         )
     if quantity <= 0:
         return failed("Quantity must be greater than 0")
+    # CN-2 §3/§7: a buy-entry backtest must size in whole board lots (整手).
+    # No-op for us/None (lot_size <= 1). side is always "buy" here.
+    lot_error = lot_size_error(profile, "buy", quantity)
+    if lot_error is not None:
+        return failed(lot_error)
     if trigger_type not in TRIGGER_TYPES:
         return failed(
             "trigger_type must be one of 'price_above', 'price_below', "
@@ -277,6 +288,7 @@ def _simulate(
     commission_bps: float,
     end_time: float,
     starting_cash: float = STARTING_CASH,
+    profile: MarketProfile | None = None,
 ) -> dict:
     """One full account simulation for a single seed (contract §2).
 
@@ -284,6 +296,13 @@ def _simulate(
     (``times``/``equity``/``baseline`` — point formatting and downsampling
     happen in ``run_backtest``) and the trade log. ``starting_cash`` is the
     account's opening cash and the return-percent baseline (CN-1).
+
+    ``profile`` (CN-2 §7) applies the §1 fee formula (commission floor + a
+    sell-only stamp tax) and the T+1 rule (a position entered on day D cannot
+    exit until day D+1 — TP/SL and the horizon-end close skip the entry day).
+    None or a neutral (us) profile keeps the pre-CN-2 math value-for-value: the
+    fee reduces to ``notional * commission_bps / 1e4`` (unrounded, as before)
+    and exits are unrestricted.
     """
     ticker = config["ticker"]
     quantity = config["quantity"]
@@ -291,6 +310,23 @@ def _simulate(
     threshold = config["threshold"]
     take_profit_pct = config["take_profit_pct"]
     stop_loss_pct = config["stop_loss_pct"]
+
+    # T+1 exit deferral (CN-2 §7): active with a positive t_plus. Synthetic days
+    # are real day boundaries here, so no session clock is consulted.
+    t1_active = profile is not None and profile.t_plus > 0
+    # Per-fill fee — the §1 formula WITHOUT compute_fee's cent rounding, so the
+    # None/us path stays value-for-value identical to the legacy backtest
+    # (which accumulated commission unrounded and rounded only in stats).
+    min_commission = profile.min_commission if profile is not None else 0.0
+    stamp_bps = profile.stamp_tax_bps_sell if profile is not None else 0.0
+
+    def _fee(notional: float, trade_side: str) -> float:
+        fee = notional * commission_rate
+        if fee < min_commission:
+            fee = min_commission
+        if trade_side == "sell" and stamp_bps:
+            fee += notional * stamp_bps / 10_000.0
+        return fee
 
     # Pass params only when the config carries them (universe-injected runs,
     # CN-1) — legacy configs keep the exact original _generate_bars call so
@@ -316,6 +352,7 @@ def _simulate(
     tp_price: float | None = None
     sl_price: float | None = None
     fired_today = False
+    entry_day = -1  # Day index the open position was entered on (T+1 gate)
     day_prev_close = float(config["anchor_price"])
 
     fires = 0
@@ -331,7 +368,7 @@ def _simulate(
         nonlocal cash, qty, commission_paid
         sell_px = level * (1.0 - half_spread)
         proceeds = qty * sell_px
-        commission = proceeds * commission_rate
+        commission = _fee(proceeds, "sell")
         cash += proceeds - commission
         commission_paid += commission
         # Round-trip pnl is net of the spread and both legs' commissions.
@@ -350,14 +387,17 @@ def _simulate(
         qty = 0.0
 
     for g in range(n):
+        current_day = g // BARS_PER_DAY
         if g % BARS_PER_DAY == 0:
             fired_today = False  # Re-arm daily (max one fire per day)
-            day_prev_close = bars["prev_closes"][g // BARS_PER_DAY]
+            day_prev_close = bars["prev_closes"][current_day]
         close = float(closes[g])
         bar_time = int(times[g])
 
         # 1) Intrabar exits, stop-loss first (a same-bar double hit is a stop).
-        if qty > 0:
+        # CN-2 §7: under T+1 a position cannot exit on its entry day — skip the
+        # exit checks while current_day == entry_day.
+        if qty > 0 and (not t1_active or current_day > entry_day):
             if sl_price is not None and float(bars["lows"][g]) <= sl_price:
                 sell(sl_price, bar_time, "stop_loss")
             elif tp_price is not None and float(bars["highs"][g]) >= tp_price:
@@ -372,7 +412,7 @@ def _simulate(
             fired_today = True  # Consumed even when the buy is rejected
             buy_px = close * (1.0 + half_spread)
             cost = quantity * buy_px
-            commission = cost * commission_rate
+            commission = _fee(cost, "buy")
             if cash < cost + commission:
                 insufficient_cash += 1
             else:
@@ -380,6 +420,7 @@ def _simulate(
                 commission_paid += commission
                 qty = quantity
                 entry_cost = cost + commission
+                entry_day = current_day  # T+1: no exit before the next day
                 tp_price = buy_px * (1.0 + take_profit_pct / 100.0) if take_profit_pct else None
                 sl_price = buy_px * (1.0 - stop_loss_pct / 100.0) if stop_loss_pct else None
                 fires += 1
@@ -400,11 +441,16 @@ def _simulate(
 
     # Horizon end: close any open position at the final bar close and land
     # the equity curve on the realized final cash (sell friction included).
-    if qty > 0:
+    # CN-2 §7: under T+1, a position entered on the final day cannot be sold
+    # that day — it stays open and the curve ends marked-to-market. Whenever a
+    # close does happen (or no position is held) equity[-1] already equals
+    # cash, so this stays value-for-value identical for None/us.
+    last_day = (n - 1) // BARS_PER_DAY
+    if qty > 0 and (not t1_active or last_day > entry_day):
         sell(float(closes[-1]), int(times[-1]), "horizon_end")
         equity[-1] = cash
 
-    final_equity = cash
+    final_equity = equity[-1]
     eq = np.asarray(equity)
     peaks = np.maximum.accumulate(eq)
     max_drawdown_pct = float(np.max((peaks - eq) / peaks)) * 100.0
@@ -462,6 +508,7 @@ def run_backtest(
     commission_bps: float = 0.0,
     end_time: float | None = None,
     starting_cash: float = STARTING_CASH,
+    profile: MarketProfile | None = None,
 ) -> dict:
     """Run a normalized backtest config and build the full response (contract §3).
 
@@ -475,6 +522,9 @@ def run_backtest(
         starting_cash: Account opening cash (CN-1: the active market
             profile's seed cash). The stats math is unchanged — return% is
             relative to this amount; the default keeps the US $10,000.
+        profile: Active market profile (CN-2 §7) — applies the §1 fee formula
+            and the T+1 exit deferral inside ``_simulate``. None/us keeps the
+            pre-CN-2 math value-for-value.
 
     Returns:
         ``{"config", "stats", "equity_curve", "baseline_curve", "trades",
@@ -486,11 +536,15 @@ def run_backtest(
     base_seed = config["seed"]
 
     if runs == 1:
-        representative = _simulate(config, base_seed, commission_bps, end, starting_cash)
+        representative = _simulate(
+            config, base_seed, commission_bps, end, starting_cash, profile
+        )
         runs_summary = None
     else:
         all_stats = [
-            _simulate(config, base_seed + i, commission_bps, end, starting_cash)["stats"]
+            _simulate(config, base_seed + i, commission_bps, end, starting_cash, profile)[
+                "stats"
+            ]
             for i in range(runs)
         ]
         returns = [s["total_return_pct"] for s in all_stats]
@@ -499,7 +553,7 @@ def run_backtest(
         order = sorted(range(runs), key=lambda i: returns[i])
         rep_offset = order[(runs - 1) // 2]
         representative = _simulate(
-            config, base_seed + rep_offset, commission_bps, end, starting_cash
+            config, base_seed + rep_offset, commission_bps, end, starting_cash, profile
         )
         drawdowns = [s["max_drawdown_pct"] for s in all_stats]
         runs_summary = {

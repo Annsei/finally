@@ -68,7 +68,9 @@ from app.auth import get_current_user_id
 from app.db.connection import get_conn
 from app.market.cache import PriceCache
 from app.market.models import PriceUpdate
-from app.routes.portfolio import _record_snapshot, execute_trade_on_conn
+from app.market.profiles import MarketProfile
+from app.mechanics import lot_size_error, order_band_error
+from app.routes.portfolio import _execute_trade_on_conn, _record_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -220,6 +222,7 @@ def _execute_fill(
     limit_price: float | None,
     commission_bps: float,
     user_id: str = "default",
+    profile: MarketProfile | None = None,
 ) -> dict:
     """Execute the trade for a triggered/marketable order within the caller's transaction.
 
@@ -231,10 +234,15 @@ def _execute_fill(
     whatever the market gives (market-on-trigger). Does NOT commit; the caller
     owns the transaction boundary. The trade lands on ``user_id``'s cash and
     positions (M4 — the fill loop passes the order's own user).
+
+    ``profile`` (CN-2) rides through to ``execute_trade_on_conn`` so background
+    fills obey the same A-share fees and T+1 lock as manual trades; None/us is
+    a no-op. No session clock is passed (frozen quotes already gate closed-market
+    fills), so main.py neutralizes ``t_plus`` on the loop's profile in 24/7 mode.
     """
-    outcome = execute_trade_on_conn(
+    outcome = _execute_trade_on_conn(
         conn, price_cache, ticker, side, quantity, commission_bps=commission_bps,
-        user_id=user_id,
+        user_id=user_id, profile=profile,
     )
     if outcome["status"] == "executed" and limit_price is not None:
         price = outcome["price"]
@@ -317,6 +325,7 @@ def _try_fill_order(
     price_cache: PriceCache,
     order: sqlite3.Row,
     commission_bps: float,
+    profile: MarketProfile | None = None,
 ) -> str:
     """Process one open order. Returns 'filled', 'rejected', 'skipped', or 'expired'.
 
@@ -357,7 +366,7 @@ def _try_fill_order(
         # Market-on-trigger: fill at the ask/bid with no limit guard.
         outcome = _execute_fill(
             conn, price_cache, ticker, side, quantity, None, commission_bps,
-            user_id=order["user_id"],
+            user_id=order["user_id"], profile=profile,
         )
         return _apply_fill_outcome(conn, price_cache, order, outcome)
 
@@ -382,13 +391,16 @@ def _try_fill_order(
 
     outcome = _execute_fill(
         conn, price_cache, ticker, side, quantity, limit_price, commission_bps,
-        user_id=order["user_id"],
+        user_id=order["user_id"], profile=profile,
     )
     return _apply_fill_outcome(conn, price_cache, order, outcome)
 
 
 def process_open_orders_once(
-    db_path: str, price_cache: PriceCache, commission_bps: float = 0.0
+    db_path: str,
+    price_cache: PriceCache,
+    commission_bps: float = 0.0,
+    profile: MarketProfile | None = None,
 ) -> dict[str, int]:
     """One scan pass over ALL users' open orders: expire, trigger, and fill.
 
@@ -416,7 +428,7 @@ def process_open_orders_once(
         ).fetchall()
         for row in open_rows:
             try:
-                result = _try_fill_order(conn, price_cache, row, commission_bps)
+                result = _try_fill_order(conn, price_cache, row, commission_bps, profile)
             except Exception:
                 try:
                     conn.rollback()
@@ -437,15 +449,18 @@ async def orders_fill_loop(
     db_path: str,
     interval: float = 1.0,
     commission_bps: float = 0.0,
+    profile: MarketProfile | None = None,
 ) -> None:
     """Background task: process open orders every ``interval`` seconds.
 
     Runs indefinitely until cancelled via ``asyncio.CancelledError``. Any other
     exception (bad order, DB lock, etc.) is logged and the loop continues.
+    ``profile`` (CN-2) applies A-share fees/T+1 to background fills; main.py
+    passes a t_plus-neutralized profile in 24/7 mode.
     """
     while True:
         try:
-            process_open_orders_once(db_path, price_cache, commission_bps)
+            process_open_orders_once(db_path, price_cache, commission_bps, profile)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -526,6 +541,47 @@ def place_order_on_conn(
     commission_bps: float = 0.0,
     user_id: str = "default",
 ) -> dict:
+    """Legacy order-placement entry point — the pre-CN-2 keyword-only signature.
+
+    This is the stable, frozen contract the signature regression tests and every
+    pre-CN-2 caller depend on; it delegates to the profile-aware
+    :func:`_place_order_on_conn` with the neutral (us/None) profile, so its
+    behavior is byte-identical to the pre-CN-2 path. CN-2 callers that need
+    A-share mechanics (整手/涨跌停/fee/T+1) call ``_place_order_on_conn`` directly
+    with a profile — the single additive hook (CN2 contract §0) — leaving this
+    signature untouched.
+    """
+    return _place_order_on_conn(
+        conn,
+        price_cache,
+        ticker=ticker,
+        side=side,
+        quantity=quantity,
+        kind=kind,
+        limit_price=limit_price,
+        stop_price=stop_price,
+        time_in_force=time_in_force,
+        commission_bps=commission_bps,
+        user_id=user_id,
+        profile=None,
+    )
+
+
+def _place_order_on_conn(
+    conn: sqlite3.Connection,
+    price_cache: PriceCache,
+    *,
+    ticker: str,
+    side: str,
+    quantity: float,
+    kind: str,
+    limit_price: float | None,
+    stop_price: float | None,
+    time_in_force: str | None,
+    commission_bps: float = 0.0,
+    user_id: str = "default",
+    profile: MarketProfile | None = None,
+) -> dict:
     """Place an order (limit / stop / stop_limit) on an open SQLite connection.
 
     Shared placement path for the POST /api/portfolio/orders route and the
@@ -561,6 +617,11 @@ def place_order_on_conn(
         commission_bps: Commission in basis points applied to immediate fills.
         user_id: Owner of the order — immediate fills and later fill-loop
             fills land on this user's cash/positions (M4).
+        profile: Active market profile (CN-2). Drives the 整手 buy-lot check,
+            the price-limit band check (limit/stop prices outside today's
+            [limit_down, limit_up] are rejected — market fills are never
+            blocked here), and the A-share fee/T+1 mechanics of an immediate
+            marketable fill. None/us is a no-op.
     """
     ticker = ticker.strip().upper()
     side = side.lower()
@@ -579,6 +640,18 @@ def place_order_on_conn(
     )
     if error is not None:
         return {"status": "failed", "ticker": ticker, "error": error}
+
+    # CN-2 §3: A-share buys must be whole board lots (整手). No-op for us/None.
+    lot_error = lot_size_error(profile, side, quantity)
+    if lot_error is not None:
+        return {"status": "failed", "ticker": ticker, "error": lot_error}
+
+    # CN-2 §4: reject a resting order whose limit/stop price sits outside today's
+    # price-limit band (the quote carries limit_up/limit_down only in markets
+    # with limits). us quotes never carry a band, so this is a no-op there.
+    band_error = order_band_error(profile, quote, limit_price, stop_price)
+    if band_error is not None:
+        return {"status": "failed", "ticker": ticker, "error": band_error}
 
     order_id = str(uuid.uuid4())
     created_dt = datetime.now(timezone.utc)
@@ -610,7 +683,7 @@ def place_order_on_conn(
         if marketable:
             outcome = _execute_fill(
                 conn, price_cache, ticker, side, quantity, limit_price,
-                commission_bps, user_id=user_id,
+                commission_bps, user_id=user_id, profile=profile,
             )
             if outcome["status"] == "executed":
                 status = "filled"
@@ -675,7 +748,10 @@ def place_order_on_conn(
 
 
 def create_orders_router(
-    price_cache: PriceCache, db_path: str, commission_bps: float = 0.0
+    price_cache: PriceCache,
+    db_path: str,
+    commission_bps: float = 0.0,
+    profile: MarketProfile | None = None,
 ) -> APIRouter:
     """Factory: build the orders APIRouter with injected dependencies.
 
@@ -684,6 +760,8 @@ def create_orders_router(
         db_path: Path to the SQLite database file.
         commission_bps: Commission in basis points of notional applied to every
             fill (FINALLY_COMMISSION_BPS, read once at app startup in main.py).
+        profile: Active market profile (CN-2) — drives the 整手/涨跌停/fee/T+1
+            mechanics in ``place_order_on_conn``. None/us is a no-op.
 
     Returns:
         A configured FastAPI APIRouter ready to be registered with ``app.include_router``.
@@ -708,7 +786,7 @@ def create_orders_router(
         user_id = get_current_user_id(request, db_path)
         conn = get_conn(db_path)
         try:
-            result = place_order_on_conn(
+            result = _place_order_on_conn(
                 conn,
                 price_cache,
                 ticker=body.ticker,
@@ -720,6 +798,7 @@ def create_orders_router(
                 time_in_force=body.time_in_force,
                 commission_bps=commission_bps,
                 user_id=user_id,
+                profile=profile,
             )
             if result["status"] == "failed":
                 # place_order_on_conn already unwound its own writes; the

@@ -69,6 +69,12 @@ class PriceUpdate:
     volume: float = 0.0  # Volume traded since the previous update
     bid: float | None = None  # Best bid (defaults to price)
     ask: float | None = None  # Best ask (defaults to price)
+    # Daily price-limit band (CN-2 §4). Set by the PriceCache funnel only when
+    # the active market profile carries a price-limit rule (A-shares ±10/20%);
+    # None for markets without limits (us) — so ``to_dict`` omits both keys and
+    # the us SSE payload stays byte-for-byte unchanged.
+    limit_up: float | None = None  # Daily ceiling price (涨停), or None
+    limit_down: float | None = None  # Daily floor price (跌停), or None
 
     def __post_init__(self) -> None:
         # Normalize omitted session fields to the current price.
@@ -125,8 +131,13 @@ class PriceUpdate:
         return round((self.price - self.prev_close) / self.prev_close * 100, 4)
 
     def to_dict(self) -> dict:
-        """Serialize for JSON / SSE transmission."""
-        return {
+        """Serialize for JSON / SSE transmission.
+
+        ``limit_up``/``limit_down`` are emitted ONLY when set (CN-2 §4): a
+        market without price limits (us) never carries them, so its payload is
+        byte-for-byte identical to the pre-CN-2 shape.
+        """
+        payload = {
             "ticker": self.ticker,
             "price": self.price,
             "previous_price": self.previous_price,
@@ -144,3 +155,8 @@ class PriceUpdate:
             "ask": self.ask,
             "asset_class": self.asset_class,
         }
+        if self.limit_up is not None:
+            payload["limit_up"] = self.limit_up
+        if self.limit_down is not None:
+            payload["limit_down"] = self.limit_down
+        return payload

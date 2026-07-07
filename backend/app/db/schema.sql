@@ -30,7 +30,11 @@ CREATE TABLE IF NOT EXISTS watchlist (
     UNIQUE (user_id, ticker)
 );
 
--- Positions: current holdings (one row per ticker per user)
+-- Positions: current holdings (one row per ticker per user).
+-- t1_locked (CN-2) is the share count bought today that the T+1 rule keeps
+-- non-sellable until the next trading day; 0 in markets without T+1 (us).
+-- NOTE: new columns here must also be added to _migrate_schema() in
+-- connection.py — CREATE TABLE IF NOT EXISTS does not evolve existing tables.
 CREATE TABLE IF NOT EXISTS positions (
     id         TEXT PRIMARY KEY,
     user_id    TEXT NOT NULL DEFAULT 'default',
@@ -38,6 +42,7 @@ CREATE TABLE IF NOT EXISTS positions (
     quantity   REAL NOT NULL,
     avg_cost   REAL NOT NULL,
     updated_at TEXT NOT NULL,
+    t1_locked  REAL NOT NULL DEFAULT 0,
     UNIQUE (user_id, ticker)
 );
 

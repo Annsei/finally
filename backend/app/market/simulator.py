@@ -7,6 +7,7 @@ import logging
 import math
 import random
 import zlib
+from collections.abc import Callable
 
 import numpy as np
 
@@ -89,6 +90,7 @@ def compute_peer_shocks(
     shock_sign: int,
     candidates: list[str],
     rng: random.Random | None = None,
+    sector_fn: Callable[[str], str] | None = None,
 ) -> dict[str, float]:
     """Sector-correlated burst for one random event (M3.2b).
 
@@ -103,6 +105,11 @@ def compute_peer_shocks(
     Tickers in the "other" bucket (unknown/user-added) have no meaningful
     sector, so they never burst.
 
+    ``sector_fn`` classifies a ticker's sector (CN-2 §6): None uses the
+    module-level US ``sector_for``; the GBM simulator injects the active
+    universe's ``sector_for`` so CN codes cascade within 白酒/新能源 etc.
+    (the US map returns "other" for them and would never burst).
+
     Deterministic-testable: pass a seeded ``random.Random`` (or a fake with
     ``random()``/``uniform()``) as ``rng`` to force or suppress the burst;
     defaults to the module-level ``random``. Draw order: one ``random()`` for
@@ -113,10 +120,11 @@ def compute_peer_shocks(
     or the ticker has no sector peers.
     """
     r = rng if rng is not None else random
-    sector = sector_for(ticker)
+    classify = sector_fn if sector_fn is not None else sector_for
+    sector = classify(ticker)
     if sector == "other":
         return {}
-    peers = [t for t in candidates if t != ticker and sector_for(t) == sector]
+    peers = [t for t in candidates if t != ticker and classify(t) == sector]
     if not peers:
         return {}
     if r.random() >= BURST_PROBABILITY:
@@ -248,6 +256,11 @@ class GBMSimulator:
                         shock_sign,
                         self._tickers,
                         rng=self._rng,
+                        sector_fn=(
+                            self._universe.sector_for
+                            if self._universe is not None
+                            else None
+                        ),
                     ).items()
                 )
 
@@ -283,6 +296,18 @@ class GBMSimulator:
     def get_price(self, ticker: str) -> float | None:
         """Current price for a ticker, or None if not tracked."""
         return self._prices.get(ticker)
+
+    def set_price(self, ticker: str, price: float) -> None:
+        """Overwrite a tracked ticker's internal price (CN-2 §4).
+
+        Used when the PriceCache clamps a tick to the daily price-limit band:
+        writing the clamped value back into the GBM state stops the internal
+        random walk from drifting far past a locked board, so the next tick
+        that walks back inside the band naturally reopens it (自然开板). No-op
+        for untracked tickers.
+        """
+        if ticker in self._prices:
+            self._prices[ticker] = price
 
     def get_tickers(self) -> list[str]:
         """Return the list of currently tracked tickers."""
@@ -441,15 +466,24 @@ class SimulatorDataSource(MarketDataSource):
         return self._sim.get_tickers() if self._sim else []
 
     def _write_tick(self, ticker: str, price: float) -> None:
-        """Write one simulated tick (price + volume + bid/ask quote) to the cache."""
+        """Write one simulated tick (price + volume + bid/ask quote) to the cache.
+
+        If the cache clamps the price to a daily limit band (CN-2 §4), the
+        clamped value is written back into the simulator's internal state so
+        the GBM walk resumes from the board, not from a runaway theoretical
+        price — keeping封板 realistic and self-reopening. us never clamps, so
+        the writeback branch is dead there.
+        """
         bid, ask = compute_quote(ticker, price)
-        self._cache.update(
+        update = self._cache.update(
             ticker=ticker,
             price=price,
             volume=draw_volume(),
             bid=bid,
             ask=ask,
         )
+        if self._sim is not None and update.price != round(price, 2):
+            self._sim.set_price(ticker, update.price)
 
     def _active_tickers(self) -> set[str] | None:
         """Tickers allowed to tick right now.

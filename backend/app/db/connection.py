@@ -77,6 +77,11 @@ _CHAT_MESSAGES_NEW_COLUMNS: tuple[tuple[str, str], ...] = (
 _USERS_PROFILE_NEW_COLUMNS: tuple[tuple[str, str], ...] = (
     ("display_name", "TEXT"),
 )
+# CN-2: T+1 lock — shares bought today, non-sellable until the next session.
+# Pre-existing rows get 0 (no lock), exactly the pre-CN-2 semantics.
+_POSITIONS_NEW_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("t1_locked", "REAL NOT NULL DEFAULT 0"),
+)
 
 # Rebuild target for the orders table: identical to schema.sql. Used only when
 # an old database still has limit_price declared NOT NULL (stop orders store
@@ -148,6 +153,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     added += _add_missing_columns(conn, "trades", _TRADES_NEW_COLUMNS)
     added += _add_missing_columns(conn, "chat_messages", _CHAT_MESSAGES_NEW_COLUMNS)
     added += _add_missing_columns(conn, "users_profile", _USERS_PROFILE_NEW_COLUMNS)
+    added += _add_missing_columns(conn, "positions", _POSITIONS_NEW_COLUMNS)
 
     # M4.1: the anonymous 'default' user displays as 'Guest'. Idempotent —
     # only fills a missing name (pre-M4 rows migrated above get NULL).
