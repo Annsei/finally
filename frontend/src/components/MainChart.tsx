@@ -29,6 +29,7 @@ import { useTicker } from '@/stores/priceStore';
 import { fetcher } from '@/lib/fetcher';
 import { aggregateBars, applyTick, type Bar } from '@/lib/candles';
 import { useMarketProfile, directionColors } from '@/lib/marketProfile';
+import { formatLargeCount } from '@/lib/format';
 import type { MarketHistoryResponse } from '@/types/market';
 
 interface Props {
@@ -255,10 +256,35 @@ export default function MainChart({ ticker }: Props) {
     dayPct == null || dayPct === 0 ? '#8b949e' : dayPct > 0 ? UP : DOWN;
   const arrow = dayPct == null || dayPct === 0 ? '' : dayPct > 0 ? '▲' : '▼';
 
+  // A-share limit badges — only when the quote carries the day's limits and the
+  // live price has hit them (same approach/keys as WatchlistRow). US quotes
+  // carry no limit fields, so no badge ever shows on the US market.
+  const livePrice = priceUpdate?.price;
+  const limitUp = priceUpdate?.limit_up;
+  const limitDown = priceUpdate?.limit_down;
+  const atLimitUp = limitUp != null && livePrice != null && livePrice >= limitUp;
+  const atLimitDown = limitDown != null && livePrice != null && livePrice <= limitDown;
+
   return (
     <div>
       <div className="px-3 py-1 text-xs font-semibold flex items-baseline gap-2">
         <span style={{ color: '#ecad0a' }}>{ticker}</span>
+        {atLimitUp && (
+          <span
+            data-testid="main-chart-limit-badge"
+            className="text-[9px] font-semibold px-1 rounded text-terminal-up border border-terminal-up/60"
+          >
+            涨停
+          </span>
+        )}
+        {atLimitDown && (
+          <span
+            data-testid="main-chart-limit-badge"
+            className="text-[9px] font-semibold px-1 rounded text-terminal-down border border-terminal-down/60"
+          >
+            跌停
+          </span>
+        )}
         {hover ? (
           <span className="tabular-nums text-terminal-muted" data-testid="main-chart-ohlc">
             O <span className="text-terminal-text">{hover.open.toFixed(2)}</span>{' '}
@@ -268,7 +294,7 @@ export default function MainChart({ ticker }: Props) {
             {hover.volume != null && (
               <>
                 {' '}
-                V <span className="text-terminal-text">{Math.round(hover.volume).toLocaleString('en-US')}</span>
+                V <span className="text-terminal-text">{formatLargeCount(hover.volume, profile.locale)}</span>
               </>
             )}
           </span>

@@ -56,12 +56,12 @@ export default function Leaderboard() {
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
-        throw new Error(body?.error ?? `Reset failed (${res.status})`);
+        throw new Error(body?.error ?? t('board.resetFailedStatus', { status: res.status }));
       }
       // Every panel's numbers change after a reset — full refresh is honest
       hardReload();
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Reset failed');
+      setError(e instanceof Error ? e.message : t('board.resetFailed'));
       await mutate();
     }
   };

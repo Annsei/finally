@@ -302,7 +302,7 @@ export default function BacktestPanel({ profile = US_PROFILE }: { profile?: Mark
           </label>
           <input
             id="bt-ticker"
-            aria-label="Backtest ticker"
+            aria-label={t('backtest.ariaTicker')}
             type="text"
             list="ticker-suggestions"
             value={ticker}
@@ -318,7 +318,7 @@ export default function BacktestPanel({ profile = US_PROFILE }: { profile?: Mark
           </label>
           <select
             id="bt-trigger"
-            aria-label="Trigger type"
+            aria-label={t('backtest.ariaTrigger')}
             data-testid="backtest-trigger"
             value={triggerType}
             onChange={(e) => setTriggerType(e.target.value as RuleTriggerType)}
@@ -339,7 +339,7 @@ export default function BacktestPanel({ profile = US_PROFILE }: { profile?: Mark
           </label>
           <input
             id="bt-threshold"
-            aria-label="Threshold"
+            aria-label={t('backtest.ariaThreshold')}
             type="number"
             step="any"
             value={threshold}
@@ -355,7 +355,7 @@ export default function BacktestPanel({ profile = US_PROFILE }: { profile?: Mark
           </label>
           <input
             id="bt-qty"
-            aria-label="Backtest quantity"
+            aria-label={t('backtest.ariaQty')}
             type="number"
             min="0"
             step="any"
@@ -372,7 +372,7 @@ export default function BacktestPanel({ profile = US_PROFILE }: { profile?: Mark
           </label>
           <input
             id="bt-tp"
-            aria-label="Take profit percent"
+            aria-label={t('backtest.ariaTp')}
             type="number"
             min="0"
             step="any"
@@ -390,7 +390,7 @@ export default function BacktestPanel({ profile = US_PROFILE }: { profile?: Mark
           </label>
           <input
             id="bt-sl"
-            aria-label="Stop loss percent"
+            aria-label={t('backtest.ariaSl')}
             type="number"
             min="0"
             step="any"
@@ -408,7 +408,7 @@ export default function BacktestPanel({ profile = US_PROFILE }: { profile?: Mark
           </label>
           <input
             id="bt-days"
-            aria-label="Days"
+            aria-label={t('backtest.ariaDays')}
             type="number"
             min="5"
             max="120"
@@ -519,25 +519,29 @@ export default function BacktestPanel({ profile = US_PROFILE }: { profile?: Mark
               className="mt-2 flex items-baseline gap-4 px-2 py-1.5 rounded border border-terminal-border bg-terminal-bg text-xs tabular-nums"
             >
               <span className="text-[10px] font-semibold text-terminal-muted uppercase tracking-wider">
-                {summary.runs} runs
+                {t('backtest.summaryRuns', { n: summary.runs })}
               </span>
               <span className="text-terminal-muted">
-                Median{' '}
+                {t('backtest.summaryMedian')}{' '}
                 <span className={pnlClass(summary.median_return_pct)}>
                   {signed(summary.median_return_pct)}%
                 </span>
               </span>
               <span className="text-terminal-muted">
-                P5 <span className={pnlClass(summary.p05_return_pct)}>{signed(summary.p05_return_pct)}%</span>
+                {t('backtest.summaryP5')}{' '}
+                <span className={pnlClass(summary.p05_return_pct)}>{signed(summary.p05_return_pct)}%</span>
               </span>
               <span className="text-terminal-muted">
-                P95 <span className={pnlClass(summary.p95_return_pct)}>{signed(summary.p95_return_pct)}%</span>
+                {t('backtest.summaryP95')}{' '}
+                <span className={pnlClass(summary.p95_return_pct)}>{signed(summary.p95_return_pct)}%</span>
               </span>
               <span className="text-terminal-muted">
-                Positive <span className="text-terminal-text">{Math.round(summary.positive_share * 100)}%</span>
+                {t('backtest.summaryPositive')}{' '}
+                <span className="text-terminal-text">{Math.round(summary.positive_share * 100)}%</span>
               </span>
               <span className="text-terminal-muted">
-                Median DD <span className="text-terminal-text">−{summary.median_max_drawdown_pct.toFixed(2)}%</span>
+                {t('backtest.summaryMedianDd')}{' '}
+                <span className="text-terminal-text">−{summary.median_max_drawdown_pct.toFixed(2)}%</span>
               </span>
             </div>
           )}

@@ -252,6 +252,31 @@ const en: Dict = {
     "Simulated history (GBM, the ticker's own volatility) — the trigger re-arms daily, entries exit via TP/SL or at horizon end. Dashed line = buy & hold the same $10k.",
   'backtest.empty':
     'Validate a strategy before arming it live — or click “test” on a rule in the Rules tab.',
+
+  // --- CN-4a additions -------------------------------------------------------
+  // Backtest aria-labels (screen-reader names for the config inputs)
+  'backtest.ariaTicker': 'Backtest ticker',
+  'backtest.ariaTrigger': 'Trigger type',
+  'backtest.ariaThreshold': 'Threshold',
+  'backtest.ariaQty': 'Backtest quantity',
+  'backtest.ariaTp': 'Take profit percent',
+  'backtest.ariaSl': 'Stop loss percent',
+  'backtest.ariaDays': 'Days',
+  // Backtest Monte-Carlo (runs > 1) distribution strip labels
+  'backtest.summaryRuns': '{n} runs',
+  'backtest.summaryMedian': 'Median',
+  'backtest.summaryP5': 'P5',
+  'backtest.summaryP95': 'P95',
+  'backtest.summaryPositive': 'Positive',
+  'backtest.summaryMedianDd': 'Median DD',
+  // Leaderboard reset errors
+  'board.resetFailed': 'Reset failed',
+  'board.resetFailedStatus': 'Reset failed ({status})',
+  // Open-orders cancel errors
+  'orders.cancelFailed': 'Cancel failed',
+  'orders.cancelFailedStatus': 'Cancel failed ({status})',
+  // TradeBar whole-lot hint (lot markets only — never shown on US, lot_size 1)
+  'tradebar.wholeLotHint': 'Enter a whole number of lots.',
 };
 
 // ---------------------------------------------------------------------------
@@ -482,6 +507,26 @@ const zh: Dict = {
   'backtest.helper':
     '模拟历史行情（GBM，采用该标的自身波动率）— 触发条件每日重置，持仓通过止盈/止损或到期平仓。虚线 = 同额 $10k 买入并持有。',
   'backtest.empty': '在实盘启用前先验证策略 — 或在规则页点击某条规则的「测试」。',
+
+  // --- CN-4a additions -------------------------------------------------------
+  'backtest.ariaTicker': '回测代码',
+  'backtest.ariaTrigger': '触发类型',
+  'backtest.ariaThreshold': '阈值',
+  'backtest.ariaQty': '回测数量',
+  'backtest.ariaTp': '止盈百分比',
+  'backtest.ariaSl': '止损百分比',
+  'backtest.ariaDays': '天数',
+  'backtest.summaryRuns': '{n} 次',
+  'backtest.summaryMedian': '中位数',
+  'backtest.summaryP5': 'P5',
+  'backtest.summaryP95': 'P95',
+  'backtest.summaryPositive': '正收益',
+  'backtest.summaryMedianDd': '中位回撤',
+  'board.resetFailed': '重置失败',
+  'board.resetFailedStatus': '重置失败（{status}）',
+  'orders.cancelFailed': '撤单失败',
+  'orders.cancelFailedStatus': '撤单失败（{status}）',
+  'tradebar.wholeLotHint': '请输入整数手数。',
 };
 
 const DICTS: Record<Lang, Dict> = { en, zh };

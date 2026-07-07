@@ -33,11 +33,11 @@ export default function OpenOrdersTable() {
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
-        throw new Error(body?.error ?? `Cancel failed (${res.status})`);
+        throw new Error(body?.error ?? t('orders.cancelFailedStatus', { status: res.status }));
       }
       await mutate();
     } catch (e) {
-      setCancelError(e instanceof Error ? e.message : 'Cancel failed');
+      setCancelError(e instanceof Error ? e.message : t('orders.cancelFailed'));
       await mutate(); // the order may have filled in the meantime — refresh
     }
   };

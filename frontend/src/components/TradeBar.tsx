@@ -136,6 +136,12 @@ export default function TradeBar({ selectedTicker, onTradeComplete }: TradeBarPr
       : null;
   const concentrated = prospectiveWeight != null && prospectiveWeight > CONCENTRATION_WARN;
 
+  // Whole-lot hint (lot markets only): the 手 input must be a positive integer —
+  // the backend rejects fractional lots. Non-blocking, mirrors the concentration
+  // rail. On the US market (lot_size 1) isLot is false, so this never appears.
+  const wholeLotHint =
+    isLot && qty.trim() !== '' && (!Number.isInteger(qtyNum) || qtyNum <= 0);
+
   const validate = (): boolean => {
     if (!normalizedTicker || !/^[A-Z]+$/.test(normalizedTicker)) {
       setError(t('tradebar.errTickerQty'));
@@ -531,6 +537,16 @@ export default function TradeBar({ selectedTicker, onTradeComplete }: TradeBarPr
             ticker: normalizedTicker,
             pct: Math.round(prospectiveWeight * 100),
           })}
+        </p>
+      )}
+
+      {/* Whole-lot hint — non-blocking, lot markets only (A-share 整手) */}
+      {wholeLotHint && (
+        <p
+          data-testid="trade-whole-lot-hint"
+          className="mt-1.5 text-xs leading-tight text-terminal-amber"
+        >
+          {t('tradebar.wholeLotHint')}
         </p>
       )}
 
