@@ -26,6 +26,7 @@ from .seed_prices import (
     sector_for,
 )
 from .session import SessionClock
+from .universe import MarketUniverse
 
 logger = logging.getLogger(__name__)
 
@@ -156,6 +157,7 @@ class GBMSimulator:
         dt: float = DEFAULT_DT,
         event_probability: float = 0.001,
         rng: random.Random | None = None,
+        universe: MarketUniverse | None = None,
     ) -> None:
         self._dt = dt
         self._event_prob = event_probability
@@ -164,6 +166,11 @@ class GBMSimulator:
         # sector bursts deterministically; defaults to the module-level
         # ``random`` (same behavior as before).
         self._rng = rng if rng is not None else random
+        # Optional market universe (CN-1): when provided, seed prices, GBM
+        # params, and the correlation structure come from it instead of the
+        # module-level US constants. None reproduces the pre-CN-1 behavior
+        # exactly.
+        self._universe = universe
 
         # Per-ticker state
         self._tickers: list[str] = []
@@ -288,8 +295,14 @@ class GBMSimulator:
         if ticker in self._prices:
             return
         self._tickers.append(ticker)
-        self._prices[ticker] = SEED_PRICES.get(ticker, random.uniform(50.0, 300.0))
-        self._params[ticker] = TICKER_PARAMS.get(ticker, dict(DEFAULT_PARAMS))
+        if self._universe is not None:
+            seeds = self._universe.seed_prices
+            params = self._universe.ticker_params
+            defaults = self._universe.default_params
+        else:
+            seeds, params, defaults = SEED_PRICES, TICKER_PARAMS, DEFAULT_PARAMS
+        self._prices[ticker] = seeds.get(ticker, random.uniform(50.0, 300.0))
+        self._params[ticker] = params.get(ticker, dict(defaults))
 
     def _rebuild_cholesky(self) -> None:
         """Rebuild the Cholesky decomposition of the ticker correlation matrix.
@@ -305,11 +318,18 @@ class GBMSimulator:
         corr = np.eye(n)
         for i in range(n):
             for j in range(i + 1, n):
-                rho = self._pairwise_correlation(self._tickers[i], self._tickers[j])
+                rho = self._correlation(self._tickers[i], self._tickers[j])
                 corr[i, j] = rho
                 corr[j, i] = rho
 
         self._cholesky = np.linalg.cholesky(corr)
+
+    def _correlation(self, t1: str, t2: str) -> float:
+        """Pairwise correlation: from the injected universe when present (CN-1),
+        otherwise the module-level US map (``_pairwise_correlation``)."""
+        if self._universe is not None:
+            return self._universe.pairwise_correlation(t1, t2)
+        return self._pairwise_correlation(t1, t2)
 
     @staticmethod
     def _pairwise_correlation(t1: str, t2: str) -> float:
@@ -361,11 +381,16 @@ class SimulatorDataSource(MarketDataSource):
         update_interval: float = 0.5,
         event_probability: float = 0.001,
         session_clock: SessionClock | None = None,
+        universe: MarketUniverse | None = None,
     ) -> None:
         self._cache = price_cache
         self._interval = update_interval
         self._event_prob = event_probability
         self._session_clock = session_clock
+        # Optional market universe (CN-1): forwarded to the GBM simulator
+        # (seeds/params/correlations) and used for the closed-session
+        # asset-class check. None keeps the module-constant US behavior.
+        self._universe = universe
         self._sim: GBMSimulator | None = None
         self._task: asyncio.Task | None = None
 
@@ -373,6 +398,7 @@ class SimulatorDataSource(MarketDataSource):
         self._sim = GBMSimulator(
             tickers=tickers,
             event_probability=self._event_prob,
+            universe=self._universe,
         )
         # Seed the cache with initial prices so SSE has data immediately.
         # This first write also fixes each ticker's session prev_close in the
@@ -433,10 +459,13 @@ class SimulatorDataSource(MarketDataSource):
         """
         if self._session_clock is None or self._session_clock.is_open:
             return None
+        classify = (
+            self._universe.asset_class_for if self._universe is not None else asset_class_for
+        )
         return {
             ticker
             for ticker in (self._sim.get_tickers() if self._sim else [])
-            if asset_class_for(ticker) == "crypto"
+            if classify(ticker) == "crypto"
         }
 
     async def _run_loop(self) -> None:

@@ -44,8 +44,15 @@ class SeasonResetRequest(BaseModel):
     confirm: bool = False
 
 
-def create_seasons_router(price_cache: PriceCache, db_path: str) -> APIRouter:
-    """Factory: build the seasons APIRouter with injected dependencies."""
+def create_seasons_router(
+    price_cache: PriceCache, db_path: str, seed_cash: float = 10_000.0
+) -> APIRouter:
+    """Factory: build the seasons APIRouter with injected dependencies.
+
+    ``seed_cash`` is the amount every user's cash resets to on a season
+    reset and the baseline for the archived return percentages (CN-1: the
+    active market profile's seed cash; default keeps the US $10,000).
+    """
     router = APIRouter(tags=["seasons"])
 
     @router.post("/api/season/reset")
@@ -69,7 +76,7 @@ def create_seasons_router(price_cache: PriceCache, db_path: str) -> APIRouter:
             season = get_current_season(conn)
 
             conn.execute("BEGIN IMMEDIATE")
-            standings = compute_standings(conn, price_cache)
+            standings = compute_standings(conn, price_cache, seed_cash)
             archived_entries = [
                 {
                     "user_id": entry["user_id"],
@@ -101,9 +108,9 @@ def create_seasons_router(price_cache: PriceCache, db_path: str) -> APIRouter:
             cur = conn.execute("INSERT INTO seasons (started_at) VALUES (?)", (now,))
             new_season_id = cur.lastrowid
 
-            # Reset every user: fresh $10k, flat book. Trades/chat/snapshots
-            # stay — they are the historical record of past seasons.
-            conn.execute("UPDATE users_profile SET cash_balance = 10000.0")
+            # Reset every user: fresh seed cash, flat book. Trades/chat/
+            # snapshots stay — they are the historical record of past seasons.
+            conn.execute("UPDATE users_profile SET cash_balance = ?", (seed_cash,))
             conn.execute("DELETE FROM positions")
             conn.execute(
                 "UPDATE orders SET status = 'cancelled' WHERE status = 'open'"

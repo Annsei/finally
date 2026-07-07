@@ -206,7 +206,12 @@ def _ensure_arena_state(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def init_db(db_path: str = DB_PATH) -> None:
+def init_db(
+    db_path: str = DB_PATH,
+    *,
+    seed_cash: float = 10_000.0,
+    default_watchlist: list[str] | None = None,
+) -> None:
     """Initialize the database: create schema and seed default data if empty.
 
     Idempotent — uses ``CREATE TABLE IF NOT EXISTS`` so calling this multiple
@@ -216,6 +221,12 @@ def init_db(db_path: str = DB_PATH) -> None:
 
     Args:
         db_path: Path to the SQLite database file. Defaults to DB_PATH.
+        seed_cash: Starting cash for the default user when seeding a fresh
+            database (CN-1: the active market profile's seed cash). An
+            already-seeded database is never re-seeded — existing balances
+            and watchlists are untouched regardless of these values.
+        default_watchlist: Tickers to seed into a fresh watchlist; None uses
+            the US ``DEFAULT_WATCHLIST`` (the pre-CN-1 behavior).
     """
     logger.info("Initializing database at %s", db_path)
     conn = get_conn(db_path)
@@ -230,7 +241,7 @@ def init_db(db_path: str = DB_PATH) -> None:
             logger.info("Database is empty — running seed")
             from app.db.seed import seed_db  # local import to avoid circular at module level
 
-            seed_db(conn)
+            seed_db(conn, seed_cash=seed_cash, default_watchlist=default_watchlist)
         else:
             logger.debug("Database already seeded — skipping")
     finally:

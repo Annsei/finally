@@ -58,6 +58,7 @@ import numpy as np
 from app.market.cache import PriceCache
 from app.market.seed_prices import DEFAULT_PARAMS, SEED_PRICES, TICKER_PARAMS
 from app.market.simulator import GBMSimulator, spread_bps_for
+from app.market.universe import MarketUniverse
 from app.routes.rules import TRIGGER_TYPES
 
 STARTING_CASH = 10_000.0
@@ -89,6 +90,7 @@ def normalize_backtest_config(
     days: int | None = None,
     runs: int | None = None,
     seed: int | None = None,
+    universe: MarketUniverse | None = None,
 ) -> dict:
     """Validate and normalize raw backtest fields (contract §1).
 
@@ -110,6 +112,10 @@ def normalize_backtest_config(
         days: Sessions to simulate (default 30, range 5-120).
         runs: Monte Carlo re-runs with consecutive seeds (default 1, 1-50).
         seed: RNG seed; omitted draws a random one (always echoed back).
+        universe: Optional market universe (CN-1). When provided, the anchor
+            fallback and GBM params come from it (the resolved params ride
+            the config as a ``"params"`` key); None keeps the US constants
+            and the exact pre-CN-1 config shape.
 
     Returns:
         ``{"status": "ok", "config": {...}}`` with the normalized config
@@ -123,10 +129,11 @@ def normalize_backtest_config(
     def failed(error: str) -> dict:
         return {"status": "failed", "ticker": ticker, "error": error}
 
-    # Anchor price: live cache quote first, then the simulator's seed price.
+    # Anchor price: live cache quote first, then the market's seed price.
+    seeds = SEED_PRICES if universe is None else universe.seed_prices
     anchor_price = price_cache.get_price(ticker)
     if anchor_price is None:
-        anchor_price = SEED_PRICES.get(ticker)
+        anchor_price = seeds.get(ticker)
     if anchor_price is None:
         return failed("Ticker not found")
     if side != "buy":
@@ -159,26 +166,36 @@ def normalize_backtest_config(
     if seed < 0:
         return failed("seed must be a non-negative integer")
 
-    return {
-        "status": "ok",
-        "config": {
-            "ticker": ticker,
-            "trigger_type": trigger_type,
-            "threshold": float(threshold),
-            "side": side,
-            "quantity": float(quantity),
-            "take_profit_pct": float(take_profit_pct) if take_profit_pct is not None else None,
-            "stop_loss_pct": float(stop_loss_pct) if stop_loss_pct is not None else None,
-            "days": days,
-            "runs": runs,
-            "seed": seed,
-            "anchor_price": float(anchor_price),
-        },
+    config = {
+        "ticker": ticker,
+        "trigger_type": trigger_type,
+        "threshold": float(threshold),
+        "side": side,
+        "quantity": float(quantity),
+        "take_profit_pct": float(take_profit_pct) if take_profit_pct is not None else None,
+        "stop_loss_pct": float(stop_loss_pct) if stop_loss_pct is not None else None,
+        "days": days,
+        "runs": runs,
+        "seed": seed,
+        "anchor_price": float(anchor_price),
     }
+    # Universe-injected runs resolve GBM params here (CN-1) so the engine
+    # never needs the universe itself; universe=None keeps the legacy config
+    # shape byte-for-byte and _generate_bars falls back to the US constants.
+    if universe is not None:
+        config["params"] = dict(
+            universe.ticker_params.get(ticker, universe.default_params)
+        )
+    return {"status": "ok", "config": config}
 
 
 def _generate_bars(
-    ticker: str, anchor_price: float, days: int, seed: int, end_time: float
+    ticker: str,
+    anchor_price: float,
+    days: int,
+    seed: int,
+    end_time: float,
+    params: dict[str, float] | None = None,
 ) -> dict:
     """Synthetic per-minute GBM history: ``days`` x 390 bars (contract §2).
 
@@ -187,8 +204,12 @@ def _generate_bars(
     triggers: the anchor for day 0, then each prior day's final close).
     Deterministic for a given (ticker, anchor, days, seed): the draw order is
     fixed — the close path first, then the high/low widening noise.
+
+    ``params`` overrides the GBM {"mu", "sigma"} lookup (CN-1: resolved from
+    the injected universe at normalize time); None uses the US constants.
     """
-    params = TICKER_PARAMS.get(ticker, DEFAULT_PARAMS)
+    if params is None:
+        params = TICKER_PARAMS.get(ticker, DEFAULT_PARAMS)
     mu, sigma = params["mu"], params["sigma"]
     n = days * BARS_PER_DAY
     rng = np.random.default_rng(seed)
@@ -250,12 +271,19 @@ def _trigger_fires(
     return False  # Unknown trigger_type (bad data) — never fires.
 
 
-def _simulate(config: dict, seed: int, commission_bps: float, end_time: float) -> dict:
+def _simulate(
+    config: dict,
+    seed: int,
+    commission_bps: float,
+    end_time: float,
+    starting_cash: float = STARTING_CASH,
+) -> dict:
     """One full account simulation for a single seed (contract §2).
 
     Returns the ``stats`` block per contract §3 plus raw per-bar series
     (``times``/``equity``/``baseline`` — point formatting and downsampling
-    happen in ``run_backtest``) and the trade log.
+    happen in ``run_backtest``) and the trade log. ``starting_cash`` is the
+    account's opening cash and the return-percent baseline (CN-1).
     """
     ticker = config["ticker"]
     quantity = config["quantity"]
@@ -264,7 +292,16 @@ def _simulate(config: dict, seed: int, commission_bps: float, end_time: float) -
     take_profit_pct = config["take_profit_pct"]
     stop_loss_pct = config["stop_loss_pct"]
 
-    bars = _generate_bars(ticker, config["anchor_price"], config["days"], seed, end_time)
+    # Pass params only when the config carries them (universe-injected runs,
+    # CN-1) — legacy configs keep the exact original _generate_bars call so
+    # tests that monkeypatch it with the old signature are unaffected.
+    params = config.get("params")
+    if params is not None:
+        bars = _generate_bars(
+            ticker, config["anchor_price"], config["days"], seed, end_time, params=params
+        )
+    else:
+        bars = _generate_bars(ticker, config["anchor_price"], config["days"], seed, end_time)
     times = bars["times"]
     closes = bars["closes"]
     n = len(closes)
@@ -273,7 +310,7 @@ def _simulate(config: dict, seed: int, commission_bps: float, end_time: float) -
     half_spread = spread_bps_for(ticker) / 2.0 / 10_000.0
     commission_rate = commission_bps / 10_000.0
 
-    cash = STARTING_CASH
+    cash = starting_cash
     qty = 0.0
     entry_cost = 0.0  # Full cost of the open position (notional + commission)
     tp_price: float | None = None
@@ -359,7 +396,7 @@ def _simulate(config: dict, seed: int, commission_bps: float, end_time: float) -
 
         # 3) Mark to market.
         equity.append(cash + qty * close)
-        baseline.append(STARTING_CASH * close / first_close)
+        baseline.append(starting_cash * close / first_close)
 
     # Horizon end: close any open position at the final bar close and land
     # the equity curve on the realized final cash (sell friction included).
@@ -378,7 +415,7 @@ def _simulate(config: dict, seed: int, commission_bps: float, end_time: float) -
     gross_losses = -sum(losses)
 
     stats = {
-        "total_return_pct": round((final_equity - STARTING_CASH) / STARTING_CASH * 100.0, 2),
+        "total_return_pct": round((final_equity - starting_cash) / starting_cash * 100.0, 2),
         "buy_hold_return_pct": round((float(closes[-1]) / first_close - 1.0) * 100.0, 2),
         "max_drawdown_pct": round(max_drawdown_pct, 2),
         "final_equity": round(final_equity, 2),
@@ -420,7 +457,11 @@ def _downsample_indices(n: int, max_points: int = MAX_CURVE_POINTS) -> list[int]
 
 
 def run_backtest(
-    config: dict, *, commission_bps: float = 0.0, end_time: float | None = None
+    config: dict,
+    *,
+    commission_bps: float = 0.0,
+    end_time: float | None = None,
+    starting_cash: float = STARTING_CASH,
 ) -> dict:
     """Run a normalized backtest config and build the full response (contract §3).
 
@@ -431,6 +472,9 @@ def run_backtest(
         end_time: Unix timestamp of the final bar (the route passes
             ``time.time()``); None uses the current time. Fixing it makes the
             whole payload — timestamps included — reproducible.
+        starting_cash: Account opening cash (CN-1: the active market
+            profile's seed cash). The stats math is unchanged — return% is
+            relative to this amount; the default keeps the US $10,000.
 
     Returns:
         ``{"config", "stats", "equity_curve", "baseline_curve", "trades",
@@ -442,18 +486,21 @@ def run_backtest(
     base_seed = config["seed"]
 
     if runs == 1:
-        representative = _simulate(config, base_seed, commission_bps, end)
+        representative = _simulate(config, base_seed, commission_bps, end, starting_cash)
         runs_summary = None
     else:
         all_stats = [
-            _simulate(config, base_seed + i, commission_bps, end)["stats"] for i in range(runs)
+            _simulate(config, base_seed + i, commission_bps, end, starting_cash)["stats"]
+            for i in range(runs)
         ]
         returns = [s["total_return_pct"] for s in all_stats]
         # Representative = lower-middle-median return; re-running its seed is
         # free of drift because _simulate is deterministic.
         order = sorted(range(runs), key=lambda i: returns[i])
         rep_offset = order[(runs - 1) // 2]
-        representative = _simulate(config, base_seed + rep_offset, commission_bps, end)
+        representative = _simulate(
+            config, base_seed + rep_offset, commission_bps, end, starting_cash
+        )
         drawdowns = [s["max_drawdown_pct"] for s in all_stats]
         runs_summary = {
             "runs": runs,

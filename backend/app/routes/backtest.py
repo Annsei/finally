@@ -19,8 +19,9 @@ from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from app.backtest import normalize_backtest_config, run_backtest
+from app.backtest import STARTING_CASH, normalize_backtest_config, run_backtest
 from app.market.cache import PriceCache
+from app.market.profiles import MarketProfile
 
 
 class BacktestRequest(BaseModel):
@@ -36,7 +37,11 @@ class BacktestRequest(BaseModel):
     seed: int | None = None  # omitted -> drawn randomly, always echoed back
 
 
-def create_backtest_router(price_cache: PriceCache, commission_bps: float = 0.0) -> APIRouter:
+def create_backtest_router(
+    price_cache: PriceCache,
+    commission_bps: float = 0.0,
+    profile: MarketProfile | None = None,
+) -> APIRouter:
     """Factory: build the backtest APIRouter with injected dependencies.
 
     Args:
@@ -46,10 +51,15 @@ def create_backtest_router(price_cache: PriceCache, commission_bps: float = 0.0)
             each simulated fill (FINALLY_COMMISSION_BPS, read once at app
             startup in main.py) — backtests price the same friction as live
             trades.
+        profile: Optional market profile (CN-1, resolved once in main.py).
+            Supplies the anchor/params universe and the starting cash; None
+            keeps the US constants and $10,000 (the pre-CN-1 behavior).
 
     Returns:
         A configured FastAPI APIRouter ready to be registered with ``app.include_router``.
     """
+    universe = profile.universe if profile is not None else None
+    starting_cash = profile.seed_cash if profile is not None else STARTING_CASH
     router = APIRouter(prefix="/api/backtest", tags=["backtest"])
 
     @router.post("")
@@ -74,6 +84,7 @@ def create_backtest_router(price_cache: PriceCache, commission_bps: float = 0.0)
             days=body.days,
             runs=body.runs,
             seed=body.seed,
+            universe=universe,
         )
         if outcome["status"] == "failed":
             return JSONResponse(status_code=400, content={"error": outcome["error"]})
@@ -82,6 +93,7 @@ def create_backtest_router(price_cache: PriceCache, commission_bps: float = 0.0)
             outcome["config"],
             commission_bps=commission_bps,
             end_time=time.time(),
+            starting_cash=starting_cash,
         )
 
     return router

@@ -26,7 +26,7 @@ from app.market import (
     create_stream_router,
     session_clock_loop,
 )
-from app.market.seed_prices import DEFAULT_WATCHLIST
+from app.market.profiles import resolve_market_profile
 
 logger = logging.getLogger(__name__)
 
@@ -149,8 +149,18 @@ async def lifespan(app: FastAPI):
     if commission_bps:
         logger.info("FinAlly startup: commission enabled at %s bps", commission_bps)
 
+    # Market profile (CN-1): FINALLY_MARKET read ONCE here (default 'us') and
+    # injected everywhere — universe into the data source, seed cash into DB
+    # seeding and the seasons/leaderboard/backtest factories.
+    profile = resolve_market_profile()
+    logger.info("FinAlly startup: market profile '%s' active", profile.key)
+
     logger.info("FinAlly startup: initializing database at %s", db_path)
-    init_db(db_path)
+    init_db(
+        db_path,
+        seed_cash=profile.seed_cash,
+        default_watchlist=list(profile.universe.default_watchlist),
+    )
 
     # Session clock (M3.1): open/close cycle from env, 24/7 when disabled or
     # when real market data is active. Starts OPEN with session_id 1.
@@ -158,17 +168,18 @@ async def lifespan(app: FastAPI):
 
     logger.info("FinAlly startup: creating price cache and market data source")
     price_cache = PriceCache()
-    source = create_market_data_source(price_cache, session_clock)
+    source = create_market_data_source(price_cache, session_clock, profile.universe)
 
     # Start market data with the UNION of every user's watchlist (M4 — the
-    # source tracks all users' tickers), falling back to the default
-    # watchlist (the 10 equities — crypto joins via watchlist adds).
+    # source tracks all users' tickers), falling back to the profile's
+    # default watchlist (us: the 10 equities — crypto joins via watchlist
+    # adds; cn: the full 14-ticker A-share universe).
     conn = get_conn(db_path)
     rows = conn.execute("SELECT DISTINCT ticker FROM watchlist").fetchall()
     tickers = [row["ticker"] for row in rows]
     conn.close()
     if not tickers:
-        tickers = list(DEFAULT_WATCHLIST)
+        tickers = list(profile.universe.default_watchlist)
     await source.start(tickers)
     logger.info("FinAlly startup: market data source started with %d tickers", len(tickers))
 
@@ -176,6 +187,7 @@ async def lifespan(app: FastAPI):
     app.state.price_cache = price_cache
     app.state.market_source = source
     app.state.session_clock = session_clock
+    app.state.market_profile = profile
 
     # Register routers that depend on price_cache inside lifespan (factory pattern)
     app.include_router(create_stream_router(price_cache))
@@ -199,7 +211,7 @@ async def lifespan(app: FastAPI):
 
     # Backtest router (M5 — stateless strategy backtester, no DB access)
     from app.routes.backtest import create_backtest_router
-    app.include_router(create_backtest_router(price_cache, commission_bps))
+    app.include_router(create_backtest_router(price_cache, commission_bps, profile))
 
     # Watchlist router
     from app.routes.watchlist import create_watchlist_router
@@ -216,17 +228,25 @@ async def lifespan(app: FastAPI):
     market_router = create_market_router(price_cache, session_clock)
     app.include_router(market_router)
 
+    # Market profile router (CN-1 — the frontend's runtime market config)
+    from app.routes.profile import create_profile_router
+    app.include_router(create_profile_router(profile))
+
     # Auth router (M4.1 — name-only login, cookie session)
     from app.routes.auth import create_auth_router
     app.include_router(create_auth_router(db_path))
 
     # Leaderboard router (M4.2)
     from app.routes.leaderboard import create_leaderboard_router
-    app.include_router(create_leaderboard_router(price_cache, db_path))
+    app.include_router(
+        create_leaderboard_router(price_cache, db_path, seed_cash=profile.seed_cash)
+    )
 
     # Seasons router (M4.3 — reset + archive)
     from app.routes.seasons import create_seasons_router
-    app.include_router(create_seasons_router(price_cache, db_path))
+    app.include_router(
+        create_seasons_router(price_cache, db_path, seed_cash=profile.seed_cash)
+    )
 
     # Mount static files LAST — must not shadow /api/* routes.
     _mount_static_files(app)

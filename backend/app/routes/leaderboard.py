@@ -43,11 +43,19 @@ def _display_name(row: sqlite3.Row) -> str:
     return "Guest" if row["id"] == "default" else row["id"]
 
 
-def compute_standings(conn: sqlite3.Connection, price_cache: PriceCache) -> list[dict]:
+def compute_standings(
+    conn: sqlite3.Connection,
+    price_cache: PriceCache,
+    seed_cash: float = STARTING_CASH,
+) -> list[dict]:
     """Rank every user profile by live total portfolio value.
 
     Returns entries sorted by rank:
     ``[{"user_id", "name", "total_value", "return_pct", "rank"}, ...]``.
+
+    ``seed_cash`` is the return-percent baseline — every user starts (and
+    restarts each season) from this amount. Defaults to the US $10,000;
+    main.py injects the active market profile's seed cash (CN-1).
     """
     users = conn.execute(
         "SELECT id, cash_balance, created_at, display_name FROM users_profile"
@@ -80,7 +88,7 @@ def compute_standings(conn: sqlite3.Connection, price_cache: PriceCache) -> list
             "name": entry["name"],
             "total_value": round(entry["total_value"], 2),
             "return_pct": round(
-                (entry["total_value"] - STARTING_CASH) / STARTING_CASH * 100.0, 2
+                (entry["total_value"] - seed_cash) / seed_cash * 100.0, 2
             ),
             "rank": position,
         }
@@ -113,8 +121,14 @@ def get_current_season(conn: sqlite3.Connection) -> sqlite3.Row:
     ).fetchone()
 
 
-def create_leaderboard_router(price_cache: PriceCache, db_path: str) -> APIRouter:
-    """Factory: build the leaderboard APIRouter with injected dependencies."""
+def create_leaderboard_router(
+    price_cache: PriceCache, db_path: str, seed_cash: float = STARTING_CASH
+) -> APIRouter:
+    """Factory: build the leaderboard APIRouter with injected dependencies.
+
+    ``seed_cash`` is the return-percent baseline (CN-1: the active market
+    profile's seed cash; default keeps the US $10,000 behavior).
+    """
     router = APIRouter(prefix="/api/leaderboard", tags=["leaderboard"])
 
     @router.get("")
@@ -123,7 +137,7 @@ def create_leaderboard_router(price_cache: PriceCache, db_path: str) -> APIRoute
         conn = get_conn(db_path)
         try:
             season = get_current_season(conn)
-            entries = compute_standings(conn, price_cache)
+            entries = compute_standings(conn, price_cache, seed_cash)
         finally:
             conn.close()
         return {
