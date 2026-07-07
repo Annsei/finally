@@ -13,6 +13,8 @@ import { createChart, BaselineSeries, LineSeries } from 'lightweight-charts';
 import type { ISeriesApi, IChartApi, UTCTimestamp } from 'lightweight-charts';
 import { formatQuantity } from '@/lib/format';
 import { useUiStore } from '@/stores/uiStore';
+import { US_PROFILE, directionColors, type MarketProfile } from '@/lib/marketProfile';
+import { makeT, langFromLocale, type TFunction } from '@/lib/i18n';
 import type {
   BacktestRequest,
   BacktestResponse,
@@ -21,38 +23,70 @@ import type {
   RuleTriggerType,
 } from '@/types/market';
 
-const TRIGGERS: { key: RuleTriggerType; label: string }[] = [
-  { key: 'day_change_pct_below', label: 'Day % ≤' },
-  { key: 'day_change_pct_above', label: 'Day % ≥' },
-  { key: 'price_below', label: 'Price ≤ $' },
-  { key: 'price_above', label: 'Price ≥ $' },
+const TRIGGERS: { key: RuleTriggerType; labelKey: string }[] = [
+  { key: 'day_change_pct_below', labelKey: 'backtest.trigDayBelow' },
+  { key: 'day_change_pct_above', labelKey: 'backtest.trigDayAbove' },
+  { key: 'price_below', labelKey: 'backtest.trigPriceBelow' },
+  { key: 'price_above', labelKey: 'backtest.trigPriceAbove' },
 ];
 
 const RUN_CHOICES = [1, 10, 30] as const;
 
-const REASON_LABEL: Record<BacktestTradeReason, string> = {
-  trigger: 'entry',
-  take_profit: 'take profit',
-  stop_loss: 'stop loss',
-  horizon_end: 'horizon end',
+const REASON_KEY: Record<BacktestTradeReason, string> = {
+  trigger: 'backtest.reason.trigger',
+  take_profit: 'backtest.reason.take_profit',
+  stop_loss: 'backtest.reason.stop_loss',
+  horizon_end: 'backtest.reason.horizon_end',
 };
 
 const signed = (v: number, digits = 2) => `${v >= 0 ? '+' : ''}${v.toFixed(digits)}`;
 const pnlClass = (v: number) => (v >= 0 ? 'text-terminal-up' : 'text-terminal-down');
+
+// Direction fill tints for the equity canvas (lightweight-charts can't read CSS
+// vars). Above-baseline uses the "up" tint, below-baseline the "down" tint —
+// swapped on the A-share market. Mirrors PnLChart so the two charts agree.
+const G28 = 'rgba(34, 197, 94, 0.28)';
+const G03 = 'rgba(34, 197, 94, 0.03)';
+const R28 = 'rgba(239, 68, 68, 0.28)';
+const R03 = 'rgba(239, 68, 68, 0.03)';
+
+interface DirColors {
+  upHex: string;
+  downHex: string;
+  upFill1: string;
+  upFill2: string;
+  downFill1: string;
+  downFill2: string;
+}
+
+function equityColors(upIsRed: boolean): DirColors {
+  const { up: upHex, down: downHex } = directionColors(upIsRed);
+  return {
+    upHex,
+    downHex,
+    upFill1: upIsRed ? R28 : G28,
+    upFill2: upIsRed ? R03 : G03,
+    downFill1: upIsRed ? G03 : R03,
+    downFill2: upIsRed ? G28 : R28,
+  };
+}
 
 // Equity vs buy-and-hold chart — mounted only when a result exists, so the
 // chart is created fresh per mount (same lifecycle discipline as PnLChart).
 function EquityChart({
   equity,
   baseline,
+  colors,
 }: {
   equity: BacktestPoint[];
   baseline: BacktestPoint[];
+  colors: DirColors;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const equityRef = useRef<ISeriesApi<'Baseline'> | null>(null);
   const baselineRef = useRef<ISeriesApi<'Line'> | null>(null);
+  const { upHex, downHex, upFill1, upFill2, downFill1, downFill2 } = colors;
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -73,15 +107,16 @@ function EquityChart({
       timeScale: { borderColor: '#30363d', timeVisible: false },
     });
 
-    // Strategy equity: green above the $10k seed, red below (as in PnLChart)
+    // Strategy equity: profit-tint above the $10k seed, loss-tint below. Colours
+    // come from the market profile (swapped on A-shares), same as PnLChart.
     const equitySeries = chart.addSeries(BaselineSeries, {
       baseValue: { type: 'price', price: 10000 },
-      topLineColor: '#22c55e',
-      topFillColor1: 'rgba(34, 197, 94, 0.28)',
-      topFillColor2: 'rgba(34, 197, 94, 0.03)',
-      bottomLineColor: '#ef4444',
-      bottomFillColor1: 'rgba(239, 68, 68, 0.03)',
-      bottomFillColor2: 'rgba(239, 68, 68, 0.28)',
+      topLineColor: upHex,
+      topFillColor1: upFill1,
+      topFillColor2: upFill2,
+      bottomLineColor: downHex,
+      bottomFillColor1: downFill1,
+      bottomFillColor2: downFill2,
       lineWidth: 2,
     });
     // Buy & hold reference: muted dashed line
@@ -104,6 +139,18 @@ function EquityChart({
       baselineRef.current = null;
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Recolor when the market's direction colours resolve/change after mount.
+  useEffect(() => {
+    equityRef.current?.applyOptions({
+      topLineColor: upHex,
+      topFillColor1: upFill1,
+      topFillColor2: upFill2,
+      bottomLineColor: downHex,
+      bottomFillColor1: downFill1,
+      bottomFillColor2: downFill2,
+    });
+  }, [upHex, downHex, upFill1, upFill2, downFill1, downFill2]);
 
   useEffect(() => {
     if (!equityRef.current || !baselineRef.current) return;
@@ -140,7 +187,10 @@ function StatCard({
   );
 }
 
-export default function BacktestPanel() {
+export default function BacktestPanel({ profile = US_PROFILE }: { profile?: MarketProfile }) {
+  const t: TFunction = makeT(langFromLocale(profile.locale));
+  const sym = profile.currency_symbol;
+  const chartColors = equityColors(profile.up_is_red);
   const [ticker, setTicker] = useState('AAPL');
   const [triggerType, setTriggerType] = useState<RuleTriggerType>('day_change_pct_below');
   const [threshold, setThreshold] = useState('-2');
@@ -180,27 +230,27 @@ export default function BacktestPanel() {
 
     setError(null);
     if (!normalizedTicker || !/^[A-Z]+$/.test(normalizedTicker)) {
-      setError('Enter a valid ticker.');
+      setError(t('backtest.errTicker'));
       return;
     }
     if (!isFinite(thresholdNum) || (isPriceTrigger && thresholdNum <= 0)) {
-      setError(isPriceTrigger ? 'Price threshold must be greater than 0.' : 'Enter a valid threshold.');
+      setError(isPriceTrigger ? t('backtest.errThresholdPrice') : t('backtest.errThreshold'));
       return;
     }
     if (!isFinite(qtyNum) || qtyNum <= 0) {
-      setError('Quantity must be greater than 0.');
+      setError(t('backtest.errQty'));
       return;
     }
     if (!Number.isInteger(daysNum) || daysNum < 5 || daysNum > 120) {
-      setError('Days must be an integer between 5 and 120.');
+      setError(t('backtest.errDays'));
       return;
     }
     if (tpNum != null && (!isFinite(tpNum) || tpNum <= 0)) {
-      setError('Take profit % must be greater than 0 (or empty).');
+      setError(t('backtest.errTp'));
       return;
     }
     if (slNum != null && (!isFinite(slNum) || slNum <= 0)) {
-      setError('Stop loss % must be greater than 0 (or empty).');
+      setError(t('backtest.errSl'));
       return;
     }
 
@@ -228,7 +278,7 @@ export default function BacktestPanel() {
       }
       setResult((await res.json()) as BacktestResponse);
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Backtest failed');
+      setError(e instanceof Error ? e.message : t('backtest.errFailed'));
       setResult(null);
     } finally {
       setLoading(false);
@@ -248,7 +298,7 @@ export default function BacktestPanel() {
       <div className="flex items-end gap-2 flex-wrap">
         <div className="flex flex-col gap-1">
           <label htmlFor="bt-ticker" className={labelClass}>
-            Ticker
+            {t('tradebar.ticker')}
           </label>
           <input
             id="bt-ticker"
@@ -264,7 +314,7 @@ export default function BacktestPanel() {
 
         <div className="flex flex-col gap-1">
           <label htmlFor="bt-trigger" className={labelClass}>
-            Buy when
+            {t('backtest.buyWhen')}
           </label>
           <select
             id="bt-trigger"
@@ -275,9 +325,9 @@ export default function BacktestPanel() {
             disabled={loading}
             className={inputClass}
           >
-            {TRIGGERS.map((t) => (
-              <option key={t.key} value={t.key}>
-                {t.label}
+            {TRIGGERS.map((tr) => (
+              <option key={tr.key} value={tr.key}>
+                {t(tr.labelKey, { sym })}
               </option>
             ))}
           </select>
@@ -285,7 +335,7 @@ export default function BacktestPanel() {
 
         <div className="flex flex-col gap-1">
           <label htmlFor="bt-threshold" className={labelClass}>
-            {isPriceTrigger ? 'Price $' : 'Day %'}
+            {isPriceTrigger ? t('backtest.priceLabel', { sym }) : t('backtest.dayPct')}
           </label>
           <input
             id="bt-threshold"
@@ -301,7 +351,7 @@ export default function BacktestPanel() {
 
         <div className="flex flex-col gap-1">
           <label htmlFor="bt-qty" className={labelClass}>
-            Qty
+            {t('backtest.qty')}
           </label>
           <input
             id="bt-qty"
@@ -318,7 +368,7 @@ export default function BacktestPanel() {
 
         <div className="flex flex-col gap-1">
           <label htmlFor="bt-tp" className={labelClass}>
-            TP %
+            {t('backtest.tp')}
           </label>
           <input
             id="bt-tp"
@@ -336,7 +386,7 @@ export default function BacktestPanel() {
 
         <div className="flex flex-col gap-1">
           <label htmlFor="bt-sl" className={labelClass}>
-            SL %
+            {t('backtest.sl')}
           </label>
           <input
             id="bt-sl"
@@ -354,7 +404,7 @@ export default function BacktestPanel() {
 
         <div className="flex flex-col gap-1">
           <label htmlFor="bt-days" className={labelClass}>
-            Days
+            {t('backtest.days')}
           </label>
           <input
             id="bt-days"
@@ -371,7 +421,7 @@ export default function BacktestPanel() {
         </div>
 
         <div className="flex flex-col gap-1 pb-0.5">
-          <span className={labelClass}>Runs</span>
+          <span className={labelClass}>{t('backtest.runs')}</span>
           <div className="flex gap-1">
             {RUN_CHOICES.map((r) => (
               <button
@@ -400,14 +450,11 @@ export default function BacktestPanel() {
           className="px-4 py-1.5 text-xs font-semibold rounded min-h-[36px] text-white disabled:opacity-50 disabled:cursor-not-allowed transition-opacity"
           style={{ backgroundColor: '#753991' }}
         >
-          {loading ? 'Running…' : 'Run Backtest'}
+          {loading ? t('backtest.running') : t('backtest.run')}
         </button>
       </div>
 
-      <p className="mt-1.5 text-[10px] text-terminal-muted leading-tight">
-        Simulated history (GBM, the ticker&apos;s own volatility) — the trigger re-arms daily,
-        entries exit via TP/SL or at horizon end. Dashed line = buy &amp; hold the same $10k.
-      </p>
+      <p className="mt-1.5 text-[10px] text-terminal-muted leading-tight">{t('backtest.helper')}</p>
 
       {error && (
         <p data-testid="backtest-error" className="mt-1.5 text-xs text-terminal-down leading-tight">
@@ -421,29 +468,29 @@ export default function BacktestPanel() {
           {/* Stat cards */}
           <div className="grid grid-cols-4 lg:grid-cols-8 gap-1.5">
             <StatCard
-              label="Return"
+              label={t('backtest.statReturn')}
               value={`${signed(stats.total_return_pct)}%`}
               className={pnlClass(stats.total_return_pct)}
               testid="backtest-return"
             />
             <StatCard
-              label="Buy & Hold"
+              label={t('backtest.statBuyHold')}
               value={`${signed(stats.buy_hold_return_pct)}%`}
               className={pnlClass(stats.buy_hold_return_pct)}
             />
-            <StatCard label="Max DD" value={`−${stats.max_drawdown_pct.toFixed(2)}%`} />
+            <StatCard label={t('backtest.statMaxDd')} value={`−${stats.max_drawdown_pct.toFixed(2)}%`} />
             <StatCard
-              label="Win rate"
+              label={t('backtest.statWinRate')}
               value={stats.win_rate != null ? `${Math.round(stats.win_rate * 100)}%` : '—'}
             />
-            <StatCard label="Entries" value={String(stats.fires)} />
-            <StatCard label="Round trips" value={String(stats.round_trips)} />
+            <StatCard label={t('backtest.statEntries')} value={String(stats.fires)} />
+            <StatCard label={t('backtest.statRoundTrips')} value={String(stats.round_trips)} />
             <StatCard
-              label="Profit factor"
+              label={t('backtest.statProfitFactor')}
               value={stats.profit_factor != null ? stats.profit_factor.toFixed(2) : '—'}
             />
             <StatCard
-              label="Final equity"
+              label={t('backtest.statFinalEquity')}
               value={`$${stats.final_equity.toLocaleString('en-US', {
                 minimumFractionDigits: 2,
                 maximumFractionDigits: 2,
@@ -497,7 +544,11 @@ export default function BacktestPanel() {
 
           {/* Equity vs buy & hold */}
           <div className="mt-2">
-            <EquityChart equity={result.equity_curve} baseline={result.baseline_curve} />
+            <EquityChart
+              equity={result.equity_curve}
+              baseline={result.baseline_curve}
+              colors={chartColors}
+            />
           </div>
 
           {/* Trades blotter */}
@@ -506,39 +557,39 @@ export default function BacktestPanel() {
               <table data-testid="backtest-trades" className="w-full text-xs border-collapse">
                 <thead>
                   <tr className="text-terminal-muted border-b border-terminal-border">
-                    <th className="text-left py-1 pl-1 font-semibold">Time</th>
-                    <th className="text-left py-1 font-semibold">Side</th>
-                    <th className="text-right py-1 font-semibold">Qty</th>
-                    <th className="text-right py-1 font-semibold">Price</th>
-                    <th className="text-left py-1 pl-3 font-semibold">Reason</th>
-                    <th className="text-right py-1 pr-1 font-semibold">P&L</th>
+                    <th className="text-left py-1 pl-1 font-semibold">{t('backtest.colTime')}</th>
+                    <th className="text-left py-1 font-semibold">{t('backtest.colSide')}</th>
+                    <th className="text-right py-1 font-semibold">{t('backtest.colQty')}</th>
+                    <th className="text-right py-1 font-semibold">{t('backtest.colPrice')}</th>
+                    <th className="text-left py-1 pl-3 font-semibold">{t('backtest.colReason')}</th>
+                    <th className="text-right py-1 pr-1 font-semibold">{t('backtest.colPnl')}</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {result.trades.map((t, i) => (
+                  {result.trades.map((tr, i) => (
                     <tr key={i} className="border-b border-terminal-border">
                       <td className="py-1 pl-1 tabular-nums text-terminal-muted">
-                        {new Date(t.time * 1000).toLocaleDateString('en-US', {
+                        {new Date(tr.time * 1000).toLocaleDateString('en-US', {
                           month: 'short',
                           day: 'numeric',
                         })}
                       </td>
                       <td
                         className={`py-1 font-semibold uppercase ${
-                          t.side === 'buy' ? 'text-terminal-up' : 'text-terminal-down'
+                          tr.side === 'buy' ? 'text-terminal-up' : 'text-terminal-down'
                         }`}
                       >
-                        {t.side}
+                        {tr.side}
                       </td>
-                      <td className="text-right py-1 tabular-nums">{formatQuantity(t.quantity)}</td>
-                      <td className="text-right py-1 tabular-nums">${t.price.toFixed(2)}</td>
-                      <td className="py-1 pl-3 text-terminal-muted">{REASON_LABEL[t.reason]}</td>
+                      <td className="text-right py-1 tabular-nums">{formatQuantity(tr.quantity)}</td>
+                      <td className="text-right py-1 tabular-nums">${tr.price.toFixed(2)}</td>
+                      <td className="py-1 pl-3 text-terminal-muted">{t(REASON_KEY[tr.reason])}</td>
                       <td
                         className={`text-right py-1 pr-1 tabular-nums ${
-                          t.pnl != null ? pnlClass(t.pnl) : 'text-terminal-muted'
+                          tr.pnl != null ? pnlClass(tr.pnl) : 'text-terminal-muted'
                         }`}
                       >
-                        {t.pnl != null ? `${signed(t.pnl)}` : '—'}
+                        {tr.pnl != null ? `${signed(tr.pnl)}` : '—'}
                       </td>
                     </tr>
                   ))}
@@ -550,9 +601,7 @@ export default function BacktestPanel() {
       )}
 
       {!result && !error && !loading && (
-        <p className="mt-3 text-xs text-terminal-muted">
-          Validate a strategy before arming it live — or click “test” on a rule in the Rules tab.
-        </p>
+        <p className="mt-3 text-xs text-terminal-muted">{t('backtest.empty')}</p>
       )}
     </div>
   );

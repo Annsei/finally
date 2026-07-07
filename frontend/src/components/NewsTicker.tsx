@@ -9,6 +9,7 @@
 import useSWR from 'swr';
 import { fetcher } from '@/lib/fetcher';
 import type { MarketEvent, MarketEventsResponse } from '@/types/market';
+import { useT } from '@/lib/i18n';
 
 function formatTime(ts: number): string {
   const d = new Date(ts * 1000);
@@ -16,7 +17,9 @@ function formatTime(ts: number): string {
 }
 
 function EventItem({ ev }: { ev: MarketEvent }) {
-  const color = ev.direction === 'up' ? '#22c55e' : '#ef4444';
+  // Direction colour flips with the market (CSS var); the news feed reads as
+  // green-up / red-down on US, red-up / green-down on the A-share market.
+  const color = ev.direction === 'up' ? 'var(--color-up)' : 'var(--color-down)';
   return (
     <span className="inline-flex items-baseline gap-1 px-4 text-xs" data-testid={`news-item-${ev.id}`}>
       <span className="text-terminal-muted tabular-nums">{formatTime(ev.timestamp)}</span>
@@ -28,6 +31,7 @@ function EventItem({ ev }: { ev: MarketEvent }) {
 }
 
 export default function NewsTicker() {
+  const t = useT();
   const { data } = useSWR<MarketEventsResponse>('/api/market/events', fetcher, {
     refreshInterval: 5000,
   });
@@ -40,7 +44,7 @@ export default function NewsTicker() {
     >
       {events.length === 0 ? (
         <span className="px-4 text-xs text-terminal-muted">
-          Market events appear here — watching for unusual moves…
+          {t('news.empty')}
         </span>
       ) : (
         <div className="news-ticker-track">

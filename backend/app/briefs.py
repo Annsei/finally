@@ -54,6 +54,7 @@ from datetime import datetime, timezone
 from app.db.connection import get_conn
 from app.market.cache import PriceCache
 from app.market.models import MarketEvent
+from app.market.profiles import MarketProfile
 from app.market.seed_prices import asset_class_for
 
 logger = logging.getLogger(__name__)
@@ -102,6 +103,37 @@ NARRATIVE_SYSTEM_PROMPT = (
     "surrounding quotes, no JSON, no markdown, no emoji."
 )
 
+# Chinese (zh-CN) variants selected when the active profile's locale is
+# 'zh-CN' (CN-3). The brief version injects A-share context (整手 100-share
+# lots, T+1, 印花税) so suggestions stay legal on this market; both keep the
+# same length caps and plain-text rules as their English counterparts. With
+# no profile or an 'en-US' locale the English prompts above are used
+# byte-for-byte and the English mock text is unchanged.
+BRIEF_SYSTEM_PROMPT_ZH = (
+    "你是 FinAlly，一个 AI 交易助手。用户持有或关注的某只股票刚刚出现异动。"
+    f"用恰好一句、不超过 {BRIEF_MAX_CHARS} 个字符的简短有力的话回复——纯文本，"
+    "不要 JSON、不要 markdown。这是 A 股市场：买入须整手（100 股整数倍），"
+    "T+1 交收，卖出计印花税。只建议本平台（仅做多）支持的操作：买入股票、"
+    "卖出已持有股票、限价/止损单、常驻规则、自选调整。绝不建议卖空、期权"
+    "或融资融券。"
+)
+
+NARRATIVE_SYSTEM_PROMPT_ZH = (
+    "你是市场模拟器内的一条财经新闻快讯。给定一条模板化的市场事件标题，写出"
+    f"恰好一条不超过 {NARRATIVE_MAX_CHARS} 个字符的有力的新闻式标题，用一个"
+    "貌似合理但明显虚构、模拟的原因解释此次波动（这是虚拟资金——绝不引用真实"
+    "的时事）。仅纯文本：不要引号、不要 JSON、不要 markdown、不要表情符号。"
+)
+
+
+def _locale_is_zh(profile: MarketProfile | None) -> bool:
+    """True when the active market profile localizes AI text to Chinese (CN-3).
+
+    None (no profile) or an 'en-US' locale keeps the English prompts and
+    English deterministic mock text byte-for-byte.
+    """
+    return profile is not None and profile.locale == "zh-CN"
+
 
 @dataclass
 class BriefWatcherState:
@@ -136,6 +168,7 @@ async def _generate_brief_text(
     price_cache: PriceCache,
     position_row: sqlite3.Row | None,
     event: MarketEvent,
+    profile: MarketProfile | None = None,
 ) -> str | None:
     """One-sentence AI brief for a market event, or None on any LLM failure.
 
@@ -144,8 +177,17 @@ async def _generate_brief_text(
     the ticker (qty / avg cost / unrealized P&L) or "watching, no position",
     and the day change — via LiteLLM -> OpenRouter (Cerebras), plain text.
     Errors are logged and reported as None; the caller skips the event.
+
+    On a 'zh-CN' profile locale (CN-3) the system prompt and the deterministic
+    mock text are Chinese; None/US keeps both byte-identical to today.
     """
+    is_zh = _locale_is_zh(profile)
     if os.getenv("LLM_MOCK", "false").lower() == "true":
+        if is_zh:
+            return (
+                f"[模拟简报] {event.ticker} 异动 {event.change_percent:+.1f}%"
+                " —— 请检视你的持仓。"
+            )
         return (
             f"[MOCK BRIEF] {event.ticker} moved {event.change_percent:+.1f}%"
             " — review your exposure."
@@ -170,7 +212,10 @@ async def _generate_brief_text(
     )
 
     messages = [
-        {"role": "system", "content": BRIEF_SYSTEM_PROMPT},
+        {
+            "role": "system",
+            "content": BRIEF_SYSTEM_PROMPT_ZH if is_zh else BRIEF_SYSTEM_PROMPT,
+        },
         {
             "role": "user",
             "content": f"Market event: {event.headline}\n{position_line}\n{day_line}",
@@ -210,6 +255,7 @@ async def _generate_brief_text(
 async def _generate_narrative_text(
     price_cache: PriceCache,
     event: MarketEvent,
+    profile: MarketProfile | None = None,
 ) -> str | None:
     """One-line news-style narrative for a market event, or None on failure.
 
@@ -218,9 +264,13 @@ async def _generate_narrative_text(
     day change, and asset class — via LiteLLM -> OpenRouter (Cerebras), plain
     text, asking for a single punchy simulated-cause headline (<= 90 chars).
     Errors are logged and reported as None; the caller skips the event.
+
+    On a 'zh-CN' profile locale (CN-3) the system prompt and the deterministic
+    mock prefix are Chinese; None/US keeps both byte-identical to today.
     """
+    is_zh = _locale_is_zh(profile)
     if os.getenv("LLM_MOCK", "false").lower() == "true":
-        return f"[MOCK NEWS] {event.headline}"
+        return f"[模拟新闻] {event.headline}" if is_zh else f"[MOCK NEWS] {event.headline}"
 
     quote = price_cache.get(event.ticker)
     day_line = (
@@ -229,7 +279,10 @@ async def _generate_narrative_text(
     asset_class = quote.asset_class if quote else asset_class_for(event.ticker)
 
     messages = [
-        {"role": "system", "content": NARRATIVE_SYSTEM_PROMPT},
+        {
+            "role": "system",
+            "content": NARRATIVE_SYSTEM_PROMPT_ZH if is_zh else NARRATIVE_SYSTEM_PROMPT,
+        },
         {
             "role": "user",
             "content": (
@@ -276,6 +329,7 @@ async def _generate_narrative_text(
 async def process_events_for_narratives_once(
     price_cache: PriceCache,
     state: NarrativeEnricherState,
+    profile: MarketProfile | None = None,
     now: float | None = None,
 ) -> dict[str, int]:
     """One enrichment pass: narrate every new, unthrottled market event.
@@ -330,7 +384,7 @@ async def process_events_for_narratives_once(
             counts["skipped_throttled"] += 1
             continue
 
-        text = await _generate_narrative_text(price_cache, event)
+        text = await _generate_narrative_text(price_cache, event, profile)
         if text is None:
             counts["skipped_llm_error"] += 1
             continue
@@ -352,6 +406,7 @@ async def process_events_for_briefs_once(
     price_cache: PriceCache,
     db_path: str,
     state: BriefWatcherState,
+    profile: MarketProfile | None = None,
     now: float | None = None,
 ) -> dict[str, int]:
     """One watcher pass: brief every new, relevant, unthrottled market event.
@@ -447,7 +502,9 @@ async def process_events_for_briefs_once(
                 ),
                 (ticker, *eligible),
             ).fetchone()
-            text = await _generate_brief_text(price_cache, position_row, event)
+            text = await _generate_brief_text(
+                price_cache, position_row, event, profile
+            )
             if text is None:
                 counts["skipped_llm_error"] += 1
                 continue
@@ -475,12 +532,17 @@ async def briefs_watch_loop(
     price_cache: PriceCache,
     db_path: str,
     interval: float = BRIEFS_WATCH_INTERVAL_SECONDS,
+    profile: MarketProfile | None = None,
 ) -> None:
     """Background task: enrich event narratives and post AI briefs.
 
     Each cycle runs the narrative-enrichment pass (M3.2a — all tickers) and
     then the briefs pass (M2.3 — held/watched tickers only). The passes are
     error-isolated from each other: a failure in one never blocks the other.
+
+    ``profile`` (CN-3) is threaded into both passes so the AI writes briefs
+    and narratives in the market's language; None/US keeps the English prompts
+    and English mock text unchanged.
 
     Runs indefinitely until cancelled via ``asyncio.CancelledError``. Any
     other exception (DB lock, cache hiccup) is logged and the loop continues
@@ -490,13 +552,15 @@ async def briefs_watch_loop(
     narrative_state = NarrativeEnricherState()
     while True:
         try:
-            await process_events_for_narratives_once(price_cache, narrative_state)
+            await process_events_for_narratives_once(
+                price_cache, narrative_state, profile
+            )
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.exception("Narrative enrichment pass error — will retry in %ss", interval)
         try:
-            await process_events_for_briefs_once(price_cache, db_path, state)
+            await process_events_for_briefs_once(price_cache, db_path, state, profile)
         except asyncio.CancelledError:
             raise
         except Exception:

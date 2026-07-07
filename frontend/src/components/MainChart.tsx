@@ -28,6 +28,7 @@ import useSWR from 'swr';
 import { useTicker } from '@/stores/priceStore';
 import { fetcher } from '@/lib/fetcher';
 import { aggregateBars, applyTick, type Bar } from '@/lib/candles';
+import { useMarketProfile, directionColors } from '@/lib/marketProfile';
 import type { MarketHistoryResponse } from '@/types/market';
 
 interface Props {
@@ -44,11 +45,10 @@ const MAX_1S_BARS = 7200;
 const MAX_BARS = 600;
 const TRIM_THRESHOLD = 720;
 
-const UP = '#22c55e';
-const DOWN = '#ef4444';
-
-const volumeColor = (b: Bar) =>
-  b.close >= b.open ? 'rgba(34, 197, 94, 0.5)' : 'rgba(239, 68, 68, 0.5)';
+// Volume tints: the "up" tint colours advancing bars, the "down" tint declining
+// bars. Which hex is up/down is decided per-market via directionColors.
+const GREEN_VOL = 'rgba(34, 197, 94, 0.5)';
+const RED_VOL = 'rgba(239, 68, 68, 0.5)';
 
 const toCandle = (b: Bar): CandlestickData<UTCTimestamp> => ({
   time: b.time as UTCTimestamp,
@@ -58,10 +58,10 @@ const toCandle = (b: Bar): CandlestickData<UTCTimestamp> => ({
   close: b.close,
 });
 
-const toVolume = (b: Bar): HistogramData<UTCTimestamp> => ({
+const toVolume = (b: Bar, upVol: string, downVol: string): HistogramData<UTCTimestamp> => ({
   time: b.time as UTCTimestamp,
   value: b.volume,
-  color: volumeColor(b),
+  color: b.close >= b.open ? upVol : downVol,
 });
 
 interface HoverBar {
@@ -84,6 +84,13 @@ export default function MainChart({ ticker }: Props) {
   const [hover, setHover] = useState<HoverBar | null>(null);
 
   const priceUpdate = useTicker(ticker);
+
+  // Direction colours (canvas can't read CSS vars): US → green up / red down;
+  // A-share → the two swap. Candle series options + volume tints use these.
+  const profile = useMarketProfile();
+  const { up: UP, down: DOWN } = directionColors(profile.up_is_red);
+  const upVol = profile.up_is_red ? RED_VOL : GREEN_VOL;
+  const downVol = profile.up_is_red ? GREEN_VOL : RED_VOL;
 
   // Backfill — SWR key changes with the ticker; no focus revalidation (the
   // live stream keeps the chart current once backfill lands)
@@ -179,6 +186,19 @@ export default function MainChart({ ticker }: Props) {
     setHover(null);
   }, [ticker]);
 
+  // Recolor candles when the market's direction colours resolve/change (the
+  // mount effect ran with whatever colours were available then).
+  useEffect(() => {
+    candleSeriesRef.current?.applyOptions({
+      upColor: UP,
+      downColor: DOWN,
+      borderUpColor: UP,
+      borderDownColor: DOWN,
+      wickUpColor: UP,
+      wickDownColor: DOWN,
+    });
+  }, [UP, DOWN]);
+
   // Backfill arrival / timeframe switch: rebuild the display series.
   // On backfill the local 1s bars are replaced wholesale — the server ring
   // buffer is fed by the same funnel as SSE, so it already contains any
@@ -191,9 +211,9 @@ export default function MainChart({ ticker }: Props) {
     displayBarsRef.current = display;
     if (display.length) {
       candleSeriesRef.current?.setData(display.map(toCandle));
-      volumeSeriesRef.current?.setData(display.map(toVolume));
+      volumeSeriesRef.current?.setData(display.map((b) => toVolume(b, upVol, downVol)));
     }
-  }, [history, timeframe, ticker]);
+  }, [history, timeframe, ticker, upVol, downVol]);
 
   // Live tick: fold into 1s bars and the display bars, update both series
   useEffect(() => {
@@ -217,12 +237,15 @@ export default function MainChart({ ticker }: Props) {
       // Batched trim: drop oldest bars, rebase both series on the capped buffer
       displayBarsRef.current = displayBarsRef.current.slice(-MAX_BARS);
       candleSeriesRef.current.setData(displayBarsRef.current.map(toCandle));
-      volumeSeriesRef.current.setData(displayBarsRef.current.map(toVolume));
+      volumeSeriesRef.current.setData(displayBarsRef.current.map((b) => toVolume(b, upVol, downVol)));
     } else {
       candleSeriesRef.current.update(toCandle(bar));
-      volumeSeriesRef.current.update(toVolume(bar));
+      volumeSeriesRef.current.update(toVolume(bar, upVol, downVol));
     }
-  }, [priceUpdate, timeframe]);
+    // upVol/downVol intentionally excluded — re-running on a colour change would
+    // re-apply the same tick and double-count its volume; live ticks pick up the
+    // current colours through the closure, and past bars recolor on backfill.
+  }, [priceUpdate, timeframe]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Title bar: crosshair OHLCV legend when hovering, otherwise live price +
   // day change vs previous close, colored by day direction

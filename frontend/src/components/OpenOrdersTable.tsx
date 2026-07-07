@@ -10,6 +10,7 @@ import useSWR from 'swr';
 import { fetcher } from '@/lib/fetcher';
 import { formatQuantity } from '@/lib/format';
 import type { OrdersResponse } from '@/types/market';
+import { useT } from '@/lib/i18n';
 
 function formatTime(iso: string): string {
   const d = new Date(iso);
@@ -17,6 +18,7 @@ function formatTime(iso: string): string {
 }
 
 export default function OpenOrdersTable() {
+  const t = useT();
   const { data, mutate } = useSWR<OrdersResponse>('/api/portfolio/orders?status=open', fetcher, {
     refreshInterval: 3000,
   });
@@ -43,8 +45,7 @@ export default function OpenOrdersTable() {
   if (!orders || orders.length === 0) {
     return (
       <div className="p-4 text-terminal-muted text-xs">
-        No open orders. Place a limit order from the trade bar — it rests here until the
-        price crosses your limit.
+        {t('orders.empty')}
         {cancelError && (
           <p data-testid="orders-cancel-error" className="mt-1 text-terminal-down">
             {cancelError}
@@ -59,13 +60,13 @@ export default function OpenOrdersTable() {
       <table data-testid="open-orders-table" className="w-full text-xs border-collapse">
         <thead>
           <tr className="text-terminal-muted border-b border-terminal-border">
-            <th className="text-left py-1 pl-1 font-semibold">Time</th>
-            <th className="text-left py-1 font-semibold">Side</th>
-            <th className="text-left py-1 font-semibold">Ticker</th>
-            <th className="text-right py-1 font-semibold">Qty</th>
-            <th className="text-left py-1 pl-2 font-semibold">Kind</th>
-            <th className="text-right py-1 font-semibold">Limit</th>
-            <th className="text-right py-1 font-semibold">Stop</th>
+            <th className="text-left py-1 pl-1 font-semibold">{t('orders.colTime')}</th>
+            <th className="text-left py-1 font-semibold">{t('orders.colSide')}</th>
+            <th className="text-left py-1 font-semibold">{t('orders.colTicker')}</th>
+            <th className="text-right py-1 font-semibold">{t('orders.colQty')}</th>
+            <th className="text-left py-1 pl-2 font-semibold">{t('orders.colKind')}</th>
+            <th className="text-right py-1 font-semibold">{t('orders.colLimit')}</th>
+            <th className="text-right py-1 font-semibold">{t('orders.colStop')}</th>
             <th className="text-right py-1 pr-1 font-semibold" aria-label="Cancel column" />
           </tr>
         </thead>

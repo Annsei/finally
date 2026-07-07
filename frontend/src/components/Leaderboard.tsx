@@ -10,6 +10,9 @@ import { useEffect, useRef, useState } from 'react';
 import useSWR from 'swr';
 import { fetcher } from '@/lib/fetcher';
 import { hardReload } from '@/lib/reload';
+import { useMarketProfile } from '@/lib/marketProfile';
+import { useT } from '@/lib/i18n';
+import { formatMoney } from '@/lib/format';
 import type { LeaderboardResponse, AuthMeResponse } from '@/types/market';
 
 function formatDate(iso: string): string {
@@ -18,6 +21,9 @@ function formatDate(iso: string): string {
 }
 
 export default function Leaderboard() {
+  const t = useT();
+  const profile = useMarketProfile();
+  const money = { currency_symbol: profile.currency_symbol, locale: profile.locale };
   const { data, mutate } = useSWR<LeaderboardResponse>('/api/leaderboard', fetcher, {
     refreshInterval: 10_000,
   });
@@ -61,14 +67,14 @@ export default function Leaderboard() {
   };
 
   if (!data) {
-    return <div className="p-4 text-terminal-muted text-xs">Loading leaderboard…</div>;
+    return <div className="p-4 text-terminal-muted text-xs">{t('board.loading')}</div>;
   }
 
   return (
     <div className="p-3" data-testid="leaderboard">
       <div className="flex items-center justify-between mb-2">
         <span className="text-[10px] font-semibold uppercase tracking-wider text-terminal-muted">
-          Season {data.season.id} · since {formatDate(data.season.started_at)}
+          {t('board.seasonSince', { id: data.season.id, date: formatDate(data.season.started_at) })}
         </span>
         <button
           type="button"
@@ -80,7 +86,7 @@ export default function Leaderboard() {
               : 'text-terminal-muted border-terminal-border hover:text-terminal-text'
           }`}
         >
-          {confirming ? 'Confirm reset?' : 'Reset season'}
+          {confirming ? t('board.confirmReset') : t('board.resetSeason')}
         </button>
       </div>
 
@@ -88,9 +94,9 @@ export default function Leaderboard() {
         <thead>
           <tr className="text-terminal-muted border-b border-terminal-border">
             <th className="text-left py-1 pl-1 font-semibold w-10">#</th>
-            <th className="text-left py-1 font-semibold">Trader</th>
-            <th className="text-right py-1 font-semibold">Value</th>
-            <th className="text-right py-1 pr-1 font-semibold">Return</th>
+            <th className="text-left py-1 font-semibold">{t('board.colTrader')}</th>
+            <th className="text-right py-1 font-semibold">{t('board.colValue')}</th>
+            <th className="text-right py-1 pr-1 font-semibold">{t('board.colReturn')}</th>
           </tr>
         </thead>
         <tbody>
@@ -113,10 +119,10 @@ export default function Leaderboard() {
                 <td className="py-1 pl-1 tabular-nums text-terminal-muted">{e.rank}</td>
                 <td className="py-1 font-semibold text-terminal-text">
                   {e.name}
-                  {isMe && <span className="ml-1 text-terminal-accent text-[10px]">(you)</span>}
+                  {isMe && <span className="ml-1 text-terminal-accent text-[10px]">{t('board.you')}</span>}
                 </td>
                 <td className="text-right py-1 tabular-nums text-terminal-text">
-                  ${e.total_value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  {formatMoney(e.total_value, money)}
                 </td>
                 <td className={`text-right py-1 pr-1 tabular-nums ${retColor}`}>
                   {e.return_pct > 0 ? '+' : ''}

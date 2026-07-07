@@ -109,6 +109,62 @@ REVIEW_SYSTEM_PROMPT = (
     "concrete suggestion. Be concise and data-driven."
 )
 
+# Chinese (zh-CN) variant of SYSTEM_PROMPT, selected when the active market
+# profile's locale is 'zh-CN' (CN-3). It injects A-share trading constraints
+# (整手 100-share lots, T+1 settlement, ¥ currency, 涨跌停 price limits, 印花税
+# stamp tax) so the AI never emits trades the backend would reject, while the
+# structured-output schema keys and enum values stay ENGLISH (trades / orders /
+# rules / backtests / watchlist_changes, and every kind/trigger_type/action/
+# side value) — the frontend and validators need zero adaptation, only the
+# conversational message language changes.
+SYSTEM_PROMPT_ZH = (
+    "你是 FinAlly，一个 AI 交易助手。回答简洁、以数据为依据。用户要求时执行交易。"
+    "始终以合法的结构化 JSON 回复。\n\n"
+    "这是中国 A 股市场（沪深两市）。你建议或执行的所有操作都必须符合 A 股交易"
+    "规则，否则会被系统拒绝：\n"
+    "- 买入数量必须为整手，即 100 股的整数倍（1 手 = 100 股）；卖出可以是任意"
+    "股数（含零股）。\n"
+    "- T+1 交收：当日买入的股票，次日方可卖出。\n"
+    "- 货币单位为人民币 ¥；卖出需缴纳印花税，买卖双向收取佣金。\n"
+    "- 个股有涨跌停限制（主板 ±10%，创业板/科创板 ±20%）；委托价触及涨停或"
+    "跌停时可能无法成交。\n\n"
+    "你通过 JSON 响应中的五个动作数组来行动。数组的键名与所有枚举值一律使用"
+    "英文原文，切勿翻译：\n"
+    "- 'trades'：即时市价单 {ticker, side, quantity}。\n"
+    "- 'orders'：挂单 limit/stop/stop-limit 委托 {ticker, side, quantity, kind, "
+    "limit_price?, stop_price?, time_in_force?}。kind 取 'limit'（须给 "
+    "limit_price）、'stop'（须给 stop_price，触发后市价成交）、'stop_limit'"
+    "（两者都给）之一。time_in_force 取 'gtc'（默认）或 'day'。只要用户给出触发"
+    "价就用挂单：“跌到 Y 就买”表示以 limit_price Y 的限价买单；“在 Z 挂止损"
+    "保护”表示以 stop_price Z 的卖出止损单；“到 W 止盈”表示在 W 的限价卖单。"
+    "卖出止损价须低于现价，买入止损价须高于现价。挂单时已可成交的限价单会立即"
+    "成交。\n"
+    "- 'rules'：常驻的一次性自动化规则 {ticker, trigger_type, threshold, side, "
+    "quantity, description}，持续对实时行情求值。trigger_type 恰好取 "
+    "'price_above'、'price_below'、'day_change_pct_above'、'day_change_pct_below' "
+    "之一。threshold 对 price_* 触发是价格（¥），对 day_change_pct_* 触发是百分比"
+    "（下跌为负——“000858 今天跌 3% 就买 100 股”对应 trigger_type "
+    "'day_change_pct_below'、threshold -3）。规则触发时执行一次市价交易，随后"
+    "置为 'fired' 状态，直到用户重新启用。务必写清楚人类可读的 description，"
+    "例如“当日跌幅 <= -3% 时买入 100 股 000858”。\n"
+    "- 'backtests'：策略回测 {ticker, trigger_type, threshold, quantity, "
+    "take_profit_pct?, stop_loss_pct?, days?, runs?}，在合成历史上模拟。仅支持"
+    "买入建仓——没有 side 字段；退出用 take_profit_pct/stop_loss_pct 建模（相对"
+    "建仓价上/下浮的百分比，给定时均须 > 0）。trigger_type/threshold 语义同 "
+    "'rules'。days 默认 30（5-120），runs 默认 1（1-50 次蒙特卡洛重跑）。当用户"
+    "要求回测某策略（“回测”“backtest”）或询问某规则/策略过去表现时使用。\n"
+    "- 'watchlist_changes'：{ticker, action}，action 取 'add' 或 'remove'。"
+)
+
+# Chinese (zh-CN) variant of REVIEW_SYSTEM_PROMPT (CN-3) — plain-text A-share
+# daily review; currency is ¥. Selected on locale 'zh-CN'.
+REVIEW_SYSTEM_PROMPT_ZH = (
+    "你是 FinAlly，一个 AI 交易助手，正在撰写用户的每日复盘。用纯文本回复"
+    "（不要 JSON、不要 markdown 标题），3-6 句话：今天发生了什么、最好与最差"
+    "的决策、以及一条具体的建议。回答简洁、以数据为依据。这是 A 股市场，货币"
+    "为 ¥。"
+)
+
 
 # ---------------------------------------------------------------------------
 # Pydantic models
@@ -432,6 +488,15 @@ def create_chat_router(
         A configured FastAPI APIRouter ready to be registered with ``app.include_router``.
     """
     router = APIRouter(prefix="/api/chat", tags=["chat"])
+    # CN-3: select the AI's conversational language by the profile locale. With
+    # no profile or an 'en-US' locale the existing English prompts and English
+    # LLM_MOCK text are used byte-for-byte; only a 'zh-CN' locale switches to
+    # the Chinese prompts and the Chinese deterministic mock branches. The
+    # structured-output schema is unaffected — action keys and enums stay
+    # English in both languages.
+    is_zh = profile is not None and profile.locale == "zh-CN"
+    system_prompt = SYSTEM_PROMPT_ZH if is_zh else SYSTEM_PROMPT
+    review_system_prompt = REVIEW_SYSTEM_PROMPT_ZH if is_zh else REVIEW_SYSTEM_PROMPT
     universe = profile.universe if profile is not None else None
     # Mirror routes/backtest.py: AI-run backtests open the same account the
     # REST route does — the active profile's seed cash (CN=¥100k), else the
@@ -540,7 +605,7 @@ def create_chat_router(
             messages: list[dict] = [
                 {
                     "role": "system",
-                    "content": f"{SYSTEM_PROMPT}\n\nCurrent portfolio:\n{context}",
+                    "content": f"{system_prompt}\n\nCurrent portfolio:\n{context}",
                 }
             ]
             messages.extend(
@@ -551,10 +616,49 @@ def create_chat_router(
             # Step 4: Get LLM response — mock path (D-06/D-07) or real LiteLLM call
             if os.getenv("LLM_MOCK", "false").lower() == "true":
                 # Construct deterministic responses; fall through to auto-exec
-                # (D-07). Messages mentioning "backtest" get the M5 backtest
-                # mock; everything else keeps the original PYPL/AAPL payload
+                # (D-07). On a 'zh-CN' locale (CN-3) the Chinese mock branch
+                # translates ONLY the conversational message — the action
+                # arrays (tickers, sides, quantities) are byte-identical to the
+                # US mocks below, so downstream execution is unchanged and the
+                # profile still governs it (e.g. the buy-5-AAPL non-lot order is
+                # rejected under the CN 整手 rule). The '回测'/'backtest' keyword
+                # both route to the backtest branch. With no/US locale the
+                # English payload below is byte-identical to today (the existing
+                # E2E command depends on it).
+                if is_zh:
+                    if "backtest" in body.message.lower() or "回测" in body.message:
+                        parsed = ChatResponse(
+                            message=(
+                                "[模拟] 回测完成：已在 20 个模拟交易日上测试 NVDA "
+                                "逢跌买入策略。"
+                            ),
+                            backtests=[
+                                BacktestInstruction(
+                                    ticker="NVDA",
+                                    trigger_type="day_change_pct_below",
+                                    threshold=-3,
+                                    quantity=5,
+                                    take_profit_pct=5,
+                                    stop_loss_pct=3,
+                                    days=20,
+                                    runs=1,
+                                )
+                            ],
+                        )
+                    else:
+                        parsed = ChatResponse(
+                            message="已将 PYPL 加入你的自选，并为你买入 5 股 AAPL。",
+                            trades=[
+                                TradeInstruction(ticker="AAPL", side="buy", quantity=5)
+                            ],
+                            watchlist_changes=[
+                                WatchlistChange(ticker="PYPL", action="add")
+                            ],
+                        )
+                # Messages mentioning "backtest" get the M5 backtest mock;
+                # everything else keeps the original PYPL/AAPL payload
                 # byte-identical for the E2E suite.
-                if "backtest" in body.message.lower():
+                elif "backtest" in body.message.lower():
                     parsed = ChatResponse(
                         message=(
                             "[MOCK] Backtest complete: NVDA dip-buy strategy "
@@ -838,15 +942,23 @@ def create_chat_router(
             context, trade_count = _assemble_review_context(conn, price_cache, user_id)
 
             if os.getenv("LLM_MOCK", "false").lower() == "true":
-                text = (
-                    f"[MOCK REVIEW] You made {trade_count} trades today. "
-                    "Review your positions and risk before the next session."
-                )
+                # CN-3: Chinese deterministic review on a 'zh-CN' locale; the
+                # English mock stays byte-identical otherwise.
+                if is_zh:
+                    text = (
+                        f"[模拟复盘] 你今天进行了 {trade_count} 笔交易。请在下一个"
+                        "交易时段开始前检视你的持仓与风险。"
+                    )
+                else:
+                    text = (
+                        f"[MOCK REVIEW] You made {trade_count} trades today. "
+                        "Review your positions and risk before the next session."
+                    )
             else:
                 from litellm import completion  # lazy import — never reached when mocked
 
                 messages = [
-                    {"role": "system", "content": REVIEW_SYSTEM_PROMPT},
+                    {"role": "system", "content": review_system_prompt},
                     {
                         "role": "user",
                         "content": f"Write my daily review.\n\n{context}",

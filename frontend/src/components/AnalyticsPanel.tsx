@@ -11,6 +11,7 @@ import useSWR from 'swr';
 import { fetcher } from '@/lib/fetcher';
 import { formatQuantity } from '@/lib/format';
 import type { AnalyticsResponse, AnalyticsTradeRef } from '@/types/market';
+import { useT, type TFunction } from '@/lib/i18n';
 
 const SECTOR_COLORS: Record<string, string> = {
   tech: '#209dd7',
@@ -45,17 +46,19 @@ function StatTile({
   );
 }
 
-function tradeLine(t: AnalyticsTradeRef): string {
-  return `${t.side === 'buy' ? 'Buy' : 'Sell'} ${formatQuantity(t.quantity)} ${t.ticker} @ $${t.price.toFixed(2)}`;
+function tradeLine(t: TFunction, trade: AnalyticsTradeRef): string {
+  const verb = trade.side === 'buy' ? t('analytics.buy') : t('analytics.sell');
+  return `${verb} ${formatQuantity(trade.quantity)} ${trade.ticker} @ $${trade.price.toFixed(2)}`;
 }
 
 export default function AnalyticsPanel() {
+  const t = useT();
   const { data } = useSWR<AnalyticsResponse>('/api/portfolio/analytics', fetcher, {
     refreshInterval: 10_000,
   });
 
   if (!data) {
-    return <div className="p-4 text-terminal-muted text-xs">Loading analytics…</div>;
+    return <div className="p-4 text-terminal-muted text-xs">{t('analytics.loading')}</div>;
   }
 
   const pnlTone = data.realized_pnl > 0 ? 'up' : data.realized_pnl < 0 ? 'down' : 'neutral';
@@ -65,25 +68,25 @@ export default function AnalyticsPanel() {
     <div className="p-3 space-y-4" data-testid="analytics-panel">
       {/* KPI tiles */}
       <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
-        <StatTile label="Trades" value={String(data.total_trades)} testid="stat-total-trades" />
+        <StatTile label={t('analytics.trades')} value={String(data.total_trades)} testid="stat-total-trades" />
         <StatTile
-          label="Win rate"
+          label={t('analytics.winRate')}
           value={data.win_rate != null ? `${Math.round(data.win_rate * 100)}%` : '—'}
           testid="stat-win-rate"
         />
         <StatTile
-          label="Realized P&L"
+          label={t('analytics.realizedPnl')}
           value={`${data.realized_pnl > 0 ? '+' : data.realized_pnl < 0 ? '-' : ''}$${Math.abs(data.realized_pnl).toFixed(2)}`}
           tone={pnlTone}
           testid="stat-realized"
         />
         <StatTile
-          label="Max drawdown"
+          label={t('analytics.maxDrawdown')}
           value={data.max_drawdown_pct != null ? `${data.max_drawdown_pct.toFixed(1)}%` : '—'}
           testid="stat-drawdown"
         />
         <StatTile
-          label="Sharpe"
+          label={t('analytics.sharpe')}
           value={data.sharpe != null ? data.sharpe.toFixed(2) : '—'}
           testid="stat-sharpe"
         />
@@ -92,7 +95,7 @@ export default function AnalyticsPanel() {
       {/* Sector allocation — labeled bar list, weights sum to portfolio value */}
       <div>
         <div className="text-[10px] font-semibold uppercase tracking-wider text-terminal-muted mb-1.5">
-          Allocation
+          {t('analytics.allocation')}
         </div>
         <div className="space-y-1.5" data-testid="sector-allocation">
           {data.sector_allocation.map((s) => (
@@ -122,10 +125,10 @@ export default function AnalyticsPanel() {
           {data.best_trade && (
             <div className="px-3 py-2 rounded border border-terminal-border bg-terminal-surface/50">
               <span className="text-[10px] font-semibold uppercase tracking-wider text-terminal-muted block">
-                Best trade
+                {t('analytics.bestTrade')}
               </span>
               <span data-testid="best-trade" className="text-terminal-text">
-                {tradeLine(data.best_trade)}{' '}
+                {tradeLine(t, data.best_trade)}{' '}
                 <span className="text-terminal-up tabular-nums">
                   +${data.best_trade.realized_pnl.toFixed(2)}
                 </span>
@@ -135,10 +138,10 @@ export default function AnalyticsPanel() {
           {data.worst_trade && (
             <div className="px-3 py-2 rounded border border-terminal-border bg-terminal-surface/50">
               <span className="text-[10px] font-semibold uppercase tracking-wider text-terminal-muted block">
-                Worst trade
+                {t('analytics.worstTrade')}
               </span>
               <span data-testid="worst-trade" className="text-terminal-text">
-                {tradeLine(data.worst_trade)}{' '}
+                {tradeLine(t, data.worst_trade)}{' '}
                 <span
                   className={`tabular-nums ${data.worst_trade.realized_pnl < 0 ? 'text-terminal-down' : 'text-terminal-up'}`}
                 >

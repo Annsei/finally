@@ -22,10 +22,14 @@ import { usePriceStore } from '@/stores/priceStore';
 import type { PortfolioResponse, AuthMeResponse } from '@/types/market';
 import { fetcher } from '@/lib/fetcher';
 import { hardReload } from '@/lib/reload';
+import { useMarketProfile } from '@/lib/marketProfile';
+import { useT } from '@/lib/i18n';
+import { formatMoney } from '@/lib/format';
 
 // M4.1 — name-only identity chip. Anonymous acts as the Guest ('default')
 // user; signing in/out reloads so every SWR key refetches under the new cookie.
 function AuthChip() {
+  const t = useT();
   const { data } = useSWR<AuthMeResponse>('/api/auth/me', fetcher);
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState('');
@@ -48,11 +52,11 @@ function AuthChip() {
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
-        throw new Error(body?.error ?? `Sign-in failed (${res.status})`);
+        throw new Error(body?.error ?? t('header.signInFailedStatus', { status: res.status }));
       }
       hardReload();
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Sign-in failed');
+      setError(e instanceof Error ? e.message : t('header.signInFailed'));
       setPending(false);
     }
   };
@@ -79,7 +83,7 @@ function AuthChip() {
           disabled={pending}
           className="text-terminal-muted hover:text-terminal-down text-[10px] font-semibold uppercase tracking-wider disabled:opacity-50"
         >
-          Sign out
+          {t('header.signOut')}
         </button>
       </span>
     );
@@ -93,7 +97,7 @@ function AuthChip() {
         onClick={() => setEditing(true)}
         className="text-[10px] font-semibold uppercase tracking-wider text-terminal-muted hover:text-terminal-accent transition-colors"
       >
-        Guest · Sign in
+        {t('header.guestSignIn')}
       </button>
     );
   }
@@ -103,14 +107,14 @@ function AuthChip() {
       <input
         type="text"
         data-testid="auth-name-input"
-        aria-label="Trader name"
+        aria-label={t('header.traderNameAria')}
         value={name}
         onChange={(e) => setName(e.target.value)}
         onKeyDown={(e) => {
           if (e.key === 'Enter') void login();
           if (e.key === 'Escape') setEditing(false);
         }}
-        placeholder="Trader name…"
+        placeholder={t('header.traderNamePlaceholder')}
         maxLength={24}
         disabled={pending}
         autoFocus
@@ -124,7 +128,7 @@ function AuthChip() {
         className="px-2 py-0.5 rounded text-[10px] font-semibold text-white disabled:opacity-50"
         style={{ backgroundColor: '#753991' }}
       >
-        Go
+        {t('header.go')}
       </button>
       {error && (
         <span data-testid="auth-error" className="text-[10px] text-terminal-down">
@@ -143,6 +147,9 @@ const DOT_COLORS: Record<'connected' | 'reconnecting' | 'disconnected', string> 
 };
 
 export default function Header() {
+  const t = useT();
+  const profile = useMarketProfile();
+  const money = { currency_symbol: profile.currency_symbol, locale: profile.locale };
   // Single-atom selector — avoids Zustand v5 "Maximum update depth exceeded" (RESEARCH Pitfall 2)
   const connectionStatus = usePriceStore((s) => s.connectionStatus);
 
@@ -155,11 +162,12 @@ export default function Header() {
     refreshInterval: 5000,
   });
 
-  // Format number with US locale and 2 decimal places; fall back to '—' when undefined
-  const fmt = (n: number | undefined) =>
-    n !== undefined
-      ? n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-      : '—';
+  // Signed currency amount (sign before the symbol); '—' when undefined.
+  const fmtSigned = (n: number | undefined) => {
+    if (n === undefined) return '—';
+    const sign = n > 0 ? '+' : n < 0 ? '-' : '';
+    return `${sign}${formatMoney(Math.abs(n), money)}`;
+  };
 
   // Day P&L = Σ qty × (price − prev_close) over positions (FRONTEND_REALISM §2.4).
   // undefined until portfolio AND a prev_close-bearing price exist for ≥1 position.
@@ -194,17 +202,17 @@ export default function Header() {
         {/* Cash balance */}
         <div className="flex flex-col items-end">
           <span className="text-xs font-semibold text-terminal-muted uppercase tracking-wider">
-            Cash
+            {t('header.cash')}
           </span>
           <span className="text-sm font-normal text-terminal-text tabular-nums">
-            ${fmt(data?.cash)}
+            {formatMoney(data?.cash, money)}
           </span>
         </div>
 
         {/* Realized P&L — lifetime, from closed trades (M1.4) */}
         <div className="flex flex-col items-end">
           <span className="text-xs font-semibold text-terminal-muted uppercase tracking-wider">
-            Realized
+            {t('header.realized')}
           </span>
           <span
             data-testid="realized-pnl"
@@ -216,34 +224,30 @@ export default function Header() {
                   : 'text-terminal-down'
             }`}
           >
-            {data?.realized_pnl != null
-              ? `${data.realized_pnl > 0 ? '+' : data.realized_pnl < 0 ? '-' : ''}$${fmt(Math.abs(data.realized_pnl))}`
-              : '—'}
+            {data?.realized_pnl != null ? fmtSigned(data.realized_pnl) : '—'}
           </span>
         </div>
 
         {/* Day P&L — positions only, vs previous close */}
         <div className="flex flex-col items-end">
           <span className="text-xs font-semibold text-terminal-muted uppercase tracking-wider">
-            Day P&L
+            {t('header.dayPnl')}
           </span>
           <span
             data-testid="day-pnl"
             className={`text-sm font-normal tabular-nums ${dayPnlColor}`}
           >
-            {dayPnl !== undefined
-              ? `${dayPnl > 0 ? '+' : dayPnl < 0 ? '-' : ''}$${fmt(Math.abs(dayPnl))}`
-              : '—'}
+            {fmtSigned(dayPnl)}
           </span>
         </div>
 
         {/* Portfolio total value — display size (largest live number) */}
         <div className="flex flex-col items-end">
           <span className="text-xs font-semibold text-terminal-muted uppercase tracking-wider">
-            Portfolio
+            {t('header.portfolio')}
           </span>
           <span className="text-xl font-semibold text-terminal-text tabular-nums">
-            ${fmt(data?.total_value)}
+            {formatMoney(data?.total_value, money)}
           </span>
         </div>
 

@@ -8,6 +8,7 @@ import useSWR from 'swr';
 import { fetcher } from '@/lib/fetcher';
 import { formatQuantity } from '@/lib/format';
 import type { TradesResponse } from '@/types/market';
+import { useT } from '@/lib/i18n';
 
 function formatTime(iso: string): string {
   const d = new Date(iso);
@@ -15,6 +16,7 @@ function formatTime(iso: string): string {
 }
 
 export default function OrdersTable() {
+  const t = useT();
   // 10s polling — background limit-order fills appear without user action
   const { data } = useSWR<TradesResponse>('/api/portfolio/trades', fetcher, {
     refreshInterval: 10_000,
@@ -24,7 +26,7 @@ export default function OrdersTable() {
   if (!trades || trades.length === 0) {
     return (
       <div className="p-4 text-terminal-muted text-xs">
-        No trades yet. Fills appear here the moment they execute.
+        {t('fills.empty')}
       </div>
     );
   }
@@ -33,14 +35,14 @@ export default function OrdersTable() {
     <table data-testid="orders-table" className="w-full text-xs border-collapse">
       <thead>
         <tr className="text-terminal-muted border-b border-terminal-border">
-          <th className="text-left py-1 pl-1 font-semibold">Time</th>
-          <th className="text-left py-1 font-semibold">Side</th>
-          <th className="text-left py-1 font-semibold">Ticker</th>
-          <th className="text-right py-1 font-semibold">Qty</th>
-          <th className="text-right py-1 font-semibold">Price</th>
-          <th className="text-right py-1 font-semibold">Value</th>
-          <th className="text-right py-1 font-semibold">Fee</th>
-          <th className="text-right py-1 pr-1 font-semibold">Realized</th>
+          <th className="text-left py-1 pl-1 font-semibold">{t('fills.colTime')}</th>
+          <th className="text-left py-1 font-semibold">{t('fills.colSide')}</th>
+          <th className="text-left py-1 font-semibold">{t('fills.colTicker')}</th>
+          <th className="text-right py-1 font-semibold">{t('fills.colQty')}</th>
+          <th className="text-right py-1 font-semibold">{t('fills.colPrice')}</th>
+          <th className="text-right py-1 font-semibold">{t('fills.colValue')}</th>
+          <th className="text-right py-1 font-semibold">{t('fills.colFee')}</th>
+          <th className="text-right py-1 pr-1 font-semibold">{t('fills.colRealized')}</th>
         </tr>
       </thead>
       <tbody>

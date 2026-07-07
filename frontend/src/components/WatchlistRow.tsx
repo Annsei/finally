@@ -1,12 +1,17 @@
 import { useEffect, useRef } from 'react';
 import { useTicker } from '@/stores/priceStore';
 import SparklineChart from './SparklineChart';
+import { US_PROFILE, type MarketProfile } from '@/lib/marketProfile';
 
 interface Props {
   ticker: string;
   isSelected: boolean;
   onSelect: () => void;
   onRemove?: () => void;
+  // Optional so tests (and the US market) render exactly as before: US_PROFILE
+  // has empty names and no price limits, so the name row and 涨停/跌停 badges
+  // never appear. WatchlistPanel injects the live profile.
+  profile?: MarketProfile;
 }
 
 // Thin session-range bar: marker shows where the live price sits between
@@ -28,8 +33,23 @@ function DayRangeBar({ low, high, price }: { low?: number; high?: number; price?
   );
 }
 
-export default function WatchlistRow({ ticker, isSelected, onSelect, onRemove }: Props) {
+export default function WatchlistRow({
+  ticker,
+  isSelected,
+  onSelect,
+  onRemove,
+  profile = US_PROFILE,
+}: Props) {
   const priceUpdate = useTicker(ticker);
+  const name = profile.names[ticker];
+
+  // A-share limit badges — only when the backend supplies the day's limits and
+  // the live price has hit them. US quotes carry no limits, so no badge shows.
+  const price = priceUpdate?.price;
+  const limitUp = priceUpdate?.limit_up;
+  const limitDown = priceUpdate?.limit_down;
+  const atLimitUp = limitUp != null && price != null && price >= limitUp;
+  const atLimitDown = limitDown != null && price != null && price <= limitDown;
   const priceRef = useRef<HTMLTableCellElement>(null);
   const flashTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -73,7 +93,32 @@ export default function WatchlistRow({ ticker, isSelected, onSelect, onRemove }:
 
   return (
     <tr className={rowClass} onClick={onSelect}>
-      <td className="py-1 pl-1 font-semibold text-terminal-text">{ticker}</td>
+      <td className="py-1 pl-1 font-semibold text-terminal-text">
+        <span className="flex items-center gap-1">
+          <span>{ticker}</span>
+          {atLimitUp && (
+            <span
+              data-testid={`limit-badge-${ticker}`}
+              className="text-[9px] font-semibold px-1 rounded text-terminal-up border border-terminal-up/60"
+            >
+              涨停
+            </span>
+          )}
+          {atLimitDown && (
+            <span
+              data-testid={`limit-badge-${ticker}`}
+              className="text-[9px] font-semibold px-1 rounded text-terminal-down border border-terminal-down/60"
+            >
+              跌停
+            </span>
+          )}
+        </span>
+        {name && (
+          <span className="block text-[10px] font-normal text-terminal-muted leading-tight truncate">
+            {name}
+          </span>
+        )}
+      </td>
       <td
         ref={priceRef}
         className={`text-right py-1 tabular-nums ${dayPct == null ? 'text-terminal-text' : dayColor}`}

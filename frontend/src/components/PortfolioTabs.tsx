@@ -15,18 +15,22 @@ import BacktestPanel from './BacktestPanel';
 import AnalyticsPanel from './AnalyticsPanel';
 import Leaderboard from './Leaderboard';
 import { useUiStore, type PortfolioTab } from '@/stores/uiStore';
+import { useMarketProfile } from '@/lib/marketProfile';
+import { useT } from '@/lib/i18n';
 
-const TABS: { key: PortfolioTab; label: string; testid: string }[] = [
-  { key: 'positions', label: 'Positions', testid: 'tab-positions' },
-  { key: 'orders', label: 'Orders', testid: 'tab-orders' },
-  { key: 'fills', label: 'Fills', testid: 'tab-fills' },
-  { key: 'rules', label: 'Rules', testid: 'tab-rules' },
-  { key: 'backtest', label: 'Backtest', testid: 'tab-backtest' },
-  { key: 'analytics', label: 'Analytics', testid: 'tab-analytics' },
-  { key: 'board', label: 'Board', testid: 'tab-board' },
+const TABS: { key: PortfolioTab; labelKey: string; testid: string }[] = [
+  { key: 'positions', labelKey: 'tabs.positions', testid: 'tab-positions' },
+  { key: 'orders', labelKey: 'tabs.orders', testid: 'tab-orders' },
+  { key: 'fills', labelKey: 'tabs.fills', testid: 'tab-fills' },
+  { key: 'rules', labelKey: 'tabs.rules', testid: 'tab-rules' },
+  { key: 'backtest', labelKey: 'tabs.backtest', testid: 'tab-backtest' },
+  { key: 'analytics', labelKey: 'tabs.analytics', testid: 'tab-analytics' },
+  { key: 'board', labelKey: 'tabs.board', testid: 'tab-board' },
 ];
 
 export default function PortfolioTabs() {
+  const t = useT();
+  const profile = useMarketProfile();
   const tab = useUiStore((s) => s.portfolioTab);
   const setTab = useUiStore((s) => s.setPortfolioTab);
 
@@ -40,15 +44,15 @@ export default function PortfolioTabs() {
   return (
     <div>
       <div className="flex border-b border-terminal-border">
-        {TABS.map((t) => (
+        {TABS.map((tab_) => (
           <button
-            key={t.key}
+            key={tab_.key}
             type="button"
-            data-testid={t.testid}
-            className={tabClass(t.key)}
-            onClick={() => setTab(t.key)}
+            data-testid={tab_.testid}
+            className={tabClass(tab_.key)}
+            onClick={() => setTab(tab_.key)}
           >
-            {t.label}
+            {t(tab_.labelKey)}
           </button>
         ))}
       </div>
@@ -56,7 +60,7 @@ export default function PortfolioTabs() {
       {tab === 'orders' && <OpenOrdersTable />}
       {tab === 'fills' && <OrdersTable />}
       {tab === 'rules' && <RulesTable />}
-      {tab === 'backtest' && <BacktestPanel />}
+      {tab === 'backtest' && <BacktestPanel profile={profile} />}
       {tab === 'analytics' && <AnalyticsPanel />}
       {tab === 'board' && <Leaderboard />}
     </div>

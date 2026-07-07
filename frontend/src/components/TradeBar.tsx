@@ -20,8 +20,10 @@ import { useState, useEffect, useRef } from 'react';
 import useSWR from 'swr';
 import type { PortfolioResponse, OrderPostResponse, OrderKind, TimeInForce } from '@/types/market';
 import { fetcher } from '@/lib/fetcher';
-import { formatQuantity } from '@/lib/format';
+import { formatQuantity, formatMoney, formatShares } from '@/lib/format';
 import { usePriceStore, useTicker } from '@/stores/priceStore';
+import { useMarketProfile } from '@/lib/marketProfile';
+import { useT } from '@/lib/i18n';
 
 interface TradeBarProps {
   selectedTicker: string | null;
@@ -47,6 +49,15 @@ const ORDER_TYPES: { key: OrderType; label: string; testid: string }[] = [
 ];
 
 export default function TradeBar({ selectedTicker, onTradeComplete }: TradeBarProps) {
+  const t = useT();
+  const profile = useMarketProfile();
+  const sym = profile.currency_symbol;
+  const money = { currency_symbol: sym, locale: profile.locale };
+  // Lot markets (A-share, lot_size 100) input quantity in 手; the US market
+  // (lot_size 1) is unchanged — submitQty === Number(qty) and every display
+  // falls back to formatQuantity.
+  const lotSize = profile.lot_size;
+  const isLot = lotSize > 1;
   const [orderType, setOrderType] = useState<OrderType>('market');
   const [ticker, setTicker] = useState('');
   const [qty, setQty] = useState('');
@@ -85,6 +96,8 @@ export default function TradeBar({ selectedTicker, onTradeComplete }: TradeBarPr
   const livePrice = liveUpdate?.price ?? position?.current_price ?? null;
   const qtyNum = Number(qty);
   const qtyValid = isFinite(qtyNum) && qtyNum > 0;
+  // Shares actually sent to the backend: on lot markets the 手 input scales up.
+  const submitQty = isLot ? qtyNum * lotSize : qtyNum;
   const limitNum = Number(limitPrice);
   const limitValid = isFinite(limitNum) && limitNum > 0;
   const stopNum = Number(stopPrice);
@@ -92,7 +105,9 @@ export default function TradeBar({ selectedTicker, onTradeComplete }: TradeBarPr
 
   // Cost-math basis: the limit when set, the stop for pure stops, else live
   const basisPrice = needsLimit && limitValid ? limitNum : needsStop && stopValid ? stopNum : livePrice;
-  const estimate = basisPrice != null && qtyValid ? qtyNum * basisPrice : null;
+  // Notional uses submitQty (shares) so lot markets estimate the true cost;
+  // US (submitQty === qtyNum) is unchanged.
+  const estimate = basisPrice != null && qtyValid ? submitQty * basisPrice : null;
   // Buys fill at the ask — size the max-buy shortcut against it (or the basis)
   const askPrice =
     orderType !== 'market' && basisPrice != null ? basisPrice : (liveUpdate?.ask ?? livePrice);
@@ -102,29 +117,40 @@ export default function TradeBar({ selectedTicker, onTradeComplete }: TradeBarPr
       : null;
   const held = position?.quantity ?? null;
 
+  // Lot-aware max-buy / held shortcuts. On the US market these resolve to the
+  // existing fractional share values and display via formatQuantity.
+  const maxBuyLots =
+    askPrice != null && askPrice > 0 && portfolio
+      ? Math.floor(portfolio.cash / (askPrice * lotSize))
+      : null;
+  const maxBuyValue = isLot ? maxBuyLots : maxBuy;
+  const maxBuyDisplay = isLot ? formatShares((maxBuyLots ?? 0) * lotSize, profile) : formatQuantity(maxBuy);
+  const heldValue = isLot && held != null ? held / lotSize : held;
+  const heldDisplay = isLot ? formatShares(held, profile) : formatQuantity(held);
+
   // Concentration rail (M1.5): prospective post-buy weight of this ticker
   const totalValue = portfolio?.total_value ?? 0;
   const prospectiveWeight =
     qtyValid && basisPrice != null && totalValue > 0
-      ? (((held ?? 0) + qtyNum) * basisPrice) / totalValue
+      ? (((held ?? 0) + submitQty) * basisPrice) / totalValue
       : null;
   const concentrated = prospectiveWeight != null && prospectiveWeight > CONCENTRATION_WARN;
 
   const validate = (): boolean => {
     if (!normalizedTicker || !/^[A-Z]+$/.test(normalizedTicker)) {
-      setError('Enter a valid ticker and quantity.');
+      setError(t('tradebar.errTickerQty'));
       return false;
     }
     if (!qtyValid) {
-      setError('Enter a valid ticker and quantity.');
+      setError(t('tradebar.errTickerQty'));
       return false;
     }
     if (needsLimit && !limitValid) {
-      setError('Enter a valid limit price.');
+      setError(t('tradebar.errLimit'));
       return false;
     }
     if (needsStop && !stopValid) {
-      setError('Enter a valid stop price.');
+      setError(t('tradebar.errStop'));
       return false;
     }
     return true;
@@ -136,7 +162,7 @@ export default function TradeBar({ selectedTicker, onTradeComplete }: TradeBarPr
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         ticker: normalizedTicker,
-        quantity: qtyNum,
+        quantity: submitQty,
         side,
         kind: orderType as OrderKind,
         limit_price: needsLimit ? limitNum : undefined,
@@ -146,26 +172,50 @@ export default function TradeBar({ selectedTicker, onTradeComplete }: TradeBarPr
     });
     if (!res.ok) {
       const data = await res.json();
-      throw new Error(data.error ?? 'Order failed');
+      throw new Error(data.error ?? t('tradebar.errOrderFailed'));
     }
     const { order } = (await res.json()) as OrderPostResponse;
-    const verb = side === 'buy' ? 'Buy' : 'Sell';
+    const verb = side === 'buy' ? t('tradebar.buy') : t('tradebar.sell');
+    const cmp = side === 'buy' ? '≤' : '≥';
+    const qtyStr = formatShares(order.quantity, profile);
     if (order.status === 'filled' && order.fill_price != null) {
       setToast(
-        `${side === 'buy' ? 'Bought' : 'Sold'} ${formatQuantity(order.quantity)} ${order.ticker} @ $${order.fill_price.toFixed(2)}`
+        t(side === 'buy' ? 'fill.bought' : 'fill.sold', {
+          qty: qtyStr,
+          ticker: order.ticker,
+          price: `${sym}${order.fill_price.toFixed(2)}`,
+        })
       );
       await mutate(); // filled immediately — refresh cash/positions
     } else if (order.kind === 'stop') {
       setToast(
-        `Stop placed: ${verb} ${formatQuantity(order.quantity)} ${order.ticker} @ stop $${order.stop_price?.toFixed(2)}`
+        t('fill.stopPlaced', {
+          verb,
+          qty: qtyStr,
+          ticker: order.ticker,
+          stop: `${sym}${order.stop_price?.toFixed(2)}`,
+        })
       );
     } else if (order.kind === 'stop_limit') {
       setToast(
-        `Stop-limit placed: ${verb} ${formatQuantity(order.quantity)} ${order.ticker} @ stop $${order.stop_price?.toFixed(2)} / ${side === 'buy' ? '≤' : '≥'}$${order.limit_price?.toFixed(2)}`
+        t('fill.stopLimitPlaced', {
+          verb,
+          qty: qtyStr,
+          ticker: order.ticker,
+          stop: `${sym}${order.stop_price?.toFixed(2)}`,
+          cmp,
+          limit: `${sym}${order.limit_price?.toFixed(2)}`,
+        })
       );
     } else {
       setToast(
-        `Order placed: ${verb} ${formatQuantity(order.quantity)} ${order.ticker} @ ${side === 'buy' ? '≤' : '≥'}$${order.limit_price?.toFixed(2)}`
+        t('fill.orderPlaced', {
+          verb,
+          qty: qtyStr,
+          ticker: order.ticker,
+          cmp,
+          limit: `${sym}${order.limit_price?.toFixed(2)}`,
+        })
       );
     }
   };
@@ -179,13 +229,13 @@ export default function TradeBar({ selectedTicker, onTradeComplete }: TradeBarPr
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             ticker: normalizedTicker,
-            quantity: Number(qty),
+            quantity: submitQty,
             side,
           }),
         });
         if (!res.ok) {
           const data = await res.json();
-          throw new Error(data.error ?? 'Trade failed');
+          throw new Error(data.error ?? t('tradebar.errTradeFailed'));
         }
         fill = (await res.json()) as TradeFill;
         // Return a FRESH snapshot: the committed cache passed in here is the
@@ -202,7 +252,7 @@ export default function TradeBar({ selectedTicker, onTradeComplete }: TradeBarPr
                 base.positions.find((p) => p.ticker === normalizedTicker)?.current_price ??
                 usePriceStore.getState().prices[normalizedTicker]?.price ??
                 0;
-              const cost = Number(qty) * price;
+              const cost = submitQty * price;
               return {
                 ...base,
                 cash: base.cash + (side === 'sell' ? cost : -cost),
@@ -217,7 +267,11 @@ export default function TradeBar({ selectedTicker, onTradeComplete }: TradeBarPr
     if (fill) {
       const f: TradeFill = fill;
       setToast(
-        `${f.side === 'buy' ? 'Bought' : 'Sold'} ${formatQuantity(f.quantity)} ${f.ticker} @ $${f.price.toFixed(2)}`
+        t(f.side === 'buy' ? 'fill.bought' : 'fill.sold', {
+          qty: formatShares(f.quantity, profile),
+          ticker: f.ticker,
+          price: `${sym}${f.price.toFixed(2)}`,
+        })
       );
     }
   };
@@ -264,7 +318,7 @@ export default function TradeBar({ selectedTicker, onTradeComplete }: TradeBarPr
         {/* Order kind — market / limit / stop / stop-limit */}
         <div className="flex flex-col gap-1">
           <span className="text-xs font-semibold text-terminal-muted uppercase tracking-wider">
-            Type
+            {t('tradebar.type')}
           </span>
           <div className="flex gap-1">
             {ORDER_TYPES.map((t) => (
@@ -288,11 +342,11 @@ export default function TradeBar({ selectedTicker, onTradeComplete }: TradeBarPr
             htmlFor="trade-ticker"
             className="text-xs font-semibold text-terminal-muted uppercase tracking-wider"
           >
-            Ticker
+            {t('tradebar.ticker')}
           </label>
           <input
             id="trade-ticker"
-            aria-label="Ticker"
+            aria-label={t('tradebar.ticker')}
             type="text"
             list="ticker-suggestions"
             value={ticker}
@@ -309,11 +363,11 @@ export default function TradeBar({ selectedTicker, onTradeComplete }: TradeBarPr
             htmlFor="trade-qty"
             className="text-xs font-semibold text-terminal-muted uppercase tracking-wider"
           >
-            Qty
+            {isLot ? t('tradebar.qtyLots') : t('tradebar.qty')}
           </label>
           <input
             id="trade-qty"
-            aria-label="Qty"
+            aria-label={isLot ? t('tradebar.qtyLots') : t('tradebar.qty')}
             type="number"
             value={qty}
             onChange={(e) => setQty(e.target.value)}
@@ -332,11 +386,11 @@ export default function TradeBar({ selectedTicker, onTradeComplete }: TradeBarPr
               htmlFor="trade-stop-price"
               className="text-xs font-semibold text-terminal-muted uppercase tracking-wider"
             >
-              Stop $
+              {t('tradebar.stopLabel', { sym })}
             </label>
             <input
               id="trade-stop-price"
-              aria-label="Stop price"
+              aria-label={t('tradebar.stopAria')}
               type="number"
               value={stopPrice}
               onChange={(e) => setStopPrice(e.target.value)}
@@ -356,11 +410,11 @@ export default function TradeBar({ selectedTicker, onTradeComplete }: TradeBarPr
               htmlFor="trade-limit-price"
               className="text-xs font-semibold text-terminal-muted uppercase tracking-wider"
             >
-              Limit $
+              {t('tradebar.limitLabel', { sym })}
             </label>
             <input
               id="trade-limit-price"
-              aria-label="Limit price"
+              aria-label={t('tradebar.limitAria')}
               type="number"
               value={limitPrice}
               onChange={(e) => setLimitPrice(e.target.value)}
@@ -377,7 +431,7 @@ export default function TradeBar({ selectedTicker, onTradeComplete }: TradeBarPr
         {orderType !== 'market' && (
           <div className="flex flex-col gap-1 pb-0.5">
             <span className="text-xs font-semibold text-terminal-muted uppercase tracking-wider">
-              TIF
+              {t('tradebar.tif')}
             </span>
             <div className="flex gap-1">
               <button
@@ -402,26 +456,28 @@ export default function TradeBar({ selectedTicker, onTradeComplete }: TradeBarPr
           </div>
         )}
 
-        {/* Buy button — green semantic (profit/long direction) */}
+        {/* Buy button — tracks the "up" colour: green on US, red on the
+            A-share market (买盘红 convention) */}
         <button
           data-testid="trade-buy-button"
           onClick={() => handleTrade('buy')}
           disabled={pending}
           className="px-4 py-1.5 text-xs font-semibold rounded min-h-[36px] text-white disabled:opacity-50 disabled:cursor-not-allowed transition-opacity"
-          style={{ backgroundColor: '#22c55e' }}
+          style={{ backgroundColor: 'var(--color-up)' }}
         >
-          Buy
+          {t('tradebar.buy')}
         </button>
 
-        {/* Sell button — red semantic (loss/short direction) */}
+        {/* Sell button — tracks the "down" colour: red on US, green on the
+            A-share market (卖盘绿 convention) */}
         <button
           data-testid="trade-sell-button"
           onClick={() => handleTrade('sell')}
           disabled={pending}
           className="px-4 py-1.5 text-xs font-semibold rounded min-h-[36px] text-white disabled:opacity-50 disabled:cursor-not-allowed transition-opacity"
-          style={{ backgroundColor: '#ef4444' }}
+          style={{ backgroundColor: 'var(--color-down)' }}
         >
-          Sell
+          {t('tradebar.sell')}
         </button>
 
         {/* Live estimate row — notional preview, quote, max-buy and held shortcuts */}
@@ -430,29 +486,25 @@ export default function TradeBar({ selectedTicker, onTradeComplete }: TradeBarPr
           className="flex items-baseline gap-3 pb-1.5 text-xs text-terminal-muted tabular-nums"
         >
           <span>
-            Est.{' '}
-            <span className="text-terminal-text">
-              {estimate != null
-                ? `$${estimate.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-                : '—'}
-            </span>
+            {t('tradebar.est')}{' '}
+            <span className="text-terminal-text">{formatMoney(estimate, money)}</span>
           </span>
           {liveUpdate?.bid != null && liveUpdate?.ask != null && (
             <span data-testid="trade-bid-ask">
-              Bid <span className="text-terminal-text">{liveUpdate.bid.toFixed(2)}</span>
+              {t('tradebar.bid')} <span className="text-terminal-text">{liveUpdate.bid.toFixed(2)}</span>
               {' × '}
-              Ask <span className="text-terminal-text">{liveUpdate.ask.toFixed(2)}</span>
+              {t('tradebar.ask')} <span className="text-terminal-text">{liveUpdate.ask.toFixed(2)}</span>
             </span>
           )}
-          {maxBuy != null && (
+          {maxBuyValue != null && (
             <button
               type="button"
               data-testid="trade-max-buy"
               title="Set quantity to the maximum buyable with current cash"
-              onClick={() => setQty(String(maxBuy))}
+              onClick={() => setQty(String(maxBuyValue))}
               className="hover:text-terminal-blue transition-colors"
             >
-              Max buy <span className="text-terminal-text">{formatQuantity(maxBuy)}</span>
+              {t('tradebar.maxBuy')} <span className="text-terminal-text">{maxBuyDisplay}</span>
             </button>
           )}
           {held != null && held > 0 && (
@@ -460,10 +512,10 @@ export default function TradeBar({ selectedTicker, onTradeComplete }: TradeBarPr
               type="button"
               data-testid="trade-held"
               title="Set quantity to your full position"
-              onClick={() => setQty(String(held))}
+              onClick={() => setQty(String(heldValue))}
               className="hover:text-terminal-blue transition-colors"
             >
-              Held <span className="text-terminal-text">{formatQuantity(held)}</span>
+              {t('tradebar.held')} <span className="text-terminal-text">{heldDisplay}</span>
             </button>
           )}
         </div>
@@ -475,8 +527,10 @@ export default function TradeBar({ selectedTicker, onTradeComplete }: TradeBarPr
           data-testid="trade-concentration-warning"
           className="mt-1.5 text-xs leading-tight text-terminal-amber"
         >
-          ⚠ A buy this size would make {normalizedTicker} ~
-          {Math.round(prospectiveWeight * 100)}% of your portfolio.
+          {t('tradebar.concentration', {
+            ticker: normalizedTicker,
+            pct: Math.round(prospectiveWeight * 100),
+          })}
         </p>
       )}
 

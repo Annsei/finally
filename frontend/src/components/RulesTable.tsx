@@ -10,6 +10,7 @@ import useSWR from 'swr';
 import { fetcher } from '@/lib/fetcher';
 import { formatQuantity } from '@/lib/format';
 import { useUiStore } from '@/stores/uiStore';
+import { useT } from '@/lib/i18n';
 import type { RulesResponse, TradingRule, RuleStatus } from '@/types/market';
 
 const STATUS_STYLE: Record<RuleStatus, string> = {
@@ -32,6 +33,7 @@ function conditionText(r: TradingRule): string {
 }
 
 export default function RulesTable() {
+  const t = useT();
   const { data, mutate } = useSWR<RulesResponse>('/api/rules', fetcher, {
     refreshInterval: 5000,
   });
@@ -93,7 +95,7 @@ export default function RulesTable() {
   if (!rules || rules.length === 0) {
     return (
       <div className="p-4 text-terminal-muted text-xs">
-        No standing rules. Ask FinAlly to create one — e.g. “buy 5 NVDA if it drops 3% today.”
+        {t('rules.empty')}
         {actionError && (
           <p data-testid="rules-error" className="mt-1 text-terminal-down">
             {actionError}
@@ -108,11 +110,11 @@ export default function RulesTable() {
       <table data-testid="rules-table" className="w-full text-xs border-collapse">
         <thead>
           <tr className="text-terminal-muted border-b border-terminal-border">
-            <th className="text-left py-1 pl-1 font-semibold">Rule</th>
-            <th className="text-left py-1 font-semibold">Condition</th>
-            <th className="text-left py-1 font-semibold">Action</th>
-            <th className="text-left py-1 font-semibold">Status</th>
-            <th className="text-right py-1 font-semibold">Fired</th>
+            <th className="text-left py-1 pl-1 font-semibold">{t('rules.colRule')}</th>
+            <th className="text-left py-1 font-semibold">{t('rules.colCondition')}</th>
+            <th className="text-left py-1 font-semibold">{t('rules.colAction')}</th>
+            <th className="text-left py-1 font-semibold">{t('rules.colStatus')}</th>
+            <th className="text-right py-1 font-semibold">{t('rules.colFired')}</th>
             <th className="text-right py-1 pr-1 font-semibold" aria-label="Controls column" />
           </tr>
         </thead>

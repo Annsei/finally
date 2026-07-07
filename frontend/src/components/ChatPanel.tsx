@@ -1,7 +1,9 @@
 import { useState, useRef, useEffect } from 'react';
 import useSWR from 'swr';
 import { fetcher } from '@/lib/fetcher';
-import { formatQuantity } from '@/lib/format';
+import { formatShares } from '@/lib/format';
+import { useMarketProfile } from '@/lib/marketProfile';
+import { useT, type TFunction } from '@/lib/i18n';
 import type {
   ChatHistoryResponse,
   ChatPostResponse,
@@ -12,6 +14,15 @@ import type {
   ChatBacktestOutcome,
 } from '@/types/market';
 
+// Shared props threaded into every action badge so the badges stay pure (no
+// hooks) — `t` translates, `sym` is the market currency symbol ($ / ¥), `lot`
+// is the market lot size (1 on US → formatShares falls back to formatQuantity).
+interface BadgeCtx {
+  t: TFunction;
+  sym: string;
+  lot: number;
+}
+
 interface Props {
   open: boolean;
   onToggle: () => void;
@@ -21,26 +32,30 @@ interface Props {
 // ---------------------------------------------------------------------------
 // Action badge components — text built only from structured fields (T-4-04)
 // ---------------------------------------------------------------------------
-function TradeBadge({ trade }: { trade: TradeOutcome }) {
+function TradeBadge({ trade, t, sym, lot }: { trade: TradeOutcome } & BadgeCtx) {
   // Failed outcomes carry only {status, ticker, error} — no side/quantity/price
   if (trade.status === 'failed') {
     return (
       <span
         data-testid="trade-badge-failed"
         className="inline-block px-2 py-0.5 rounded text-xs mr-1 mt-1 bg-terminal-surface"
-        style={{ border: '1px solid #ef4444', color: '#ef4444' }}
+        style={{ border: '1px solid var(--color-down)', color: 'var(--color-down)' }}
       >
-        {`Trade failed: ${trade.ticker} — ${trade.error ?? 'rejected'}`}
+        {t('badge.tradeFailed', { ticker: trade.ticker, error: trade.error ?? t('badge.rejected') })}
       </span>
     );
   }
 
   const isBuy = trade.side?.toLowerCase() === 'buy';
-  const borderColor = isBuy ? '#ecad0a' : '#ef4444';
-  const textColor = isBuy ? '#ecad0a' : '#ef4444';
-  const label = isBuy
-    ? `Bought ${formatQuantity(trade.quantity)} ${trade.ticker} @ $${trade.price?.toFixed(2) ?? '—'}`
-    : `Sold ${formatQuantity(trade.quantity)} ${trade.ticker} @ $${trade.price?.toFixed(2) ?? '—'}`;
+  // Buy keeps the accent yellow; sell uses the (flippable) down colour.
+  const borderColor = isBuy ? '#ecad0a' : 'var(--color-down)';
+  const textColor = isBuy ? '#ecad0a' : 'var(--color-down)';
+  const price = `${sym}${trade.price?.toFixed(2) ?? '—'}`;
+  const label = t(isBuy ? 'fill.bought' : 'fill.sold', {
+    qty: formatShares(trade.quantity, { lot_size: lot }),
+    ticker: trade.ticker,
+    price,
+  });
 
   return (
     <span
@@ -53,56 +68,68 @@ function TradeBadge({ trade }: { trade: TradeOutcome }) {
 }
 
 // AI-placed order outcomes (M2.1): open (resting) blue, filled yellow/red, failed red
-function OrderBadge({ order }: { order: ChatOrderOutcome }) {
+function OrderBadge({ order, t, sym, lot }: { order: ChatOrderOutcome } & BadgeCtx) {
   if (order.status === 'failed') {
     return (
       <span
         data-testid="order-badge-failed"
         className="inline-block px-2 py-0.5 rounded text-xs mr-1 mt-1 bg-terminal-surface"
-        style={{ border: '1px solid #ef4444', color: '#ef4444' }}
+        style={{ border: '1px solid var(--color-down)', color: 'var(--color-down)' }}
       >
-        {`Order failed: ${order.ticker} — ${order.error ?? 'rejected'}`}
+        {t('badge.orderFailed', { ticker: order.ticker, error: order.error ?? t('badge.rejected') })}
       </span>
     );
   }
 
-  const verb = order.side?.toLowerCase() === 'buy' ? 'Buy' : 'Sell';
+  const isBuy = order.side?.toLowerCase() === 'buy';
+  const verb = isBuy ? t('tradebar.buy') : t('tradebar.sell');
   if (order.status === 'filled' && order.fill_price != null) {
     return (
       <span
         className="inline-block px-2 py-0.5 rounded text-xs mr-1 mt-1 bg-terminal-surface"
         style={{ border: '1px solid #ecad0a', color: '#ecad0a' }}
       >
-        {`${verb === 'Buy' ? 'Bought' : 'Sold'} ${formatQuantity(order.quantity)} ${order.ticker} @ $${order.fill_price.toFixed(2)}`}
+        {t(isBuy ? 'fill.bought' : 'fill.sold', {
+          qty: formatShares(order.quantity, { lot_size: lot }),
+          ticker: order.ticker,
+          price: `${sym}${order.fill_price.toFixed(2)}`,
+        })}
       </span>
     );
   }
 
   const parts: string[] = [];
-  if (order.stop_price != null) parts.push(`stop $${order.stop_price.toFixed(2)}`);
-  if (order.limit_price != null)
-    parts.push(`${verb === 'Buy' ? '≤' : '≥'}$${order.limit_price.toFixed(2)}`);
+  if (order.stop_price != null) parts.push(`${t('badge.stopWord')} ${sym}${order.stop_price.toFixed(2)}`);
+  if (order.limit_price != null) parts.push(`${isBuy ? '≤' : '≥'}${sym}${order.limit_price.toFixed(2)}`);
   return (
     <span
       data-testid="order-badge-placed"
       className="inline-block px-2 py-0.5 rounded text-xs mr-1 mt-1 bg-terminal-surface"
       style={{ border: '1px solid #209dd7', color: '#209dd7' }}
     >
-      {`Order placed: ${verb} ${formatQuantity(order.quantity)} ${order.ticker} @ ${parts.join(' / ')}`}
+      {t('badge.orderPlaced', {
+        verb,
+        qty: formatShares(order.quantity, { lot_size: lot }),
+        ticker: order.ticker,
+        detail: parts.join(' / '),
+      })}
     </span>
   );
 }
 
 // AI-created standing rules (M2.2)
-function RuleBadge({ outcome }: { outcome: ChatRuleOutcome }) {
+function RuleBadge({ outcome, t }: { outcome: ChatRuleOutcome } & BadgeCtx) {
   if (outcome.status === 'failed' || !outcome.rule) {
     return (
       <span
         data-testid="rule-badge-failed"
         className="inline-block px-2 py-0.5 rounded text-xs mr-1 mt-1 bg-terminal-surface"
-        style={{ border: '1px solid #ef4444', color: '#ef4444' }}
+        style={{ border: '1px solid var(--color-down)', color: 'var(--color-down)' }}
       >
-        {`Rule failed: ${outcome.ticker ?? ''} ${outcome.error ?? 'rejected'}`.trim()}
+        {t('badge.ruleFailed', {
+          ticker: outcome.ticker ?? '',
+          error: outcome.error ?? t('badge.rejected'),
+        }).trim()}
       </span>
     );
   }
@@ -112,56 +139,66 @@ function RuleBadge({ outcome }: { outcome: ChatRuleOutcome }) {
       className="inline-block px-2 py-0.5 rounded text-xs mr-1 mt-1 bg-terminal-surface"
       style={{ border: '1px solid #753991', color: '#b07cc6' }}
     >
-      {`Rule armed: ${outcome.rule.description}`}
+      {t('badge.ruleArmed', { desc: outcome.rule.description })}
     </span>
   );
 }
 
 // AI-run backtests (M5) — compact stats line; full curves live in the Backtest tab
-function BacktestBadge({ outcome }: { outcome: ChatBacktestOutcome }) {
+function BacktestBadge({ outcome, t }: { outcome: ChatBacktestOutcome } & BadgeCtx) {
   if (outcome.status === 'failed' || !outcome.stats) {
     return (
       <span
         data-testid="backtest-badge-failed"
         className="inline-block px-2 py-0.5 rounded text-xs mr-1 mt-1 bg-terminal-surface"
-        style={{ border: '1px solid #ef4444', color: '#ef4444' }}
+        style={{ border: '1px solid var(--color-down)', color: 'var(--color-down)' }}
       >
-        {`Backtest failed: ${outcome.ticker} — ${outcome.error ?? 'rejected'}`}
+        {t('badge.backtestFailed', {
+          ticker: outcome.ticker,
+          error: outcome.error ?? t('badge.rejected'),
+        })}
       </span>
     );
   }
   const s = outcome.stats;
   const sign = s.total_return_pct >= 0 ? '+' : '';
   const bhSign = s.buy_hold_return_pct >= 0 ? '+' : '';
-  const winPart = s.win_rate != null ? ` · win ${Math.round(s.win_rate * 100)}%` : '';
+  const winPart = s.win_rate != null ? ` · ${t('badge.win')} ${Math.round(s.win_rate * 100)}%` : '';
   return (
     <span
       data-testid="backtest-badge-completed"
       className="inline-block px-2 py-0.5 rounded text-xs mr-1 mt-1 bg-terminal-surface"
       style={{ border: '1px solid #209dd7', color: '#209dd7' }}
     >
-      {`Backtest ${outcome.ticker}: ${sign}${s.total_return_pct.toFixed(1)}% (B&H ${bhSign}${s.buy_hold_return_pct.toFixed(1)}%) · ${s.round_trips} trades${winPart}`}
+      {t('badge.backtest', {
+        ticker: outcome.ticker,
+        ret: `${sign}${s.total_return_pct.toFixed(1)}%`,
+        bh: `${bhSign}${s.buy_hold_return_pct.toFixed(1)}%`,
+        rt: s.round_trips,
+        win: winPart,
+      })}
     </span>
   );
 }
 
-// Agent-initiated message styling by kind (M2.3/2.4): briefs, reviews, rules
-const KIND_META: Record<string, { label: string; border: string }> = {
-  brief: { label: 'Market Brief', border: '#209dd7' },
-  review: { label: 'Daily Review', border: '#ecad0a' },
-  rule: { label: 'Rule', border: '#b07cc6' },
+// Agent-initiated message styling by kind (M2.3/2.4): briefs, reviews, rules.
+// Border colour by kind; the label is translated at render time.
+const KIND_BORDER: Record<string, string> = {
+  brief: '#209dd7',
+  review: '#ecad0a',
+  rule: '#b07cc6',
 };
 
 // Briefs arrive continuously and were drowning the conversation — clamp each
 // to two lines so the feed stays scannable; clicking toggles the full text.
-function BriefContent({ content }: { content: string }) {
+function BriefContent({ content, t }: { content: string; t: TFunction }) {
   const [expanded, setExpanded] = useState(false);
   return (
     <button
       type="button"
       data-testid="brief-content"
       data-expanded={expanded}
-      title={expanded ? 'Collapse' : 'Show full brief'}
+      title={expanded ? t('chat.collapse') : t('chat.showFull')}
       onClick={() => setExpanded((v) => !v)}
       className="block w-full text-left text-xs leading-snug text-terminal-text"
       style={
@@ -180,22 +217,27 @@ function BriefContent({ content }: { content: string }) {
   );
 }
 
-function WatchlistBadge({ change }: { change: WatchlistOutcome }) {
+function WatchlistBadge({ change, t }: { change: WatchlistOutcome } & BadgeCtx) {
   // Failed outcomes carry only {status, ticker, error} — no action
   if (change.status === 'failed') {
     return (
       <span
         data-testid="watchlist-badge-failed"
         className="inline-block px-2 py-0.5 rounded text-xs mr-1 mt-1 bg-terminal-surface"
-        style={{ border: '1px solid #ef4444', color: '#ef4444' }}
+        style={{ border: '1px solid var(--color-down)', color: 'var(--color-down)' }}
       >
-        {`Watchlist change failed: ${change.ticker} — ${change.error ?? 'rejected'}`}
+        {t('badge.watchlistFailed', {
+          ticker: change.ticker,
+          error: change.error ?? t('badge.rejected'),
+        })}
       </span>
     );
   }
 
   const isAdd = change.action?.toLowerCase() === 'add';
-  const label = isAdd ? `Added ${change.ticker}` : `Removed ${change.ticker}`;
+  const label = isAdd
+    ? t('badge.added', { ticker: change.ticker })
+    : t('badge.removed', { ticker: change.ticker });
 
   return (
     <span
@@ -211,6 +253,10 @@ function WatchlistBadge({ change }: { change: WatchlistOutcome }) {
 // ChatPanel main component
 // ---------------------------------------------------------------------------
 export default function ChatPanel({ open, onToggle, onNewTrade }: Props) {
+  const t = useT();
+  const profile = useMarketProfile();
+  const sym = profile.currency_symbol;
+  const lot = profile.lot_size;
   // 10s polling — rule firings and other agent-initiated messages appear
   // without the user having to send anything (M2.2)
   const { data: history, mutate: mutateHistory } = useSWR<ChatHistoryResponse>(
@@ -270,7 +316,7 @@ export default function ChatPanel({ open, onToggle, onNewTrade }: Props) {
         onNewTrade?.();
       }
     } catch (e) {
-      setError(e instanceof Error && e.message ? e.message : 'Something went wrong. Please try again.');
+      setError(e instanceof Error && e.message ? e.message : t('chat.errGeneric'));
     } finally {
       setLoading(false);
     }
@@ -295,7 +341,7 @@ export default function ChatPanel({ open, onToggle, onNewTrade }: Props) {
       }
       await mutateHistory();
     } catch (e) {
-      setError(e instanceof Error && e.message ? e.message : 'Something went wrong. Please try again.');
+      setError(e instanceof Error && e.message ? e.message : t('chat.errGeneric'));
     } finally {
       setLoading(false);
     }
@@ -314,7 +360,7 @@ export default function ChatPanel({ open, onToggle, onNewTrade }: Props) {
       {/* Header */}
       <div className="flex items-center justify-between px-3 py-2 border-b border-terminal-border shrink-0">
         <span className="text-xs font-semibold text-terminal-muted uppercase tracking-wide">
-          FinAlly AI
+          {t('chat.title')}
         </span>
         {open && (
           <button
@@ -322,16 +368,16 @@ export default function ChatPanel({ open, onToggle, onNewTrade }: Props) {
             data-testid="chat-review-button"
             onClick={() => void handleReview()}
             disabled={loading}
-            title="Ask FinAlly for a daily portfolio review"
+            title={t('chat.reviewTitle')}
             className="ml-auto mr-2 text-[10px] font-semibold uppercase tracking-wider text-terminal-muted hover:text-terminal-accent disabled:opacity-50 transition-colors"
           >
-            Review
+            {t('chat.review')}
           </button>
         )}
         <button
           onClick={onToggle}
           className="text-terminal-muted hover:text-terminal-text text-sm leading-none px-1"
-          aria-label="Toggle chat panel"
+          aria-label={t('chat.toggle')}
         >
           {open ? '›' : '‹'}
         </button>
@@ -341,12 +387,12 @@ export default function ChatPanel({ open, onToggle, onNewTrade }: Props) {
       <div className="flex-1 overflow-y-auto px-3 py-2 space-y-3 min-h-0">
         {messages.length === 0 && !loading ? (
           <p className="text-terminal-muted text-xs leading-relaxed">
-            Ask FinAlly to analyze your portfolio, suggest trades, or manage your watchlist.
+            {t('chat.empty')}
           </p>
         ) : (
           messages.map((msg, idx) => {
-            const kindMeta =
-              msg.role === 'assistant' && msg.kind ? KIND_META[msg.kind] : undefined;
+            const kindBorder =
+              msg.role === 'assistant' && msg.kind ? KIND_BORDER[msg.kind] : undefined;
             return (
             <div
               key={idx}
@@ -355,37 +401,37 @@ export default function ChatPanel({ open, onToggle, onNewTrade }: Props) {
               {/* Message bubble — content rendered as React text child (T-4-02: no dangerouslySetInnerHTML) */}
               <div
                 className="max-w-full px-3 py-2 rounded text-sm leading-relaxed bg-terminal-surface text-terminal-text"
-                style={kindMeta ? { borderLeft: `2px solid ${kindMeta.border}` } : undefined}
+                style={kindBorder ? { borderLeft: `2px solid ${kindBorder}` } : undefined}
               >
-                {kindMeta && (
+                {kindBorder && msg.kind && (
                   <span
                     data-testid={`chat-kind-${msg.kind}`}
                     className="block text-[10px] font-semibold uppercase tracking-wider mb-0.5"
-                    style={{ color: kindMeta.border }}
+                    style={{ color: kindBorder }}
                   >
-                    {kindMeta.label}
+                    {t(`chat.kind.${msg.kind}`)}
                   </span>
                 )}
-                {msg.kind === 'brief' ? <BriefContent content={msg.content} /> : msg.content}
+                {msg.kind === 'brief' ? <BriefContent content={msg.content} t={t} /> : msg.content}
               </div>
 
               {/* Action badges — only for assistant messages with actions (T-4-04: structured fields only) */}
               {msg.role === 'assistant' && msg.actions && (
                 <div className="flex flex-wrap mt-1 max-w-full">
                   {msg.actions.trades?.map((trade, i) => (
-                    <TradeBadge key={`trade-${i}`} trade={trade} />
+                    <TradeBadge key={`trade-${i}`} trade={trade} t={t} sym={sym} lot={lot} />
                   ))}
                   {msg.actions.orders?.map((order, i) => (
-                    <OrderBadge key={`order-${i}`} order={order} />
+                    <OrderBadge key={`order-${i}`} order={order} t={t} sym={sym} lot={lot} />
                   ))}
                   {msg.actions.rules?.map((rule, i) => (
-                    <RuleBadge key={`rule-${i}`} outcome={rule} />
+                    <RuleBadge key={`rule-${i}`} outcome={rule} t={t} sym={sym} lot={lot} />
                   ))}
                   {msg.actions.backtests?.map((bt, i) => (
-                    <BacktestBadge key={`bt-${i}`} outcome={bt} />
+                    <BacktestBadge key={`bt-${i}`} outcome={bt} t={t} sym={sym} lot={lot} />
                   ))}
                   {msg.actions.watchlist_changes?.map((change, i) => (
-                    <WatchlistBadge key={`wl-${i}`} change={change} />
+                    <WatchlistBadge key={`wl-${i}`} change={change} t={t} sym={sym} lot={lot} />
                   ))}
                 </div>
               )}
@@ -398,7 +444,7 @@ export default function ChatPanel({ open, onToggle, onNewTrade }: Props) {
         {loading && (
           <div className="flex items-start" data-testid="chat-loading">
             <div className="bg-terminal-surface px-3 py-2 rounded text-xs text-terminal-muted">
-              Thinking…
+              {t('chat.thinking')}
             </div>
           </div>
         )}
@@ -424,7 +470,7 @@ export default function ChatPanel({ open, onToggle, onNewTrade }: Props) {
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder="Ask FinAlly about your portfolio…"
+            placeholder={t('chat.placeholder')}
             disabled={loading}
             className="flex-1 bg-terminal-surface border border-terminal-border rounded px-2 py-1 text-xs text-terminal-text placeholder-terminal-muted focus:outline-none focus:border-terminal-blue disabled:opacity-50"
           />
@@ -434,7 +480,7 @@ export default function ChatPanel({ open, onToggle, onNewTrade }: Props) {
             className="px-3 py-1 rounded text-xs font-semibold text-white disabled:opacity-50"
             style={{ backgroundColor: '#753991' }}
           >
-            Send
+            {t('chat.send')}
           </button>
         </div>
       </div>

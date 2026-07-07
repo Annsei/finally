@@ -12,6 +12,7 @@ import useSWR from 'swr';
 import { usePriceStore } from '@/stores/priceStore';
 import { fetcher } from '@/lib/fetcher';
 import type { MarketSessionResponse } from '@/types/market';
+import { useT } from '@/lib/i18n';
 
 function latestTickTs(prices: Record<string, { timestamp: number }>): number | null {
   let max: number | null = null;
@@ -30,6 +31,7 @@ function formatCountdown(seconds: number): string {
 }
 
 function SessionBadge({ now }: { now: number }) {
+  const t = useT();
   const { data } = useSWR<MarketSessionResponse>('/api/market/session', fetcher, {
     refreshInterval: 5000,
   });
@@ -37,7 +39,7 @@ function SessionBadge({ now }: { now: number }) {
   if (!data || data.next_transition_at == null) {
     return (
       <span data-testid="session-badge" data-state="always-open" className="font-semibold text-terminal-accent">
-        SIM 24/7
+        {t('status.sim247')}
       </span>
     );
   }
@@ -50,15 +52,16 @@ function SessionBadge({ now }: { now: number }) {
       data-state={data.state}
       className={`font-semibold tabular-nums ${isOpen ? 'text-terminal-up' : 'text-terminal-down'}`}
     >
-      {isOpen ? 'OPEN' : 'CLOSED'}
+      {isOpen ? t('status.open') : t('status.closed')}
       <span className="ml-1 text-terminal-muted font-normal">
-        {isOpen ? 'closes' : 'opens'} in {formatCountdown(remaining)}
+        {t(isOpen ? 'status.closesIn' : 'status.opensIn', { t: formatCountdown(remaining) })}
       </span>
     </span>
   );
 }
 
 export default function StatusBar() {
+  const t = useT();
   const prices = usePriceStore((s) => s.prices);
   const [now, setNow] = useState(() => Date.now());
 
@@ -78,15 +81,18 @@ export default function StatusBar() {
           ? 'text-terminal-amber'
           : 'text-terminal-down';
   const feedLabel =
-    ageSec == null ? 'Feed: —' : `Feed: ${ageSec < 1 ? '<1' : Math.round(ageSec)}s ago`;
+    ageSec == null
+      ? t('status.feedNone')
+      : t('status.feed', { age: `${ageSec < 1 ? '<1' : Math.round(ageSec)}s` });
 
   return (
     <footer className="h-6 shrink-0 flex items-center justify-between px-4 border-t border-terminal-border bg-terminal-surface text-xs">
       <span className="flex items-center gap-3 text-terminal-muted">
         <SessionBadge now={now} />
         <span className="hidden md:inline">
-          Shortcuts: <kbd className="px-1">/</kbd> search · <kbd className="px-1">↑↓</kbd> select ·{' '}
-          <kbd className="px-1">B</kbd>/<kbd className="px-1">S</kbd> trade
+          {t('status.shortcuts')} <kbd className="px-1">/</kbd> {t('status.scSearch')} ·{' '}
+          <kbd className="px-1">↑↓</kbd> {t('status.scSelect')} ·{' '}
+          <kbd className="px-1">B</kbd>/<kbd className="px-1">S</kbd> {t('status.scTrade')}
         </span>
       </span>
       <span className="flex items-center gap-4 tabular-nums">

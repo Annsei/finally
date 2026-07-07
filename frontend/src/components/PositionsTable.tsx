@@ -4,6 +4,7 @@ import type { PortfolioResponse, Position } from '@/types/market';
 import { fetcher } from '@/lib/fetcher';
 import { useTicker } from '@/stores/priceStore';
 import { formatQuantity } from '@/lib/format';
+import { useT } from '@/lib/i18n';
 
 // Inner component: one row per position with live price + flash animation
 function PositionsRow({ pos }: { pos: Position }) {
@@ -80,13 +81,14 @@ function PositionsRow({ pos }: { pos: Position }) {
 }
 
 export default function PositionsTable() {
+  const t = useT();
   const { data } = useSWR<PortfolioResponse>('/api/portfolio/', fetcher);
   const positions = data?.positions;
 
   if (!positions || positions.length === 0) {
     return (
       <div className="p-4 text-terminal-muted text-xs">
-        No positions yet. Use the trade bar to buy shares.
+        {t('positions.empty')}
       </div>
     );
   }
@@ -95,12 +97,12 @@ export default function PositionsTable() {
     <table data-testid="positions-table" className="w-full text-xs border-collapse">
       <thead>
         <tr className="text-terminal-muted border-b border-terminal-border">
-          <th className="text-left py-1 pl-1 font-semibold">Ticker</th>
-          <th className="text-right py-1 font-semibold">Qty</th>
-          <th className="text-right py-1 font-semibold">Avg Cost</th>
-          <th className="text-right py-1 font-semibold">Price</th>
-          <th className="text-right py-1 font-semibold">P&L</th>
-          <th className="text-right py-1 pr-1 font-semibold">Change %</th>
+          <th className="text-left py-1 pl-1 font-semibold">{t('positions.colTicker')}</th>
+          <th className="text-right py-1 font-semibold">{t('positions.colQty')}</th>
+          <th className="text-right py-1 font-semibold">{t('positions.colAvgCost')}</th>
+          <th className="text-right py-1 font-semibold">{t('positions.colPrice')}</th>
+          <th className="text-right py-1 font-semibold">{t('positions.colPnl')}</th>
+          <th className="text-right py-1 pr-1 font-semibold">{t('positions.colChange')}</th>
         </tr>
       </thead>
       <tbody>

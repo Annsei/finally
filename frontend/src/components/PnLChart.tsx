@@ -12,6 +12,8 @@ import type { ISeriesApi, IChartApi, UTCTimestamp } from 'lightweight-charts';
 import useSWR from 'swr';
 import { fetcher } from '@/lib/fetcher';
 import type { PortfolioHistoryResponse } from '@/types/market';
+import { useMarketProfile, directionColors } from '@/lib/marketProfile';
+import { useT } from '@/lib/i18n';
 
 // Portfolio baseline — the seed cash every session starts from (PLAN.md §7)
 export const PNL_BASELINE = 10000;
@@ -37,7 +39,22 @@ export function filterByRange(points: Point[], range: Range): Point[] {
   return points.filter((p) => (p.time as number) >= dayStart);
 }
 
+// Direction fill tints (canvas can't read CSS vars). Above-baseline uses the
+// "up" tint, below-baseline the "down" tint — swapped on the A-share market.
+const G28 = 'rgba(34, 197, 94, 0.28)';
+const G03 = 'rgba(34, 197, 94, 0.03)';
+const R28 = 'rgba(239, 68, 68, 0.28)';
+const R03 = 'rgba(239, 68, 68, 0.03)';
+
 export default function PnLChart() {
+  const t = useT();
+  const profile = useMarketProfile();
+  const { up: upHex, down: downHex } = directionColors(profile.up_is_red);
+  const upFill1 = profile.up_is_red ? R28 : G28;
+  const upFill2 = profile.up_is_red ? R03 : G03;
+  const downFill1 = profile.up_is_red ? G03 : R03;
+  const downFill2 = profile.up_is_red ? G28 : R28;
+
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<'Baseline'> | null>(null);
@@ -77,12 +94,12 @@ export default function PnLChart() {
     // v5 API: addSeries(BaselineSeries, options) — green above $10k, red below
     const series = chart.addSeries(BaselineSeries, {
       baseValue: { type: 'price', price: PNL_BASELINE },
-      topLineColor: '#22c55e',
-      topFillColor1: 'rgba(34, 197, 94, 0.28)',
-      topFillColor2: 'rgba(34, 197, 94, 0.03)',
-      bottomLineColor: '#ef4444',
-      bottomFillColor1: 'rgba(239, 68, 68, 0.03)',
-      bottomFillColor2: 'rgba(239, 68, 68, 0.28)',
+      topLineColor: upHex,
+      topFillColor1: upFill1,
+      topFillColor2: upFill2,
+      bottomLineColor: downHex,
+      bottomFillColor1: downFill1,
+      bottomFillColor2: downFill2,
       lineWidth: 2,
     });
 
@@ -95,6 +112,18 @@ export default function PnLChart() {
       seriesRef.current = null;
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Recolor when the market's direction colours resolve/change after mount.
+  useEffect(() => {
+    seriesRef.current?.applyOptions({
+      topLineColor: upHex,
+      topFillColor1: upFill1,
+      topFillColor2: upFill2,
+      bottomLineColor: downHex,
+      bottomFillColor1: downFill1,
+      bottomFillColor2: downFill2,
+    });
+  }, [upHex, downHex, upFill1, upFill2, downFill1, downFill2]);
 
   // Data: update chart when SWR data arrives/refreshes or the range changes.
   // Real recorded_at timestamps; snapshots are taken every 30s plus after
@@ -124,7 +153,7 @@ export default function PnLChart() {
     <div style={{ width: '100%' }}>
       <div className="flex items-center justify-between px-3 py-1">
         <span className="text-xs font-semibold text-terminal-muted uppercase tracking-wide">
-          Portfolio P&L
+          {t('pnl.title')}
         </span>
         <span className="flex gap-1">
           {(['1H', 'TODAY', 'ALL'] as const).map((r) => (
@@ -146,7 +175,7 @@ export default function PnLChart() {
       </div>
       {!hasData && (
         <div className="p-4 text-xs" style={{ color: '#8b949e' }}>
-          No portfolio history yet.
+          {t('pnl.empty')}
         </div>
       )}
       <div ref={containerRef} style={{ width: '100%', height: '160px' }} />

@@ -21,6 +21,10 @@ export interface PriceUpdate {
   ask?: number;                // best ask (buys fill here)
   volume?: number;             // volume traded since the previous update
   asset_class?: 'equity' | 'crypto'; // crypto trades 24/7 (M3.3)
+  // A-share price limits (FinAlly-CN) — null/absent on the US market, so the
+  // 涨停/跌停 badges never appear there.
+  limit_up?: number | null;    // 涨停 price (ceiling)
+  limit_down?: number | null;  // 跌停 price (floor)
 }
 
 // GET /api/market/session (M3.1) — sim trading sessions:
