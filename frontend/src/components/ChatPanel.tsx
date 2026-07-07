@@ -152,6 +152,34 @@ const KIND_META: Record<string, { label: string; border: string }> = {
   rule: { label: 'Rule', border: '#b07cc6' },
 };
 
+// Briefs arrive continuously and were drowning the conversation — clamp each
+// to two lines so the feed stays scannable; clicking toggles the full text.
+function BriefContent({ content }: { content: string }) {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <button
+      type="button"
+      data-testid="brief-content"
+      data-expanded={expanded}
+      title={expanded ? 'Collapse' : 'Show full brief'}
+      onClick={() => setExpanded((v) => !v)}
+      className="block w-full text-left text-xs leading-snug text-terminal-text"
+      style={
+        expanded
+          ? undefined
+          : {
+              display: '-webkit-box',
+              WebkitLineClamp: 2,
+              WebkitBoxOrient: 'vertical',
+              overflow: 'hidden',
+            }
+      }
+    >
+      {content}
+    </button>
+  );
+}
+
 function WatchlistBadge({ change }: { change: WatchlistOutcome }) {
   // Failed outcomes carry only {status, ticker, error} — no action
   if (change.status === 'failed') {
@@ -338,7 +366,7 @@ export default function ChatPanel({ open, onToggle, onNewTrade }: Props) {
                     {kindMeta.label}
                   </span>
                 )}
-                {msg.content}
+                {msg.kind === 'brief' ? <BriefContent content={msg.content} /> : msg.content}
               </div>
 
               {/* Action badges — only for assistant messages with actions (T-4-04: structured fields only) */}

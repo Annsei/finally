@@ -571,4 +571,51 @@ describe('ChatPanel', () => {
     expect(failed.textContent).toContain('ZZZZ');
     expect(failed.textContent).toContain('Ticker not found');
   });
+
+  // -------------------------------------------------------------------------
+  // Test 7 (M5.1): briefs render clamped, click expands
+  // -------------------------------------------------------------------------
+  it('Test 7 (M5.1): brief messages render two-line clamped and expand on click', () => {
+    const longBrief =
+      'Consider placing a modest buy order on a pull-back to test support as the rally continues across the entire tech sector this afternoon.';
+    const messages: ChatMessage[] = [
+      {
+        role: 'assistant',
+        content: longBrief,
+        kind: 'brief',
+        actions: null,
+        created_at: '2026-07-07T00:00:00Z',
+      },
+      {
+        role: 'assistant',
+        content: 'A normal chat reply.',
+        kind: 'chat',
+        actions: null,
+        created_at: '2026-07-07T00:00:01Z',
+      },
+    ];
+    (useSWR as jest.Mock).mockReturnValue({
+      data: { messages },
+      mutate: mockMutateHistory,
+    });
+
+    renderPanel();
+
+    // Collapsed by default: two-line -webkit-box clamp
+    const brief = screen.getByTestId('brief-content');
+    expect(brief.getAttribute('data-expanded')).toBe('false');
+    expect(brief.style.webkitLineClamp).toBe('2');
+    expect(brief.textContent).toBe(longBrief);
+
+    // Click expands (clamp removed), click again collapses
+    fireEvent.click(brief);
+    expect(brief.getAttribute('data-expanded')).toBe('true');
+    expect(brief.style.webkitLineClamp).toBe('');
+    fireEvent.click(brief);
+    expect(brief.getAttribute('data-expanded')).toBe('false');
+
+    // Plain chat messages are NOT wrapped in the clamp control
+    expect(screen.getAllByTestId('brief-content')).toHaveLength(1);
+    expect(screen.getByText('A normal chat reply.')).toBeTruthy();
+  });
 });

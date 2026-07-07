@@ -206,25 +206,26 @@ class TestBriefThrottles:
         )
         assert counts["briefed"] == 1
 
-        # 120s later (global OK, but < 300s ticker cooldown): AAPL throttled,
-        # while an MSFT event in the same pass would still... be globally
-        # throttled by AAPL? No — AAPL was skipped, so MSFT is the pass's
-        # first brief and 120s > 60s global cooldown.
+        # Between the two cooldowns (global expired, ticker not): AAPL
+        # throttled, while an MSFT event in the same pass is the pass's first
+        # brief — AAPL was skipped, so the global throttle doesn't block MSFT.
+        mid = (BRIEF_GLOBAL_COOLDOWN_SECONDS + BRIEF_TICKER_COOLDOWN_SECONDS) / 2
         _fire_event(briefs_env.cache, "AAPL", BASE_TS + 50)  # past cache 30s cooldown
         _fire_event(briefs_env.cache, "MSFT", BASE_TS + 51)
         counts = await process_events_for_briefs_once(
-            briefs_env.cache, briefs_env.db, briefs_env.state, now=NOW + 120
+            briefs_env.cache, briefs_env.db, briefs_env.state, now=NOW + mid
         )
         assert counts == {**NO_BRIEFS, "briefed": 1, "skipped_throttled": 1}
         assert "MSFT" in _chat_rows(briefs_env.db)[-1]["content"]
 
-        # 301s after the first AAPL brief: AAPL's cooldown has expired.
+        # Past BOTH cooldowns (AAPL's ticker window from NOW, the global
+        # window from the MSFT brief at NOW + mid): AAPL briefs again.
         _fire_event(briefs_env.cache, "AAPL", BASE_TS + 90)
         counts = await process_events_for_briefs_once(
             briefs_env.cache,
             briefs_env.db,
             briefs_env.state,
-            now=NOW + BRIEF_TICKER_COOLDOWN_SECONDS + 1,
+            now=NOW + mid + BRIEF_GLOBAL_COOLDOWN_SECONDS + 1,
         )
         assert counts["briefed"] == 1
         assert "AAPL" in _chat_rows(briefs_env.db)[-1]["content"]
@@ -266,3 +267,45 @@ class TestBriefLLMFailure:
         )
         assert counts["briefed"] == 1
         assert len(_chat_rows(briefs_env.db)) == 1
+
+
+@pytest.mark.asyncio
+class TestBriefCompactness:
+    """Brief text is hard-capped and the prompt is long-only (chat-flood fix)."""
+
+    async def test_rambling_llm_brief_is_truncated_and_unquoted(
+        self, briefs_env, monkeypatch
+    ):
+        import litellm
+
+        from app.briefs import BRIEF_MAX_CHARS
+
+        monkeypatch.setenv("LLM_MOCK", "false")
+        rambling = '"' + "Consider rebalancing your position now. " * 10 + '"'
+
+        def rambling_completion(*args, **kwargs):
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content=rambling))]
+            )
+
+        monkeypatch.setattr(litellm, "completion", rambling_completion)
+
+        _fire_event(briefs_env.cache, "NVDA", BASE_TS + 10)
+        counts = await process_events_for_briefs_once(
+            briefs_env.cache, briefs_env.db, briefs_env.state, now=NOW
+        )
+        assert counts["briefed"] == 1
+
+        rows = _chat_rows(briefs_env.db)
+        content = rows[0]["content"]
+        assert len(content) <= BRIEF_MAX_CHARS
+        assert content.endswith("…")
+        assert not content.startswith('"')
+
+    def test_prompt_constrains_length_and_forbids_shorting(self):
+        from app.briefs import BRIEF_MAX_CHARS, BRIEF_SYSTEM_PROMPT
+
+        # The parked M2.3 refinement: briefs once suggested short entries the
+        # platform cannot execute — the prompt must forbid them explicitly.
+        assert "NEVER suggest short selling" in BRIEF_SYSTEM_PROMPT
+        assert str(BRIEF_MAX_CHARS) in BRIEF_SYSTEM_PROMPT

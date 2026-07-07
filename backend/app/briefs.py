@@ -61,10 +61,14 @@ logger = logging.getLogger(__name__)
 MODEL = "openrouter/openai/gpt-oss-120b"
 EXTRA_BODY = {"provider": {"order": ["cerebras"]}}
 
-# At most one brief per minute across all tickers…
-BRIEF_GLOBAL_COOLDOWN_SECONDS = 60.0
+# At most one brief per three minutes across all tickers — at 60s the chat
+# panel degraded into a brief feed that drowned the actual conversation.
+BRIEF_GLOBAL_COOLDOWN_SECONDS = 180.0
 # …and at most one brief per ticker every five minutes.
 BRIEF_TICKER_COOLDOWN_SECONDS = 300.0
+# Hard cap enforced on brief text (the prompt asks for one short sentence;
+# the model may not comply) — keeps the chat panel scannable.
+BRIEF_MAX_CHARS = 140
 # M4 cost cap: ONE brief text is generated per event (one LLM call) and its
 # row is written for each user who holds or watches the ticker, capped at
 # this many users per event so a popular ticker cannot multiply LLM/chat
@@ -82,8 +86,11 @@ NARRATIVE_MAX_CHARS = 90
 BRIEF_SYSTEM_PROMPT = (
     "You are FinAlly, an AI trading assistant. A sudden market move just "
     "happened on a ticker the user holds or watches. Reply with exactly ONE "
-    "short, actionable sentence for the user — plain text, no JSON, no "
-    "markdown."
+    f"short, punchy sentence of at most {BRIEF_MAX_CHARS} characters — plain "
+    "text, no JSON, no markdown. Only suggest actions this long-only "
+    "platform supports: buying shares, selling shares the user holds, "
+    "limit/stop orders, standing rules, or watchlist changes. NEVER suggest "
+    "short selling, options, or margin."
 )
 
 NARRATIVE_SYSTEM_PROMPT = (
@@ -192,7 +199,12 @@ async def _generate_brief_text(
             event.id,
         )
         return None
-    return text
+    # Belt and braces: the prompt asks for one short sentence, but the model
+    # may ramble — enforce the cap so the chat panel stays scannable.
+    text = text.strip("\"'").strip()
+    if len(text) > BRIEF_MAX_CHARS:
+        text = text[: BRIEF_MAX_CHARS - 1].rstrip() + "…"
+    return text or None
 
 
 async def _generate_narrative_text(
