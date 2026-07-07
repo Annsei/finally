@@ -15,7 +15,7 @@ import pytest
 def fresh_db(tmp_path):
     """Provide a fresh initialized SQLite connection for direct helper testing."""
     db_file = str(tmp_path / "test_watchlist_helper.db")
-    from app.db.connection import init_db, get_conn
+    from app.db.connection import get_conn, init_db
     init_db(db_file)
     conn = get_conn(db_file)
     yield conn
@@ -31,6 +31,7 @@ class TestApplyWatchlistChangeOnConnImport:
 
     def test_signature(self):
         import inspect
+
         from app.routes.watchlist import apply_watchlist_change_on_conn
         sig = inspect.signature(apply_watchlist_change_on_conn)
         params = list(sig.parameters.keys())

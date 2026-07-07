@@ -197,6 +197,10 @@ async def lifespan(app: FastAPI):
     rules_router = create_rules_router(price_cache, db_path)
     app.include_router(rules_router)
 
+    # Backtest router (M5 — stateless strategy backtester, no DB access)
+    from app.routes.backtest import create_backtest_router
+    app.include_router(create_backtest_router(price_cache, commission_bps))
+
     # Watchlist router
     from app.routes.watchlist import create_watchlist_router
     watchlist_router = create_watchlist_router(price_cache, db_path)

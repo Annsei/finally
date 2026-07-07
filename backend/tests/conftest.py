@@ -99,6 +99,7 @@ async def app_client(tmp_path, monkeypatch, fake_market_source):
     from app.market import PriceCache, create_stream_router
     from app.market.seed_prices import SEED_PRICES
     from app.routes.auth import create_auth_router
+    from app.routes.backtest import create_backtest_router
     from app.routes.health import router as health_router
     from app.routes.leaderboard import create_leaderboard_router
     from app.routes.market import create_market_router
@@ -126,6 +127,7 @@ async def app_client(tmp_path, monkeypatch, fake_market_source):
     test_app.include_router(create_portfolio_router(price_cache, db_file))
     test_app.include_router(create_orders_router(price_cache, db_file))
     test_app.include_router(create_rules_router(price_cache, db_file))
+    test_app.include_router(create_backtest_router(price_cache))
     test_app.include_router(create_watchlist_router(price_cache, db_file))
     test_app.include_router(create_market_router(price_cache))
     test_app.include_router(create_auth_router(db_file))
@@ -209,6 +211,7 @@ async def arena(tmp_path, monkeypatch, fake_market_source):
     from app.market import PriceCache, create_stream_router
     from app.market.seed_prices import SEED_PRICES
     from app.routes.auth import create_auth_router
+    from app.routes.backtest import create_backtest_router
     from app.routes.chat import create_chat_router
     from app.routes.health import router as health_router
     from app.routes.leaderboard import create_leaderboard_router
@@ -239,6 +242,7 @@ async def arena(tmp_path, monkeypatch, fake_market_source):
     test_app.include_router(create_portfolio_router(price_cache, db_file))
     test_app.include_router(create_orders_router(price_cache, db_file))
     test_app.include_router(create_rules_router(price_cache, db_file))
+    test_app.include_router(create_backtest_router(price_cache))
     test_app.include_router(create_watchlist_router(price_cache, db_file))
     test_app.include_router(create_chat_router(price_cache, db_file))
     test_app.include_router(create_market_router(price_cache))

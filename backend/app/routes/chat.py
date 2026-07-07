@@ -3,8 +3,8 @@
 Provides:
 - POST /api/chat — LLM-powered chat with structured output; auto-executes
   trades, advanced orders (limit/stop/stop_limit — M2.1), standing rules
-  (M2.2), and watchlist changes; persists conversation history to
-  chat_messages.
+  (M2.2), strategy backtests (M5 — stateless engine runs, compact outcomes),
+  and watchlist changes; persists conversation history to chat_messages.
 - GET /api/chat — last 20 chat_messages rows of every kind
   ('chat' | 'brief' | 'review' | 'rule').
 - POST /api/chat/review — on-demand daily AI review (M2.4): summarizes
@@ -33,6 +33,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from app.auth import get_current_user_id
+from app.backtest import normalize_backtest_config, run_backtest
 from app.db.connection import get_conn
 from app.market.cache import PriceCache
 from app.market.session import SessionClock
@@ -56,7 +57,7 @@ EXTRA_BODY = {"provider": {"order": ["cerebras"]}}
 SYSTEM_PROMPT = (
     "You are FinAlly, an AI trading assistant. Be concise and data-driven. "
     "Execute trades when asked. Always respond with valid structured JSON.\n\n"
-    "You act through four action arrays in your JSON response:\n"
+    "You act through five action arrays in your JSON response:\n"
     "- 'trades': immediate market orders {ticker, side, quantity}.\n"
     "- 'orders': resting limit/stop/stop-limit orders {ticker, side, quantity, "
     "kind, limit_price?, stop_price?, time_in_force?}. kind is one of 'limit' "
@@ -77,6 +78,15 @@ SYSTEM_PROMPT = (
     "a market trade once and moves to status 'fired' until the user re-arms "
     "it. Always write a clear human-readable description, e.g. "
     "'Buy 5 NVDA when day change <= -3%'.\n"
+    "- 'backtests': strategy backtests {ticker, trigger_type, threshold, "
+    "quantity, take_profit_pct?, stop_loss_pct?, days?, runs?} simulated "
+    "against synthetic history. Buy-entry only — there is no side field; "
+    "exits are modeled with take_profit_pct/stop_loss_pct (percent "
+    "above/below entry, each > 0 when given). trigger_type/threshold use "
+    "the same semantics as 'rules'. days defaults to 30 (5-120), runs to 1 "
+    "(1-50 Monte Carlo re-runs). Use this when the user asks to backtest a "
+    "strategy ('backtest', '回测') or how a rule/strategy would have "
+    "performed.\n"
     "- 'watchlist_changes': {ticker, action} with action 'add' or 'remove'."
 )
 
@@ -134,12 +144,31 @@ class RuleInstruction(BaseModel):
     description: str | None = None
 
 
+class BacktestInstruction(BaseModel):
+    """A strategy backtest the LLM asks to run (M5) — POST /backtest fields.
+
+    Buy-entry only, so there is no side field; exits are modeled with
+    take_profit_pct/stop_loss_pct. None days/runs fall back to the engine
+    defaults (30 days, 1 run).
+    """
+
+    ticker: str
+    trigger_type: str  # price_above | price_below | day_change_pct_above | day_change_pct_below
+    threshold: float
+    quantity: float
+    take_profit_pct: float | None = None
+    stop_loss_pct: float | None = None
+    days: int | None = None
+    runs: int | None = None
+
+
 class ChatResponse(BaseModel):
     message: str
     trades: list[TradeInstruction] = []
     watchlist_changes: list[WatchlistChange] = []
     orders: list[OrderInstruction] = []
     rules: list[RuleInstruction] = []
+    backtests: list[BacktestInstruction] = []
 
 
 # ---------------------------------------------------------------------------
@@ -434,8 +463,10 @@ def create_chat_router(
         Returns structured JSON with the assistant message, trade outcomes,
         watchlist change outcomes, and — when the turn contained them —
         advanced-order outcomes ("orders": full order JSON for placed/filled,
-        failed dict otherwise) and rule outcomes ("rules":
-        {"status": "created", "rule": {...}} or failed dict). Per-action
+        failed dict otherwise), rule outcomes ("rules":
+        {"status": "created", "rule": {...}} or failed dict), and backtest
+        outcomes ("backtests": compact {"status": "completed", ticker,
+        config, stats} — never curves/trades — or failed dict, M5). Per-action
         validation failures are returned as outcome dicts (status=failed) —
         they do NOT raise HTTP errors and do not abort the remaining actions.
 
@@ -443,9 +474,10 @@ def create_chat_router(
         successful "add" is registered with the live market source
         immediately (add_ticker seeds the price cache) so a single turn like
         "add PYPL and buy 5 shares" finds a price at trade time. Advanced
-        orders are placed AFTER trades, then standing rules are created.
-        Market source removals stay AFTER the commit so an in-flight turn
-        cannot lose prices and a rollback cannot orphan the source state.
+        orders are placed AFTER trades, then standing rules are created,
+        then backtests run (stateless — they touch no tables). Market source
+        removals stay AFTER the commit so an in-flight turn cannot lose
+        prices and a rollback cannot orphan the source state.
 
         Transaction boundary: all executed trades, placed orders (including
         immediate marketable fills), created rules, applied watchlist changes,
@@ -497,14 +529,37 @@ def create_chat_router(
 
             # Step 4: Get LLM response — mock path (D-06/D-07) or real LiteLLM call
             if os.getenv("LLM_MOCK", "false").lower() == "true":
-                # Construct deterministic response; fall through to auto-exec (D-07)
-                parsed = ChatResponse(
-                    message=(
-                        "I've added PYPL to your watchlist and bought 5 shares of AAPL for you."
-                    ),
-                    trades=[TradeInstruction(ticker="AAPL", side="buy", quantity=5)],
-                    watchlist_changes=[WatchlistChange(ticker="PYPL", action="add")],
-                )
+                # Construct deterministic responses; fall through to auto-exec
+                # (D-07). Messages mentioning "backtest" get the M5 backtest
+                # mock; everything else keeps the original PYPL/AAPL payload
+                # byte-identical for the E2E suite.
+                if "backtest" in body.message.lower():
+                    parsed = ChatResponse(
+                        message=(
+                            "[MOCK] Backtest complete: NVDA dip-buy strategy "
+                            "tested over 20 simulated days."
+                        ),
+                        backtests=[
+                            BacktestInstruction(
+                                ticker="NVDA",
+                                trigger_type="day_change_pct_below",
+                                threshold=-3,
+                                quantity=5,
+                                take_profit_pct=5,
+                                stop_loss_pct=3,
+                                days=20,
+                                runs=1,
+                            )
+                        ],
+                    )
+                else:
+                    parsed = ChatResponse(
+                        message=(
+                            "I've added PYPL to your watchlist and bought 5 shares of AAPL for you."
+                        ),
+                        trades=[TradeInstruction(ticker="AAPL", side="buy", quantity=5)],
+                        watchlist_changes=[WatchlistChange(ticker="PYPL", action="add")],
+                    )
             else:
                 from litellm import completion  # lazy import — never reached when mocked
 
@@ -603,17 +658,55 @@ def create_chat_router(
                 for r in parsed.rules
             ]
 
+            # Step 6d (M5): Run strategy backtests — stateless compute, so
+            # nothing joins the transaction. Validation shares
+            # normalize_backtest_config with POST /api/backtest (identical
+            # error messages) and per-instruction failures never abort the
+            # batch. Outcomes stay compact: config + stats only — curves and
+            # trades are never stored in chat actions. The engine runs off
+            # the event loop like the LLM call itself.
+            backtest_outcomes: list[dict] = []
+            for b in parsed.backtests:
+                normalized = normalize_backtest_config(
+                    price_cache,
+                    ticker=b.ticker,
+                    trigger_type=b.trigger_type,
+                    threshold=b.threshold,
+                    quantity=b.quantity,
+                    take_profit_pct=b.take_profit_pct,
+                    stop_loss_pct=b.stop_loss_pct,
+                    days=b.days,
+                    runs=b.runs,
+                )
+                if normalized["status"] == "failed":
+                    backtest_outcomes.append(normalized)
+                    continue
+                result = await asyncio.to_thread(
+                    run_backtest, normalized["config"], commission_bps=commission_bps
+                )
+                backtest_outcomes.append(
+                    {
+                        "status": "completed",
+                        "ticker": result["config"]["ticker"],
+                        "config": result["config"],
+                        "stats": result["stats"],
+                    }
+                )
+
             # Step 7: Persist both messages (T-02-12 — parameterized SQL)
             # Separate timestamps guarantee deterministic ORDER BY created_at ordering
             # even when both rows are written in the same request (WR-02).
-            # The "orders"/"rules" keys are appended only when the turn
-            # contained such instructions, keeping the LLM_MOCK response (no
-            # orders/rules) byte-identical for the E2E suite.
+            # The "orders"/"rules"/"backtests" keys are appended only when
+            # the turn contained such instructions, keeping the default
+            # LLM_MOCK response (no orders/rules/backtests) byte-identical
+            # for the E2E suite.
             actions = {"trades": trade_outcomes, "watchlist_changes": watch_outcomes}
             if order_outcomes:
                 actions["orders"] = order_outcomes
             if rule_outcomes:
                 actions["rules"] = rule_outcomes
+            if backtest_outcomes:
+                actions["backtests"] = backtest_outcomes
             user_ts = datetime.now(timezone.utc).isoformat()
             conn.execute(
                 "INSERT INTO chat_messages (id, user_id, role, content, actions, kind, created_at) "
@@ -654,8 +747,9 @@ def create_chat_router(
                     await sync_market_source(request, outcome["ticker"], "remove")
 
             # Step 10: Return structured response (mirrors the stored actions:
-            # "orders"/"rules" keys appear only when the turn contained them,
-            # keeping the LLM_MOCK payload byte-identical for E2E).
+            # "orders"/"rules"/"backtests" keys appear only when the turn
+            # contained them, keeping the default LLM_MOCK payload
+            # byte-identical for E2E).
             response_payload = {
                 "message": parsed.message,
                 "trades": trade_outcomes,
@@ -665,6 +759,8 @@ def create_chat_router(
                 response_payload["orders"] = order_outcomes
             if rule_outcomes:
                 response_payload["rules"] = rule_outcomes
+            if backtest_outcomes:
+                response_payload["backtests"] = backtest_outcomes
             return response_payload
 
         except Exception:
