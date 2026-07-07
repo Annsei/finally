@@ -160,6 +160,94 @@ export interface RulesResponse {
   rules: TradingRule[];
 }
 
+// POST /api/backtest (M5) — stateless strategy backtest over synthetic GBM
+// history. Buy-entry only; exits are modeled with take_profit_pct/stop_loss_pct.
+export interface BacktestRequest {
+  ticker: string;
+  trigger_type: RuleTriggerType;
+  threshold: number;
+  side?: 'buy';
+  quantity: number;
+  take_profit_pct?: number | null;
+  stop_loss_pct?: number | null;
+  days?: number; // 5-120, default 30
+  runs?: number; // 1-50, default 1 (Monte Carlo re-runs)
+  seed?: number; // omitted → backend draws one; echoed in config
+}
+
+export interface BacktestConfig {
+  ticker: string;
+  trigger_type: RuleTriggerType;
+  threshold: number;
+  side: 'buy';
+  quantity: number;
+  take_profit_pct: number | null;
+  stop_loss_pct: number | null;
+  days: number;
+  runs: number;
+  seed: number;
+  commission_bps: number;
+  anchor_price: number;
+}
+
+export interface BacktestStats {
+  total_return_pct: number;
+  buy_hold_return_pct: number;
+  max_drawdown_pct: number;
+  final_equity: number;
+  fires: number;
+  round_trips: number;
+  win_rate: number | null; // null when no round trips
+  avg_win: number | null;
+  avg_loss: number | null;
+  profit_factor: number | null; // null when no gross losses
+  commission_paid: number;
+  rejections: { insufficient_cash: number };
+}
+
+export interface BacktestPoint {
+  time: number; // Unix seconds (int), strictly ascending
+  value: number;
+}
+
+export type BacktestTradeReason = 'trigger' | 'take_profit' | 'stop_loss' | 'horizon_end';
+
+export interface BacktestTrade {
+  time: number;
+  side: 'buy' | 'sell';
+  price: number;
+  quantity: number;
+  reason: BacktestTradeReason;
+  pnl: number | null; // sells carry the round trip's realized P&L
+}
+
+export interface BacktestRunsSummary {
+  runs: number;
+  median_return_pct: number;
+  p05_return_pct: number;
+  p95_return_pct: number;
+  positive_share: number; // fraction of runs with return > 0
+  median_max_drawdown_pct: number;
+}
+
+export interface BacktestResponse {
+  config: BacktestConfig;
+  stats: BacktestStats;
+  equity_curve: BacktestPoint[];
+  baseline_curve: BacktestPoint[]; // frictionless buy & hold reference
+  trades: BacktestTrade[];
+  runs_summary: BacktestRunsSummary | null; // populated when runs > 1
+}
+
+// Chat backtest outcomes (M5) — compact stats only, never curves/trades:
+export interface ChatBacktestOutcome {
+  status: 'completed' | 'failed';
+  ticker: string;
+  error?: string;
+  config?: BacktestConfig;
+  stats?: BacktestStats;
+}
+
 // Chat action outcomes for AI-placed orders and AI-created rules (M2.1/2.2):
 export interface ChatOrderOutcome {
   status: string; // open | filled | failed
@@ -290,6 +378,7 @@ export interface ChatMessage {
     watchlist_changes: WatchlistOutcome[];
     orders?: ChatOrderOutcome[];
     rules?: ChatRuleOutcome[];
+    backtests?: ChatBacktestOutcome[];
   } | null;
   created_at: string;
 }
@@ -306,4 +395,5 @@ export interface ChatPostResponse {
   watchlist_changes: WatchlistOutcome[];
   orders?: ChatOrderOutcome[];
   rules?: ChatRuleOutcome[];
+  backtests?: ChatBacktestOutcome[];
 }

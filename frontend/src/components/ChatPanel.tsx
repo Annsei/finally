@@ -9,6 +9,7 @@ import type {
   WatchlistOutcome,
   ChatOrderOutcome,
   ChatRuleOutcome,
+  ChatBacktestOutcome,
 } from '@/types/market';
 
 interface Props {
@@ -112,6 +113,34 @@ function RuleBadge({ outcome }: { outcome: ChatRuleOutcome }) {
       style={{ border: '1px solid #753991', color: '#b07cc6' }}
     >
       {`Rule armed: ${outcome.rule.description}`}
+    </span>
+  );
+}
+
+// AI-run backtests (M5) — compact stats line; full curves live in the Backtest tab
+function BacktestBadge({ outcome }: { outcome: ChatBacktestOutcome }) {
+  if (outcome.status === 'failed' || !outcome.stats) {
+    return (
+      <span
+        data-testid="backtest-badge-failed"
+        className="inline-block px-2 py-0.5 rounded text-xs mr-1 mt-1 bg-terminal-surface"
+        style={{ border: '1px solid #ef4444', color: '#ef4444' }}
+      >
+        {`Backtest failed: ${outcome.ticker} — ${outcome.error ?? 'rejected'}`}
+      </span>
+    );
+  }
+  const s = outcome.stats;
+  const sign = s.total_return_pct >= 0 ? '+' : '';
+  const bhSign = s.buy_hold_return_pct >= 0 ? '+' : '';
+  const winPart = s.win_rate != null ? ` · win ${Math.round(s.win_rate * 100)}%` : '';
+  return (
+    <span
+      data-testid="backtest-badge-completed"
+      className="inline-block px-2 py-0.5 rounded text-xs mr-1 mt-1 bg-terminal-surface"
+      style={{ border: '1px solid #209dd7', color: '#209dd7' }}
+    >
+      {`Backtest ${outcome.ticker}: ${sign}${s.total_return_pct.toFixed(1)}% (B&H ${bhSign}${s.buy_hold_return_pct.toFixed(1)}%) · ${s.round_trips} trades${winPart}`}
     </span>
   );
 }
@@ -323,6 +352,9 @@ export default function ChatPanel({ open, onToggle, onNewTrade }: Props) {
                   ))}
                   {msg.actions.rules?.map((rule, i) => (
                     <RuleBadge key={`rule-${i}`} outcome={rule} />
+                  ))}
+                  {msg.actions.backtests?.map((bt, i) => (
+                    <BacktestBadge key={`bt-${i}`} outcome={bt} />
                   ))}
                   {msg.actions.watchlist_changes?.map((change, i) => (
                     <WatchlistBadge key={`wl-${i}`} change={change} />

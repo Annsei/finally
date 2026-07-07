@@ -15,6 +15,7 @@ jest.mock('swr', () => ({
 }));
 
 import RulesTable from '@/components/RulesTable';
+import { useUiStore } from '@/stores/uiStore';
 import type { TradingRule } from '@/types/market';
 
 const mockUseSWR = useSWR as jest.MockedFunction<typeof useSWR>;
@@ -53,6 +54,7 @@ describe('RulesTable', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     global.fetch = jest.fn();
+    useUiStore.setState({ portfolioTab: 'rules', backtestPrefill: null });
     mockUseSWR.mockReturnValue({
       data: { rules: [activeRule, firedRule] },
       mutate: mockMutate,
@@ -119,6 +121,24 @@ describe('RulesTable', () => {
     await waitFor(() => {
       expect(global.fetch).toHaveBeenCalledWith('/api/rules/r1', { method: 'DELETE' });
       expect(mockMutate).toHaveBeenCalled();
+    });
+  });
+
+  it('Test 5 (M5): "test" button on buy rules prefills and jumps to the Backtest tab', () => {
+    render(<RulesTable />);
+
+    // Buy rule gets the button; sell rules don't (backtester is buy-entry only)
+    expect(screen.getByTestId('rule-backtest-r1')).toBeInTheDocument();
+    expect(screen.queryByTestId('rule-backtest-r2')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId('rule-backtest-r1'));
+
+    expect(useUiStore.getState().portfolioTab).toBe('backtest');
+    expect(useUiStore.getState().backtestPrefill).toEqual({
+      ticker: 'NVDA',
+      trigger_type: 'day_change_pct_below',
+      threshold: -3,
+      quantity: 5,
     });
   });
 

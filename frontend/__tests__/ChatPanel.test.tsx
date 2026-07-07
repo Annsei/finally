@@ -520,4 +520,55 @@ describe('ChatPanel', () => {
     const scripts = document.body.querySelectorAll('script');
     expect(scripts.length).toBe(0);
   });
+
+  // -------------------------------------------------------------------------
+  // Test 6 (M5): backtest outcome badges
+  // -------------------------------------------------------------------------
+  it('Test 6 (M5): assistant actions.backtests render completed and failed badges', () => {
+    const btMsg: ChatMessage = {
+      role: 'assistant',
+      content: 'Backtest done.',
+      actions: {
+        trades: [],
+        watchlist_changes: [],
+        backtests: [
+          {
+            status: 'completed',
+            ticker: 'NVDA',
+            stats: {
+              total_return_pct: 4.3,
+              buy_hold_return_pct: 6.0,
+              max_drawdown_pct: 3.9,
+              final_equity: 10430,
+              fires: 6,
+              round_trips: 6,
+              win_rate: 0.67,
+              avg_win: 141,
+              avg_loss: -80,
+              profit_factor: 2.3,
+              commission_paid: 0,
+              rejections: { insufficient_cash: 0 },
+            },
+          },
+          { status: 'failed', ticker: 'ZZZZ', error: 'Ticker not found' },
+        ],
+      },
+      created_at: '2026-07-07T00:00:05Z',
+    };
+
+    (useSWR as jest.Mock).mockReturnValue({
+      data: { messages: [btMsg] },
+      mutate: mockMutateHistory,
+    });
+
+    renderPanel();
+
+    const completed = screen.getByTestId('backtest-badge-completed');
+    expect(completed.textContent).toContain('Backtest NVDA: +4.3%');
+    expect(completed.textContent).toContain('win 67%');
+
+    const failed = screen.getByTestId('backtest-badge-failed');
+    expect(failed.textContent).toContain('ZZZZ');
+    expect(failed.textContent).toContain('Ticker not found');
+  });
 });

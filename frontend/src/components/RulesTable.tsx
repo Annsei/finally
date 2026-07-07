@@ -9,6 +9,7 @@ import { useState } from 'react';
 import useSWR from 'swr';
 import { fetcher } from '@/lib/fetcher';
 import { formatQuantity } from '@/lib/format';
+import { useUiStore } from '@/stores/uiStore';
 import type { RulesResponse, TradingRule, RuleStatus } from '@/types/market';
 
 const STATUS_STYLE: Record<RuleStatus, string> = {
@@ -36,6 +37,20 @@ export default function RulesTable() {
   });
   const [actionError, setActionError] = useState<string | null>(null);
   const rules = data?.rules;
+  const setPortfolioTab = useUiStore((s) => s.setPortfolioTab);
+  const setBacktestPrefill = useUiStore((s) => s.setBacktestPrefill);
+
+  // M5: hand the rule's config to the Backtest tab (buy-entry rules only —
+  // the backtester models exits with TP/SL, not standalone sell triggers).
+  const backtest = (rule: TradingRule) => {
+    setBacktestPrefill({
+      ticker: rule.ticker,
+      trigger_type: rule.trigger_type,
+      threshold: rule.threshold,
+      quantity: rule.quantity,
+    });
+    setPortfolioTab('backtest');
+  };
 
   const patchStatus = async (rule: TradingRule) => {
     setActionError(null);
@@ -132,6 +147,17 @@ export default function RulesTable() {
               </td>
               <td className="text-right py-1 tabular-nums text-terminal-muted">{r.fire_count}</td>
               <td className="text-right py-1 pr-1 whitespace-nowrap">
+                {r.side === 'buy' && (
+                  <button
+                    type="button"
+                    data-testid={`rule-backtest-${r.id}`}
+                    title="Backtest this rule on simulated history"
+                    onClick={() => backtest(r)}
+                    className="text-terminal-muted hover:text-terminal-accent text-[10px] font-semibold uppercase px-1"
+                  >
+                    test
+                  </button>
+                )}
                 <button
                   type="button"
                   data-testid={`rule-toggle-${r.id}`}
