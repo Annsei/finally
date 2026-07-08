@@ -34,11 +34,17 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from app.auth import get_current_user_id
-from app.backtest import STARTING_CASH, normalize_backtest_config, run_backtest
+from app.backtest import (
+    STARTING_CASH,
+    normalize_backtest_config,
+    normalize_strategy_backtest_config,
+    run_backtest,
+)
 from app.db.connection import get_conn
 from app.market.cache import PriceCache
 from app.market.profiles import MarketProfile
 from app.market.session import SessionClock
+from app.routes.backtest_runs import insert_backtest_run_on_conn
 
 # Bind the profile-aware placement impl to the legacy module name: chat
 # auto-exec must pass a market ``profile`` (CN-2), and existing rollback tests
@@ -52,6 +58,12 @@ from app.routes.portfolio import (
     _record_snapshot,
 )
 from app.routes.rules import create_rule_on_conn
+from app.routes.strategies import (
+    TEMPLATES_BY_KEY,
+    create_strategy_on_conn,
+    resolve_strategy_on_conn,
+    transition_strategy_on_conn,
+)
 from app.routes.watchlist import (
     apply_watchlist_change_on_conn,
     sync_market_source,
@@ -99,7 +111,30 @@ SYSTEM_PROMPT = (
     "(1-50 Monte Carlo re-runs). Use this when the user asks to backtest a "
     "strategy ('backtest', '回测') or how a rule/strategy would have "
     "performed.\n"
-    "- 'watchlist_changes': {ticker, action} with action 'add' or 'remove'."
+    "- 'watchlist_changes': {ticker, action} with action 'add' or 'remove'.\n"
+    "- 'strategies': persistent trading strategies {action, name?, ticker?, "
+    "template?, entry?, exits?, sizing?, strategy?, days?, runs?}. action is "
+    "one of 'create', 'backtest', 'deploy', 'pause'. 'create' makes a DRAFT "
+    "strategy: give a short name, a ticker, and either a template key — one "
+    "of 'dip_buyer', 'momentum_breakout', 'ma_golden_cross', 'grid_lite', "
+    "'rsi_rebound', 'trend_rider' — or an explicit config (explicit entry/"
+    "exits/sizing override the template's). entry is a condition group "
+    "{\"all\"|\"any\": [1-5 conditions]}, each condition {field, op: "
+    "'above'|'below', value?, params?} with field one of: 'price' (value = "
+    "price level), 'day_change_pct' (value = percent, negative for drops), "
+    "'ma' (params {period 2-120}, value = percent offset from the SMA), "
+    "'ma_cross'/'ema_cross' (params {fast, slow}, no value; 'above' = golden "
+    "cross), 'rsi' (params {period 2-50}, value 0-100), 'window_high' "
+    "(params {minutes 5-240}, op 'above' breakout), 'window_low' (params "
+    "{minutes 5-240}, op 'below' breakdown), 'pullback_from_high_pct' "
+    "(params {minutes 5-240}, value = percent). exits is {take_profit_pct?, "
+    "stop_loss_pct?, trailing_stop_pct?, max_holding_days?} — deploying "
+    "requires at least one. sizing is {mode: 'fixed_qty', qty} or {mode: "
+    "'cash_pct', pct 1-100}. 'backtest' simulates a saved strategy "
+    "(reference it via 'strategy': its id or name; optional days/runs) and "
+    "stores the result in the run library. 'deploy' turns a draft or paused "
+    "strategy live so the engine trades it automatically; 'pause' freezes a "
+    "live one. Always recommend running a backtest before deploying."
 )
 
 # System prompt for the daily review (M2.4) — plain text, no structured output.
@@ -154,7 +189,27 @@ SYSTEM_PROMPT_ZH = (
     "建仓价上/下浮的百分比，给定时均须 > 0）。trigger_type/threshold 语义同 "
     "'rules'。days 默认 30（5-120），runs 默认 1（1-50 次蒙特卡洛重跑）。当用户"
     "要求回测某策略（“回测”“backtest”）或询问某规则/策略过去表现时使用。\n"
-    "- 'watchlist_changes'：{ticker, action}，action 取 'add' 或 'remove'。"
+    "- 'watchlist_changes'：{ticker, action}，action 取 'add' 或 'remove'。\n"
+    "- 'strategies'：常驻交易策略 {action, name?, ticker?, template?, entry?, "
+    "exits?, sizing?, strategy?, days?, runs?}。action 取 'create'、"
+    "'backtest'、'deploy'、'pause' 之一。'create' 创建一条草稿策略：给出简短 "
+    "name、ticker，以及一个模板 key——'dip_buyer'、'momentum_breakout'、"
+    "'ma_golden_cross'、'grid_lite'、'rsi_rebound'、'trend_rider' 之一——或"
+    "显式配置（显式 entry/exits/sizing 覆盖模板）。entry 是条件组 "
+    "{\"all\"|\"any\": [1-5 个条件]}，每个条件为 {field, op: "
+    "'above'|'below', value?, params?}，field 取：'price'（value 为价格，"
+    "¥）、'day_change_pct'（value 为百分比，下跌为负）、'ma'（params "
+    "{period 2-120}，value 为相对 SMA 的百分比偏移）、'ma_cross'/'ema_cross'"
+    "（params {fast, slow}，无 value；'above' 为金叉）、'rsi'（params "
+    "{period 2-50}，value 0-100）、'window_high'（params {minutes 5-240}，"
+    "op 'above' 突破）、'window_low'（params {minutes 5-240}，op 'below' "
+    "破位）、'pullback_from_high_pct'（params {minutes 5-240}，value 为百分"
+    "比）。exits 为 {take_profit_pct?, stop_loss_pct?, trailing_stop_pct?, "
+    "max_holding_days?}——部署（deploy）时至少一项非空。sizing 为 {mode: "
+    "'fixed_qty', qty}（A 股须整手）或 {mode: 'cash_pct', pct 1-100}。"
+    "'backtest' 回测一条已保存的策略（用 'strategy' 引用其 id 或名称；可选 "
+    "days/runs），结果存入回测库。'deploy' 将草稿/暂停策略转为 live，由引擎"
+    "自动交易；'pause' 冻结 live 策略。务必建议先回测再部署。"
 )
 
 # Chinese (zh-CN) variant of REVIEW_SYSTEM_PROMPT (CN-3) — plain-text A-share
@@ -230,6 +285,31 @@ class BacktestInstruction(BaseModel):
     runs: int | None = None
 
 
+class StrategyInstruction(BaseModel):
+    """A strategy action the LLM asks to run (P2 §7).
+
+    action is one of 'create' | 'backtest' | 'deploy' | 'pause'. 'create'
+    takes name/ticker plus a template key and/or explicit entry/exits/sizing
+    (explicit fields override the template's). The other actions reference an
+    existing strategy via ``strategy`` (its id, or its name resolved
+    case-insensitively — newest match wins). ``days``/``runs`` tune a
+    'backtest'; ``seed`` pins its RNG (used by the deterministic LLM_MOCK
+    branch; omitted draws a random seed, echoed in the stored run).
+    """
+
+    action: str  # "create" | "backtest" | "deploy" | "pause"
+    name: str | None = None
+    ticker: str | None = None
+    template: str | None = None
+    entry: dict | None = None
+    exits: dict | None = None
+    sizing: dict | None = None
+    strategy: str | None = None  # id or case-insensitive name
+    days: int | None = None
+    runs: int | None = None
+    seed: int | None = None
+
+
 class ChatResponse(BaseModel):
     message: str
     trades: list[TradeInstruction] = []
@@ -237,6 +317,18 @@ class ChatResponse(BaseModel):
     orders: list[OrderInstruction] = []
     rules: list[RuleInstruction] = []
     backtests: list[BacktestInstruction] = []
+
+
+class ChatTurnResponse(ChatResponse):
+    """The structured-output schema the chat endpoint actually requests.
+
+    P2 §7 adds the ``strategies`` action array. It lives on a SUBCLASS so the
+    pre-P2 ``ChatResponse`` field set stays frozen for its pinned regression
+    tests; the endpoint requests/validates/constructs this extended shape
+    (a plain ``ChatResponse`` payload parses into it with ``strategies=[]``).
+    """
+
+    strategies: list[StrategyInstruction] = []
 
 
 # ---------------------------------------------------------------------------
@@ -503,6 +595,13 @@ def create_chat_router(
     # REST route does — the active profile's seed cash (CN=¥100k), else the
     # US $10,000. None/us keeps run_backtest's default value-for-value.
     starting_cash = profile.seed_cash if profile is not None else STARTING_CASH
+    # P2 §7 LLM_MOCK strategy branch ticker: NVDA on the US/no-profile router,
+    # the first universe ticker on a named market (cn → 600519).
+    mock_strategy_ticker = (
+        universe.default_watchlist[0]
+        if is_zh and universe is not None and universe.default_watchlist
+        else "NVDA"
+    )
 
     @router.get("/")
     async def get_chat_history(
@@ -512,13 +611,14 @@ def create_chat_router(
 
         Query selects DESC then reverses so the response is ascending by created_at.
         The ``actions`` field is parsed from its stored JSON string to a dict (or None).
-        Every kind is returned ('chat' | 'brief' | 'review' | 'rule') — the
-        frontend labels non-conversation messages by their ``kind``.
+        Every kind is returned ('chat' | 'brief' | 'review' | 'rule' |
+        'strategy') — the frontend labels non-conversation messages by their
+        ``kind``.
 
         Query params (P1 §3.6 — defaults keep the pre-P1 behavior byte-for-byte):
             kind: optional filter to one message kind ('chat' | 'brief' |
-                'review' | 'rule'). Any other value returns HTTP 400 with
-                ``{"error": "message"}``.
+                'review' | 'rule' | 'strategy'). Any other value returns HTTP
+                400 with ``{"error": "message"}``.
             limit: maximum number of most-recent messages to return. Defaults
                 to 20 and is clamped to the range 1..200. Non-integer values
                 return HTTP 400 with ``{"error": "message"}``.
@@ -526,10 +626,12 @@ def create_chat_router(
         Returns:
             {"messages": [{"role", "content", "actions", "kind", "created_at"}, ...]}
         """
-        if kind is not None and kind not in ("chat", "brief", "review", "rule"):
+        if kind is not None and kind not in ("chat", "brief", "review", "rule", "strategy"):
             return JSONResponse(
                 status_code=400,
-                content={"error": "kind must be one of: chat, brief, review, rule"},
+                content={
+                    "error": "kind must be one of: chat, brief, review, rule, strategy"
+                },
             )
 
         if limit is None:
@@ -622,7 +724,7 @@ def create_chat_router(
             rows = conn.execute(
                 "SELECT role, content FROM chat_messages "
                 "WHERE user_id = ? "
-                "AND kind NOT IN ('brief', 'rule', 'review') "
+                "AND kind NOT IN ('brief', 'rule', 'review', 'strategy') "
                 "ORDER BY created_at DESC LIMIT 20",
                 (user_id,),
             ).fetchall()
@@ -655,9 +757,44 @@ def create_chat_router(
                 # both route to the backtest branch. With no/US locale the
                 # English payload below is byte-identical to today (the existing
                 # E2E command depends on it).
+                #
+                # P2 §7: a message containing 'strategy'/'策略' WITHOUT any
+                # backtest keyword takes the deterministic strategy branch
+                # (create ma_golden_cross + a persisted seed-4242 20-day
+                # backtest). Messages with a backtest keyword keep routing to
+                # the M5 backtest branch, and the default branch is untouched
+                # — both are pinned byte-for-byte by the chat-mock goldens.
+                message_lower = body.message.lower()
+                wants_strategy = (
+                    "strategy" in message_lower or "策略" in body.message
+                ) and not ("backtest" in message_lower or "回测" in body.message)
+                mock_strategy_actions = [
+                    StrategyInstruction(
+                        action="create",
+                        name="MA Golden Cross",
+                        ticker=mock_strategy_ticker,
+                        template="ma_golden_cross",
+                    ),
+                    StrategyInstruction(
+                        action="backtest",
+                        strategy="MA Golden Cross",
+                        days=20,
+                        runs=1,
+                        seed=4242,
+                    ),
+                ]
                 if is_zh:
-                    if "backtest" in body.message.lower() or "回测" in body.message:
-                        parsed = ChatResponse(
+                    if wants_strategy:
+                        parsed = ChatTurnResponse(
+                            message=(
+                                f"[模拟] 已创建 {mock_strategy_ticker} 的均线金叉"
+                                "策略（草稿），并将 20 日回测结果存入回测库。"
+                                "部署前请先在策略页查看回测表现。"
+                            ),
+                            strategies=mock_strategy_actions,
+                        )
+                    elif "backtest" in body.message.lower() or "回测" in body.message:
+                        parsed = ChatTurnResponse(
                             message=(
                                 "[模拟] 回测完成：已在 20 个模拟交易日上测试 NVDA "
                                 "逢跌买入策略。"
@@ -676,7 +813,7 @@ def create_chat_router(
                             ],
                         )
                     else:
-                        parsed = ChatResponse(
+                        parsed = ChatTurnResponse(
                             message="已将 PYPL 加入你的自选，并为你买入 5 股 AAPL。",
                             trades=[
                                 TradeInstruction(ticker="AAPL", side="buy", quantity=5)
@@ -685,11 +822,24 @@ def create_chat_router(
                                 WatchlistChange(ticker="PYPL", action="add")
                             ],
                         )
+                # P2 §7: 'strategy' (without 'backtest') → the deterministic
+                # strategy branch mirroring the zh one above (same actions,
+                # NVDA ticker).
+                elif wants_strategy:
+                    parsed = ChatTurnResponse(
+                        message=(
+                            "[MOCK] Created the MA Golden Cross strategy on "
+                            f"{mock_strategy_ticker} as a draft and saved a "
+                            "20-day backtest to the run library. Review it on "
+                            "the strategy page before deploying."
+                        ),
+                        strategies=mock_strategy_actions,
+                    )
                 # Messages mentioning "backtest" get the M5 backtest mock;
                 # everything else keeps the original PYPL/AAPL payload
                 # byte-identical for the E2E suite.
                 elif "backtest" in body.message.lower():
-                    parsed = ChatResponse(
+                    parsed = ChatTurnResponse(
                         message=(
                             "[MOCK] Backtest complete: NVDA dip-buy strategy "
                             "tested over 20 simulated days."
@@ -708,7 +858,7 @@ def create_chat_router(
                         ],
                     )
                 else:
-                    parsed = ChatResponse(
+                    parsed = ChatTurnResponse(
                         message=(
                             "I've added PYPL to your watchlist and bought 5 shares of AAPL for you."
                         ),
@@ -723,11 +873,11 @@ def create_chat_router(
                         completion,
                         model=MODEL,
                         messages=messages,
-                        response_format=ChatResponse,
+                        response_format=ChatTurnResponse,
                         reasoning_effort="low",
                         extra_body=EXTRA_BODY,
                     )
-                    parsed = ChatResponse.model_validate_json(
+                    parsed = ChatTurnResponse.model_validate_json(
                         response.choices[0].message.content
                     )
                 except Exception:
@@ -857,6 +1007,188 @@ def create_chat_router(
                     }
                 )
 
+            # Step 6e (P2 §7): Execute strategy actions on the shared
+            # connection/transaction — created drafts, state transitions, and
+            # persisted backtest runs all commit atomically with the rest of
+            # the turn in Step 7. Per-item failures return
+            # {"status": "failed", ...} outcomes and never abort the batch
+            # (the existing per-action semantics). 'backtest' outcomes stay
+            # compact — stats + the persisted run's id, never curves.
+            strategy_outcomes: list[dict] = []
+            for s in parsed.strategies:
+                action = (s.action or "").strip().lower()
+                if action == "create":
+                    template_key = s.template.strip().lower() if s.template else None
+                    template_cfg = (
+                        TEMPLATES_BY_KEY.get(template_key) if template_key else None
+                    )
+                    if template_key and template_cfg is None:
+                        strategy_outcomes.append(
+                            {
+                                "status": "failed",
+                                "action": "create",
+                                "ticker": (s.ticker or "").strip().upper(),
+                                "error": f"Unknown template '{s.template}'",
+                            }
+                        )
+                        continue
+                    # Template supplies the config; explicit fields override.
+                    entry = s.entry if s.entry is not None else (
+                        template_cfg["entry"] if template_cfg else None
+                    )
+                    s_exits = s.exits if s.exits is not None else (
+                        template_cfg["exits"] if template_cfg else None
+                    )
+                    sizing = s.sizing if s.sizing is not None else (
+                        template_cfg["sizing"] if template_cfg else None
+                    )
+                    name = (s.name or "").strip() or (
+                        template_key.replace("_", " ").title()
+                        if template_key
+                        else f"{(s.ticker or '').strip().upper()} strategy"
+                    )
+                    result = create_strategy_on_conn(
+                        conn,
+                        price_cache,
+                        name=name,
+                        ticker=s.ticker or "",
+                        entry=entry,
+                        exits=s_exits,
+                        sizing=sizing,
+                        template=template_key,
+                        user_id=user_id,
+                        universe=universe,
+                        profile=profile,
+                    )
+                    if result["status"] == "failed":
+                        strategy_outcomes.append(
+                            {
+                                "status": "failed",
+                                "action": "create",
+                                "name": name,
+                                "ticker": result["ticker"],
+                                "error": result["error"],
+                            }
+                        )
+                    else:
+                        created = result["strategy"]
+                        strategy_outcomes.append(
+                            {
+                                "status": "created",
+                                "action": "create",
+                                "strategy_id": created["id"],
+                                "name": created["name"],
+                                "ticker": created["ticker"],
+                            }
+                        )
+                    continue
+
+                if action not in ("backtest", "deploy", "pause"):
+                    strategy_outcomes.append(
+                        {
+                            "status": "failed",
+                            "action": action,
+                            "error": "action must be one of 'create', "
+                            "'backtest', 'deploy', 'pause'",
+                        }
+                    )
+                    continue
+
+                # backtest/deploy/pause reference an existing strategy by id
+                # or case-insensitive name (newest name-match wins) — a
+                # same-turn 'create' is visible here (same connection).
+                reference = (s.strategy or "").strip() or (s.name or "").strip()
+                row = (
+                    resolve_strategy_on_conn(conn, user_id, reference)
+                    if reference
+                    else None
+                )
+                if row is None:
+                    strategy_outcomes.append(
+                        {
+                            "status": "failed",
+                            "action": action,
+                            "name": reference,
+                            "error": "Strategy not found",
+                        }
+                    )
+                    continue
+
+                if action == "backtest":
+                    normalized = normalize_strategy_backtest_config(
+                        price_cache,
+                        strategy_row=row,
+                        days=s.days,
+                        runs=s.runs,
+                        seed=s.seed,
+                        universe=universe,
+                        profile=profile,
+                    )
+                    if normalized["status"] == "failed":
+                        strategy_outcomes.append(
+                            {
+                                "status": "failed",
+                                "action": "backtest",
+                                "strategy_id": row["id"],
+                                "name": row["name"],
+                                "ticker": normalized["ticker"],
+                                "error": normalized["error"],
+                            }
+                        )
+                        continue
+                    result = await asyncio.to_thread(
+                        run_backtest,
+                        normalized["config"],
+                        commission_bps=commission_bps,
+                        starting_cash=starting_cash,
+                        profile=profile,
+                    )
+                    run = insert_backtest_run_on_conn(
+                        conn,
+                        user_id=user_id,
+                        strategy_id=row["id"],
+                        label=None,
+                        result=result,
+                    )
+                    strategy_outcomes.append(
+                        {
+                            "status": "completed",
+                            "action": "backtest",
+                            "strategy_id": row["id"],
+                            "name": row["name"],
+                            "ticker": result["config"]["ticker"],
+                            "run_id": run["id"],
+                            "stats": result["stats"],
+                        }
+                    )
+                    continue
+
+                # deploy / pause — the §6 state machine (deploy without any
+                # exit fails here exactly like PATCH would 400).
+                target = "live" if action == "deploy" else "paused"
+                error = transition_strategy_on_conn(conn, row, target)
+                if error is not None:
+                    strategy_outcomes.append(
+                        {
+                            "status": "failed",
+                            "action": action,
+                            "strategy_id": row["id"],
+                            "name": row["name"],
+                            "ticker": row["ticker"],
+                            "error": error,
+                        }
+                    )
+                else:
+                    strategy_outcomes.append(
+                        {
+                            "status": "deployed" if action == "deploy" else "paused",
+                            "action": action,
+                            "strategy_id": row["id"],
+                            "name": row["name"],
+                            "ticker": row["ticker"],
+                        }
+                    )
+
             # Step 7: Persist both messages (T-02-12 — parameterized SQL)
             # Separate timestamps guarantee deterministic ORDER BY created_at ordering
             # even when both rows are written in the same request (WR-02).
@@ -871,6 +1203,8 @@ def create_chat_router(
                 actions["rules"] = rule_outcomes
             if backtest_outcomes:
                 actions["backtests"] = backtest_outcomes
+            if strategy_outcomes:
+                actions["strategies"] = strategy_outcomes
             user_ts = datetime.now(timezone.utc).isoformat()
             conn.execute(
                 "INSERT INTO chat_messages (id, user_id, role, content, actions, kind, created_at) "
@@ -925,6 +1259,8 @@ def create_chat_router(
                 response_payload["rules"] = rule_outcomes
             if backtest_outcomes:
                 response_payload["backtests"] = backtest_outcomes
+            if strategy_outcomes:
+                response_payload["strategies"] = strategy_outcomes
             return response_payload
 
         except Exception:

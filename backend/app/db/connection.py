@@ -65,6 +65,9 @@ _ORDERS_NEW_COLUMNS: tuple[tuple[str, str], ...] = (
 _TRADES_NEW_COLUMNS: tuple[tuple[str, str], ...] = (
     ("commission", "REAL NOT NULL DEFAULT 0"),
     ("realized_pnl", "REAL"),
+    # P2: strategy-engine attribution — NULL for every non-strategy fill,
+    # exactly the pre-P2 semantics for existing rows.
+    ("strategy_id", "TEXT"),
 )
 # M2.3/M2.4: message kind ('chat' | 'brief' | 'review' | 'rule'). Pre-existing
 # rows are ordinary conversation turns, so the default 'chat' is exactly right.

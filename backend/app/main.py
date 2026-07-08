@@ -20,6 +20,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from app.db.connection import get_conn, init_db
+from app.indicators import required_history_seconds
 from app.market import (
     PriceCache,
     SessionClock,
@@ -197,7 +198,14 @@ async def lifespan(app: FastAPI):
 
     logger.info("FinAlly startup: creating price cache and market data source")
     # CN-2 §4: the price-limit function funnels every tick through the clamp.
-    price_cache = PriceCache(limit_pct_fn=profile.price_limit_pct)
+    # P2 §2/§3: the ring buffer is the live strategy engine's ONLY bar source,
+    # so its capacity is derived from the FIELD_SPECS parameter upper bounds —
+    # every condition that validates (e.g. window_high minutes=240) must be
+    # satisfiable live once the buffer fills, never permanently warm-up-False.
+    price_cache = PriceCache(
+        history_capacity=required_history_seconds(),
+        limit_pct_fn=profile.price_limit_pct,
+    )
     source = create_market_data_source(price_cache, session_clock, profile.universe)
 
     # Start market data with the UNION of every user's watchlist (M4 — the
@@ -245,6 +253,19 @@ async def lifespan(app: FastAPI):
     # Backtest router (M5 — stateless strategy backtester, no DB access)
     from app.routes.backtest import create_backtest_router
     app.include_router(create_backtest_router(price_cache, commission_bps, profile))
+
+    # Run Library router (P2 §5 — persisted backtest runs). Registered right
+    # next to the stateless backtest route; its /api/backtest/runs prefix
+    # never collides with POST /api/backtest.
+    from app.routes.backtest_runs import create_backtest_runs_router
+    app.include_router(
+        create_backtest_runs_router(price_cache, db_path, commission_bps, profile)
+    )
+
+    # Strategies router (P2 §6 — CRUD + state machine + performance +
+    # six-template registry).
+    from app.routes.strategies import create_strategies_router
+    app.include_router(create_strategies_router(price_cache, db_path, profile))
 
     # Watchlist router
     from app.routes.watchlist import create_watchlist_router
@@ -314,6 +335,23 @@ async def lifespan(app: FastAPI):
     app.state.rules_eval_task = rules_eval_task
     logger.info("FinAlly startup: rules evaluator background task started")
 
+    # Start background strategies evaluator task (every ~1 second, P2 §3) —
+    # mirrors the rules loop: the 24/7-neutralized trading_profile drives
+    # 整手/fees/T+1 and the session clock gates fills while the market is
+    # closed.
+    from app.strategy_engine import strategies_eval_loop
+    strategies_eval_task = asyncio.create_task(
+        strategies_eval_loop(
+            price_cache,
+            db_path,
+            commission_bps=commission_bps,
+            profile=trading_profile,
+            session_clock=session_clock,
+        )
+    )
+    app.state.strategies_eval_task = strategies_eval_task
+    logger.info("FinAlly startup: strategies evaluator background task started")
+
     # Start background AI briefs watcher task (every ~2 seconds, M2.3). CN-3:
     # pass the active profile so briefs and narratives are written in the
     # market's language (locale is identical on trading_profile; briefs execute
@@ -337,6 +375,7 @@ async def lifespan(app: FastAPI):
         snapshot_task,
         orders_fill_task,
         rules_eval_task,
+        strategies_eval_task,
         briefs_watch_task,
         events_persist_task,
     ]

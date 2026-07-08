@@ -193,6 +193,47 @@ def _execute_trade_on_conn(
     user_id: str = "default",
     profile: MarketProfile | None = None,
 ) -> dict:
+    """Profile-aware market-order entry point — the CN-2 signature, frozen.
+
+    This 9-parameter form (the 8 legacy parameters plus the trailing
+    ``profile`` hook) is pinned by the CN-2 signature regression tests and
+    is what rules/chat/orders bind to — it must not grow parameters. It
+    delegates to :func:`_execute_trade_impl` with no strategy attribution
+    (``strategy_id=None``), byte-identical to the pre-P2 behavior.
+
+    P2 callers that attribute fills to a strategy (the strategy engine)
+    call ``_execute_trade_impl`` directly with the keyword-only
+    ``strategy_id`` — the single additive hook, mirroring how CN-2 added
+    ``profile`` on this sibling without touching the public
+    :func:`execute_trade_on_conn`.
+    """
+    return _execute_trade_impl(
+        conn,
+        price_cache,
+        ticker,
+        side,
+        quantity,
+        commission_bps=commission_bps,
+        session_clock=session_clock,
+        user_id=user_id,
+        profile=profile,
+        strategy_id=None,
+    )
+
+
+def _execute_trade_impl(
+    conn: sqlite3.Connection,
+    price_cache: PriceCache,
+    ticker: str,
+    side: str,
+    quantity: float,
+    commission_bps: float = 0.0,
+    session_clock: SessionClock | None = None,
+    user_id: str = "default",
+    profile: MarketProfile | None = None,
+    *,
+    strategy_id: str | None = None,
+) -> dict:
     """Execute a market order on an open SQLite connection.
 
     Validates and executes a buy or sell trade against the provided connection.
@@ -235,6 +276,9 @@ def _execute_trade_on_conn(
             values, buys must be whole board lots (整手), the T+1 lock blocks
             same-session resale of shares bought today, the commission floor and
             sell-side stamp tax apply, and rejection messages are Chinese.
+        strategy_id: Strategy attribution (P2, keyword-only). Written to
+            ``trades.strategy_id`` on the fill row; None (every non-strategy
+            caller) keeps the column NULL — the pre-P2 semantics.
 
     A-share mechanics (all no-ops for None/us — CN-2 §1-§3):
         - 整手 (lot): buy ``quantity`` must be a multiple of ``profile.lot_size``.
@@ -421,11 +465,24 @@ def _execute_trade_on_conn(
                 (new_qty, now, user_id, ticker),
             )
 
-    # Insert trade log entry (commission always stored; realized_pnl NULL on buys)
+    # Insert trade log entry (commission always stored; realized_pnl NULL on
+    # buys; strategy_id NULL except for strategy-engine fills — P2)
     conn.execute(
-        "INSERT INTO trades (id, user_id, ticker, side, quantity, price, commission, realized_pnl, executed_at)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (trade_id, user_id, ticker, side, quantity, current_price, commission, realized_pnl, now),
+        "INSERT INTO trades (id, user_id, ticker, side, quantity, price, commission,"
+        " realized_pnl, strategy_id, executed_at)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            trade_id,
+            user_id,
+            ticker,
+            side,
+            quantity,
+            current_price,
+            commission,
+            realized_pnl,
+            strategy_id,
+            now,
+        ),
     )
 
     return {

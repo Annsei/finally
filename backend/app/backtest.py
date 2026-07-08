@@ -16,9 +16,25 @@ Provides:
   bad input. Resolves the anchor price — live cache quote first, then
   SEED_PRICES — and draws a random seed when none is given (always echoed
   back for reproducibility).
+- ``normalize_strategy_backtest_config(price_cache, *, ...)`` — the P2
+  strategy sibling: validates a declarative entry condition group + exits +
+  sizing (from explicit fields or a ``strategies`` table row) into a config
+  marked ``source: "strategy"``. Same never-raises contract.
 - ``run_backtest(config, *, commission_bps, end_time)`` — run the engine on
   a normalized config and return the full response payload (config echo,
   stats, downsampled curves, trades, runs_summary).
+
+P2 (§4): the loop evaluates ONE entry path — a condition group via
+``app.indicators`` (the same functions the live strategy engine calls).
+Legacy trigger_type/threshold configs are adapted to an equivalent
+single-condition group at the top of ``_simulate``; their numeric output
+(bars, RNG order, fees, fills, curves, echo shape) is byte-for-byte
+unchanged and pinned by tests/test_backtest_golden.py. Strategy configs
+additionally get indicator fields (evaluated on the completed synthetic
+bars, warm-up shortfall -> False), a trailing stop (priority stop_loss ->
+trailing_stop -> take_profit -> max_holding_days, matching the live
+engine), a synthetic-day holding limit, and cash_pct sizing (whole shares,
+floored to board lots on CN).
 
 Engine semantics (contract §2):
 - ``days`` sessions x 390 one-minute bars; per-bar GBM with the ticker's
@@ -49,12 +65,20 @@ Engine semantics (contract §2):
 
 from __future__ import annotations
 
+import json
 import math
 import random
 import time
 
 import numpy as np
 
+from app.indicators import (
+    build_series_context,
+    evaluate_group_at,
+    validate_condition_group,
+    validate_exits,
+    validate_sizing,
+)
 from app.market.cache import PriceCache
 from app.market.profiles import MarketProfile
 from app.market.seed_prices import DEFAULT_PARAMS, SEED_PRICES, TICKER_PARAMS
@@ -200,6 +224,150 @@ def normalize_backtest_config(
     return {"status": "ok", "config": config}
 
 
+def _load_json_field(value):
+    """Parse a strategy-row JSON TEXT column; dicts pass through unchanged."""
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except ValueError:
+            return None
+    return value
+
+
+def normalize_strategy_backtest_config(
+    price_cache: PriceCache,
+    *,
+    strategy_row=None,
+    ticker: str | None = None,
+    entry: dict | None = None,
+    exits: dict | None = None,
+    sizing: dict | None = None,
+    days: int | None = None,
+    runs: int | None = None,
+    seed: int | None = None,
+    universe: MarketUniverse | None = None,
+    profile: MarketProfile | None = None,
+) -> dict:
+    """Validate and normalize a strategy-backtest config (P2 contract §4).
+
+    The strategy sibling of :func:`normalize_backtest_config` — same
+    contract (never raises; returns ``{"status": "ok", "config": {...}}`` or
+    ``{"status": "failed", "ticker": T, "error": msg}``), but the strategy is
+    a declarative entry condition group + exits object + sizing instead of a
+    single trigger/threshold/quantity. The returned config carries
+    ``"source": "strategy"`` — ``run_backtest`` selects the strategy
+    evaluation path (and the strategy-shaped config echo) on that marker;
+    legacy configs stay byte-for-byte on the old path.
+
+    Args:
+        price_cache: Live price cache — preferred anchor price source;
+            tickers without a cached quote fall back to the seed prices.
+        strategy_row: A ``strategies`` table row (sqlite3.Row or mapping)
+            whose ``ticker``/``entry``/``exits``/``sizing`` columns supply
+            the strategy config (entry/exits/sizing are stored JSON TEXT).
+            When given, the individual keyword fields below are ignored.
+        ticker: Ticker symbol (used when ``strategy_row`` is None).
+        entry: Declarative condition group ``{"all"|"any": [COND, ...]}`` —
+            validated against the ``FIELD_SPECS`` whitelist (contract §2).
+        exits: Optional exits object ``{take_profit_pct?, stop_loss_pct?,
+            trailing_stop_pct?, max_holding_days?}``; None means no exits
+            (positions close at the horizon end only). The deploy-time
+            "at least one exit" rule is the CRUD state machine's — a
+            backtest may run without exits.
+        sizing: ``{"mode": "fixed_qty", "qty" > 0}`` or ``{"mode":
+            "cash_pct", "pct" 1..100}``. fixed_qty on a lot-sized profile
+            (CN) must be whole board lots; cash_pct floors to whole lots at
+            entry time inside the engine.
+        days: Sessions to simulate (default 30, range 5-120).
+        runs: Monte Carlo re-runs with consecutive seeds (default 1, 1-50).
+        seed: RNG seed; omitted draws a random one (always echoed back).
+        universe: Optional market universe (CN) — anchor fallback and GBM
+            params source, exactly as in the legacy normalizer.
+        profile: Optional market profile (CN) — enforces the 整手 buy-lot
+            check on fixed_qty sizing here; fee/T+1 semantics ride
+            ``run_backtest``'s ``profile``.
+
+    Returns:
+        ``{"status": "ok", "config": {ticker, entry, exits, sizing, days,
+        runs, seed, anchor_price, source: "strategy"[, params]}}`` or
+        ``{"status": "failed", "ticker": T, "error": msg}``.
+    """
+    if strategy_row is not None:
+        ticker = strategy_row["ticker"]
+        entry = _load_json_field(strategy_row["entry"])
+        exits = _load_json_field(strategy_row["exits"])
+        sizing = _load_json_field(strategy_row["sizing"])
+
+    ticker = (ticker or "").strip().upper()
+
+    def failed(error: str) -> dict:
+        return {"status": "failed", "ticker": ticker, "error": error}
+
+    # Anchor price: live cache quote first, then the market's seed price.
+    seeds = SEED_PRICES if universe is None else universe.seed_prices
+    anchor_price = price_cache.get_price(ticker)
+    if anchor_price is None:
+        anchor_price = seeds.get(ticker)
+    if anchor_price is None:
+        return failed("Ticker not found")
+
+    error = validate_condition_group(entry)
+    if error is not None:
+        return failed(f"entry: {error}")
+    error = validate_exits(exits)
+    if error is not None:
+        return failed(f"exits: {error}")
+    error = validate_sizing(sizing)
+    if error is not None:
+        return failed(f"sizing: {error}")
+    # CN §9: a fixed-quantity buy entry must size in whole board lots (整手) —
+    # the same profile-aware check (and zh message) as the legacy normalizer.
+    # cash_pct needs no upfront check: the engine floors to whole lots at
+    # entry time.
+    if sizing["mode"] == "fixed_qty":
+        lot_error = lot_size_error(profile, "buy", float(sizing["qty"]))
+        if lot_error is not None:
+            return failed(lot_error)
+
+    days = DEFAULT_DAYS if days is None else int(days)
+    if not MIN_DAYS <= days <= MAX_DAYS:
+        return failed(f"days must be between {MIN_DAYS} and {MAX_DAYS}")
+    runs = DEFAULT_RUNS if runs is None else int(runs)
+    if not MIN_RUNS <= runs <= MAX_RUNS:
+        return failed(f"runs must be between {MIN_RUNS} and {MAX_RUNS}")
+    # numpy's default_rng requires a non-negative seed.
+    seed = random.randint(0, 2**31 - 1) if seed is None else int(seed)
+    if seed < 0:
+        return failed("seed must be a non-negative integer")
+
+    # Normalized copies: drop unset exit keys (engine reads .get), coerce
+    # sizing numbers to float.
+    exits = {} if exits is None else {k: v for k, v in exits.items() if v is not None}
+    if sizing["mode"] == "fixed_qty":
+        sizing = {"mode": "fixed_qty", "qty": float(sizing["qty"])}
+    else:
+        sizing = {"mode": "cash_pct", "pct": float(sizing["pct"])}
+
+    config = {
+        "ticker": ticker,
+        "entry": entry,
+        "exits": exits,
+        "sizing": sizing,
+        "days": days,
+        "runs": runs,
+        "seed": seed,
+        "anchor_price": float(anchor_price),
+        "source": "strategy",
+    }
+    # Universe-injected runs resolve GBM params exactly like the legacy
+    # normalizer; None keeps the US constants inside _generate_bars.
+    if universe is not None:
+        config["params"] = dict(
+            universe.ticker_params.get(ticker, universe.default_params)
+        )
+    return {"status": "ok", "config": config}
+
+
 def _generate_bars(
     ticker: str,
     anchor_price: float,
@@ -270,7 +438,13 @@ def _day_change_pct(close: float, day_prev_close: float) -> float:
 def _trigger_fires(
     close: float, day_prev_close: float, trigger_type: str, threshold: float
 ) -> bool:
-    """Rules-engine trigger semantics (``rules._rule_triggered``) on a bar close."""
+    """Rules-engine trigger semantics (``rules._rule_triggered``) on a bar close.
+
+    P2: the simulation loop now routes ALL entries through the condition-group
+    evaluator (legacy triggers ride :func:`_legacy_entry_group`); this function
+    is kept as the executable statement of the legacy semantics the adapter
+    must reproduce (tests assert the equivalence, goldens pin the output).
+    """
     if trigger_type == "price_above":
         return close >= threshold
     if trigger_type == "price_below":
@@ -280,6 +454,24 @@ def _trigger_fires(
     if trigger_type == "day_change_pct_below":
         return _day_change_pct(close, day_prev_close) <= threshold
     return False  # Unknown trigger_type (bad data) — never fires.
+
+
+def _legacy_entry_group(trigger_type: str, threshold: float) -> dict | None:
+    """Adapt a legacy trigger to an equivalent single-condition group (P2 §4).
+
+    The condition fields' inclusive >=/<= semantics and the 4dp day-change
+    rounding match :func:`_trigger_fires` exactly, so evaluation through the
+    shared ``app.indicators`` evaluator is value-for-value identical (the
+    golden-sample tests pin it byte-for-byte). Unknown trigger types return
+    None — the loop treats that as "never fires", the legacy behavior.
+    """
+    if trigger_type in {"price_above", "price_below"}:
+        op = "above" if trigger_type == "price_above" else "below"
+        return {"all": [{"field": "price", "op": op, "value": threshold}]}
+    if trigger_type in {"day_change_pct_above", "day_change_pct_below"}:
+        op = "above" if trigger_type == "day_change_pct_above" else "below"
+        return {"all": [{"field": "day_change_pct", "op": op, "value": threshold}]}
+    return None
 
 
 def _simulate(
@@ -305,15 +497,37 @@ def _simulate(
     and exits are unrestricted.
     """
     ticker = config["ticker"]
-    quantity = config["quantity"]
-    trigger_type = config["trigger_type"]
-    threshold = config["threshold"]
-    take_profit_pct = config["take_profit_pct"]
-    stop_loss_pct = config["stop_loss_pct"]
+    # P2 §4: one evaluation core, two config shapes. Strategy configs
+    # (source == "strategy") carry a declarative entry group, an exits
+    # object, and a sizing mode; legacy trigger configs are adapted to an
+    # equivalent single-condition group so the loop below is shared. Every
+    # numeric step (bar generation, RNG order, fees, fills, downsampling)
+    # is untouched — the golden-sample tests pin the legacy output
+    # byte-for-byte.
+    if config.get("source") == "strategy":
+        exits = config["exits"] or {}
+        sizing = config["sizing"]
+        entry_group = config["entry"]
+        take_profit_pct = exits.get("take_profit_pct")
+        stop_loss_pct = exits.get("stop_loss_pct")
+        trailing_stop_pct = exits.get("trailing_stop_pct")
+        max_holding_days = exits.get("max_holding_days")
+        fixed_qty = float(sizing["qty"]) if sizing["mode"] == "fixed_qty" else None
+        cash_pct = float(sizing["pct"]) if sizing["mode"] == "cash_pct" else None
+    else:
+        entry_group = _legacy_entry_group(config["trigger_type"], config["threshold"])
+        take_profit_pct = config["take_profit_pct"]
+        stop_loss_pct = config["stop_loss_pct"]
+        trailing_stop_pct = None
+        max_holding_days = None
+        fixed_qty = config["quantity"]  # As-is: crafted int configs stay int
+        cash_pct = None
 
     # T+1 exit deferral (CN-2 §7): active with a positive t_plus. Synthetic days
     # are real day boundaries here, so no session clock is consulted.
     t1_active = profile is not None and profile.t_plus > 0
+    # cash_pct sizing floors to whole board lots on lot-sized profiles (CN).
+    lot_size = profile.lot_size if profile is not None else 1
     # Per-fill fee — the §1 formula WITHOUT compute_fee's cent rounding, so the
     # None/us path stays value-for-value identical to the legacy backtest
     # (which accumulated commission unrounded and rounded only in stats).
@@ -346,11 +560,28 @@ def _simulate(
     half_spread = spread_bps_for(ticker) / 2.0 / 10_000.0
     commission_rate = commission_bps / 10_000.0
 
+    # Indicator series are precomputed ONCE per simulation with the same
+    # app.indicators series functions the live engine's point indicators are
+    # defined by (single source of truth). Legacy price/day_change groups
+    # need no series — build_series_context returns {} without touching the
+    # bars. At bar g the loop evaluates with idx = g - 1: bars strictly
+    # before g are the COMPLETED minutes; bar g is "now", read via the quote
+    # (its close + the day-change vs the current day's reference close).
+    entry_ctx = (
+        build_series_context(
+            entry_group,
+            {"closes": closes, "highs": bars["highs"], "lows": bars["lows"]},
+        )
+        if entry_group is not None
+        else {}
+    )
+
     cash = starting_cash
     qty = 0.0
     entry_cost = 0.0  # Full cost of the open position (notional + commission)
     tp_price: float | None = None
     sl_price: float | None = None
+    high_water = 0.0  # Trailing-stop reference — reset to buy_px on entry
     fired_today = False
     entry_day = -1  # Day index the open position was entered on (T+1 gate)
     day_prev_close = float(config["anchor_price"])
@@ -394,42 +625,94 @@ def _simulate(
         close = float(closes[g])
         bar_time = int(times[g])
 
-        # 1) Intrabar exits, stop-loss first (a same-bar double hit is a stop).
-        # CN-2 §7: under T+1 a position cannot exit on its entry day — skip the
-        # exit checks while current_day == entry_day.
-        if qty > 0 and (not t1_active or current_day > entry_day):
-            if sl_price is not None and float(bars["lows"][g]) <= sl_price:
-                sell(sl_price, bar_time, "stop_loss")
-            elif tp_price is not None and float(bars["highs"][g]) >= tp_price:
-                sell(tp_price, bar_time, "take_profit")
+        # 1) Intrabar exits, priority stop_loss -> trailing_stop ->
+        # take_profit -> max_holding_days (P2 §4 — the live engine's order;
+        # a same-bar double hit is a stop). Legacy configs carry no
+        # trailing/max-holding, so this reduces exactly to the original
+        # SL-before-TP pair. CN-2 §7: under T+1 a position cannot exit on
+        # its entry day — skip the exit checks while current_day ==
+        # entry_day.
+        if qty > 0:
+            if not t1_active or current_day > entry_day:
+                # Trailing stop level from the high-water mark of PRIOR bars
+                # (seeded at the entry fill) — conservative: the current
+                # bar's own high/low intrabar ordering is unknowable.
+                trail_price = (
+                    high_water * (1.0 - trailing_stop_pct / 100.0)
+                    if trailing_stop_pct
+                    else None
+                )
+                if sl_price is not None and float(bars["lows"][g]) <= sl_price:
+                    sell(sl_price, bar_time, "stop_loss")
+                elif trail_price is not None and float(bars["lows"][g]) <= trail_price:
+                    sell(trail_price, bar_time, "trailing_stop")
+                elif tp_price is not None and float(bars["highs"][g]) >= tp_price:
+                    sell(tp_price, bar_time, "take_profit")
+                elif (
+                    max_holding_days is not None
+                    and current_day - entry_day >= max_holding_days
+                ):
+                    # Synthetic-day holding limit: close at the first bar of
+                    # the day the limit is reached, at the bar close.
+                    sell(close, bar_time, "max_holding_days")
+            # High-water rises with the bar high AFTER the exit checks and
+            # never on the entry bar (entry fills at the close below; qty
+            # was still 0 here). Tracks through T+1 entry-day bars too —
+            # the live engine raises it every pass.
+            if qty > 0 and trailing_stop_pct:
+                bar_high = float(bars["highs"][g])
+                if bar_high > high_water:
+                    high_water = bar_high
 
-        # 2) Flat and not yet fired today -> evaluate the trigger on the close.
+        # 2) Flat and not yet fired today -> evaluate the entry condition
+        # group on the bar close (legacy triggers ride the single-condition
+        # adapter — rules-engine semantics preserved value-for-value).
         if (
             qty == 0.0
             and not fired_today
-            and _trigger_fires(close, day_prev_close, trigger_type, threshold)
+            and entry_group is not None
+            and evaluate_group_at(
+                entry_group,
+                entry_ctx,
+                g - 1,
+                {
+                    "price": close,
+                    "day_change_percent": _day_change_pct(close, day_prev_close),
+                },
+            )
         ):
             fired_today = True  # Consumed even when the buy is rejected
             buy_px = close * (1.0 + half_spread)
-            cost = quantity * buy_px
+            if cash_pct is not None:
+                # cash_pct sizing (P2 §4): whole shares of the current cash
+                # at the ask, floored to whole board lots on CN. A zero-
+                # share result consumes the day's fire and counts as an
+                # insufficient-cash rejection (the live engine's skip).
+                entry_qty = float(math.floor(cash * cash_pct / 100.0 / buy_px))
+                if lot_size > 1:
+                    entry_qty = float(math.floor(entry_qty / lot_size) * lot_size)
+            else:
+                entry_qty = fixed_qty
+            cost = entry_qty * buy_px
             commission = _fee(cost, "buy")
-            if cash < cost + commission:
+            if entry_qty <= 0 or cash < cost + commission:
                 insufficient_cash += 1
             else:
                 cash -= cost + commission
                 commission_paid += commission
-                qty = quantity
+                qty = entry_qty
                 entry_cost = cost + commission
                 entry_day = current_day  # T+1: no exit before the next day
                 tp_price = buy_px * (1.0 + take_profit_pct / 100.0) if take_profit_pct else None
                 sl_price = buy_px * (1.0 - stop_loss_pct / 100.0) if stop_loss_pct else None
+                high_water = buy_px  # Trailing reference = entry fill (live parity)
                 fires += 1
                 trades.append(
                     {
                         "time": bar_time,
                         "side": "buy",
                         "price": round(buy_px, 2),
-                        "quantity": quantity,
+                        "quantity": entry_qty,
                         "reason": "trigger",
                         "pnl": None,
                     }
@@ -574,8 +857,24 @@ def run_backtest(
         {"time": int(times[i]), "value": round(representative["baseline"][i], 2)} for i in idxs
     ]
 
-    return {
-        "config": {
+    # Config echo: strategy configs (P2 §4) echo their own shape; legacy
+    # requests keep the OLD shape byte-for-byte — entry/exits/sizing keys
+    # never leak into a legacy response (golden-sample tests pin it).
+    if config.get("source") == "strategy":
+        config_echo = {
+            "ticker": config["ticker"],
+            "entry": config["entry"],
+            "exits": config["exits"],
+            "sizing": config["sizing"],
+            "days": config["days"],
+            "runs": runs,
+            "seed": base_seed,
+            "commission_bps": commission_bps,
+            "anchor_price": round(config["anchor_price"], 2),
+            "source": "strategy",
+        }
+    else:
+        config_echo = {
             "ticker": config["ticker"],
             "trigger_type": config["trigger_type"],
             "threshold": config["threshold"],
@@ -588,7 +887,9 @@ def run_backtest(
             "seed": base_seed,
             "commission_bps": commission_bps,
             "anchor_price": round(config["anchor_price"], 2),
-        },
+        }
+    return {
+        "config": config_echo,
         "stats": representative["stats"],
         "equity_curve": equity_curve,
         "baseline_curve": baseline_curve,
