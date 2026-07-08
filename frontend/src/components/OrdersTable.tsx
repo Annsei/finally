@@ -7,6 +7,7 @@
 import useSWR from 'swr';
 import { fetcher } from '@/lib/fetcher';
 import { formatQuantity } from '@/lib/format';
+import SymbolLink from '@/components/SymbolLink';
 import type { TradesResponse } from '@/types/market';
 import { useT } from '@/lib/i18n';
 
@@ -62,7 +63,9 @@ export default function OrdersTable() {
             >
               {t.side}
             </td>
-            <td className="py-1 font-semibold text-terminal-text">{t.ticker}</td>
+            <td className="py-1 font-semibold text-terminal-text">
+              <SymbolLink code={t.ticker} />
+            </td>
             <td className="text-right py-1 tabular-nums text-terminal-text">
               {formatQuantity(t.quantity)}
             </td>

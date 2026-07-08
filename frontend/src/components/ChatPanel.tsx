@@ -3,6 +3,7 @@ import useSWR from 'swr';
 import { fetcher } from '@/lib/fetcher';
 import { formatShares } from '@/lib/format';
 import { useMarketProfile } from '@/lib/marketProfile';
+import { useUiStore } from '@/stores/uiStore';
 import { useT, type TFunction } from '@/lib/i18n';
 import type {
   ChatHistoryResponse,
@@ -182,8 +183,9 @@ function BacktestBadge({ outcome, t }: { outcome: ChatBacktestOutcome } & BadgeC
 }
 
 // Agent-initiated message styling by kind (M2.3/2.4): briefs, reviews, rules.
-// Border colour by kind; the label is translated at render time.
-const KIND_BORDER: Record<string, string> = {
+// Border colour by kind; the label is translated at render time. Exported so
+// the /journal review archive reuses the same kind semantics (P1 §6).
+export const KIND_BORDER: Record<string, string> = {
   brief: '#209dd7',
   review: '#ecad0a',
   rule: '#b07cc6',
@@ -265,7 +267,12 @@ export default function ChatPanel({ open, onToggle, onNewTrade }: Props) {
     { refreshInterval: 10_000 }
   );
 
-  const [input, setInput] = useState('');
+  // Draft lives in uiStore (P1 §2) so half-typed input survives navigating
+  // between the desk and the new pages (the panel remounts per page).
+  const input = useUiStore((s) => s.chatDraft);
+  const setInput = useUiStore((s) => s.setChatDraft);
+  const pendingChatMessage = useUiStore((s) => s.pendingChatMessage);
+  const setPendingChatMessage = useUiStore((s) => s.setPendingChatMessage);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -280,13 +287,11 @@ export default function ChatPanel({ open, onToggle, onNewTrade }: Props) {
     }
   }, [history?.messages?.length, loading, error]);
 
-  const handleSubmit = async () => {
-    const trimmed = input.trim();
-    if (!trimmed || loading) return;
-
+  // Core send path — used by both the input row and the pendingChatMessage
+  // effect (P1 §2). Behavior identical to the previous inline handleSubmit.
+  const sendMessage = async (trimmed: string) => {
     setLoading(true);
     setError(null);
-    setInput('');
 
     try {
       const res = await fetch('/api/chat/', {
@@ -321,6 +326,33 @@ export default function ChatPanel({ open, onToggle, onNewTrade }: Props) {
       setLoading(false);
     }
   };
+
+  const handleSubmit = async () => {
+    const trimmed = input.trim();
+    if (!trimmed || loading) return;
+    setInput('');
+    await sendMessage(trimmed);
+  };
+
+  // One-shot auto-send (P1 §2): a page sets uiStore.pendingChatMessage (e.g.
+  // /symbol's "AI analyze" button); this effect consumes it as a user message
+  // and clears it. Default null → zero behavior difference.
+  useEffect(() => {
+    // StrictMode double-invokes mount effects with the same render's values —
+    // read the LIVE store slot so it is consumed exactly once (the first run
+    // clears it; the second sees null and bails).
+    const pending = useUiStore.getState().pendingChatMessage;
+    if (pending === null || loading) return;
+    // One-shot consume: always clear the slot first — even a blank message
+    // must not occupy it forever. Same consume-and-clear pattern as
+    // BacktestPanel's backtestPrefill effect.
+    setPendingChatMessage(null);
+    const msg = pending.trim();
+    if (!msg) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void sendMessage(msg);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingChatMessage, loading]);
 
   // M2.4: on-demand daily review — stored server-side as a kind='review' message
   const handleReview = async () => {

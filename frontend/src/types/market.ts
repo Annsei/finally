@@ -107,6 +107,23 @@ export interface MarketEventsResponse {
   events: MarketEvent[];
 }
 
+// GET /api/market/events/archive (P1 §3.3) — durable event archive, newest
+// first; `before` cursor pagination:
+export interface MarketEventsArchiveResponse {
+  events: MarketEvent[];
+  has_more: boolean;
+}
+
+// GET /api/market/quotes (P1 §3.4) — full PriceCache snapshot, ascending by
+// ticker; each quote is the SSE PriceUpdate payload plus the universe sector:
+export interface MarketQuote extends PriceUpdate {
+  sector: string;
+}
+
+export interface MarketQuotesResponse {
+  quotes: MarketQuote[];
+}
+
 // Orders (POST/GET /api/portfolio/orders, DELETE /api/portfolio/orders/{id}):
 export type OrderStatus = 'open' | 'filled' | 'cancelled' | 'rejected' | 'expired';
 export type OrderKind = 'limit' | 'stop' | 'stop_limit';
@@ -294,6 +311,27 @@ export interface LeaderboardEntry {
 export interface LeaderboardResponse {
   season: { id: number; started_at: string };
   entries: LeaderboardEntry[];
+}
+
+// GET /api/seasons (M4.3) — every season, newest first; archived results only
+// for ended seasons (the current season's `results` is null):
+export interface SeasonResultEntry {
+  user_id: string;
+  name: string;
+  final_value: number;
+  return_pct: number;
+  rank: number;
+}
+
+export interface Season {
+  id: number;
+  started_at: string;          // ISO timestamp string
+  ended_at: string | null;     // null while the season is in progress
+  results: SeasonResultEntry[] | null;
+}
+
+export interface SeasonsResponse {
+  seasons: Season[];
 }
 
 // GET /api/portfolio/analytics (M3.4):

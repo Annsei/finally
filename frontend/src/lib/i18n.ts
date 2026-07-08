@@ -277,6 +277,78 @@ const en: Dict = {
   'orders.cancelFailedStatus': 'Cancel failed ({status})',
   // TradeBar whole-lot hint (lot markets only — never shown on US, lot_size 1)
   'tradebar.wholeLotHint': 'Enter a whole number of lots.',
+
+  // --- P1 additions ----------------------------------------------------------
+  // Header navigation (P1 §2)
+  'nav.desk': 'Desk',
+  'nav.market': 'Market',
+  'nav.journal': 'Journal',
+  'nav.arena': 'Arena',
+
+  // Market page (P1 §4)
+  'market.gridTitle': 'All Symbols',
+  'market.colCode': 'Code',
+  'market.colPrice': 'Price',
+  'market.colDayPct': 'Day %',
+  'market.colHigh': 'High',
+  'market.colLow': 'Low',
+  'market.colVolume': 'Vol',
+  'market.colSector': 'Sector',
+  'market.loading': 'Waiting for the live market feed…',
+  'market.heatmapTitle': 'Sector Heatmap',
+  'market.eventsTitle': 'Event Archive',
+  'market.eventsEmpty': 'No archived market events yet.',
+  'market.loadMore': 'Load more',
+  'market.loadingMore': 'Loading…',
+
+  // Symbol page (P1 §5)
+  'symbol.empty': 'No symbol selected.',
+  'symbol.statsTitle': 'Day Stats',
+  'symbol.prevClose': 'Prev Close',
+  'symbol.high': 'High',
+  'symbol.low': 'Low',
+  'symbol.amplitude': 'Range %',
+  'symbol.volume': 'Vol',
+  'symbol.bid': 'Bid',
+  'symbol.ask': 'Ask',
+  'symbol.limitUp': 'Limit Up',
+  'symbol.limitDown': 'Limit Down',
+  'symbol.positionTitle': 'My Position',
+  'symbol.positionEmpty': 'No position in {ticker}.',
+  'symbol.posQty': 'Qty',
+  'symbol.posAvgCost': 'Avg Cost',
+  'symbol.posPnl': 'Unrealized P&L',
+  'symbol.tradesTitle': 'My Fills',
+  'symbol.tradesEmpty': 'No fills for {ticker} yet.',
+  'symbol.eventsTitle': 'Event History',
+  'symbol.eventsEmpty': 'No events for this symbol yet.',
+  'symbol.aiAnalyze': 'AI Analyze',
+  'symbol.aiPrompt':
+    "Analyze {ticker} for me: given my current position and today's price action, should I adjust?",
+
+  // Journal page (P1 §6)
+  'journal.reviewsTitle': 'Review Archive',
+  'journal.runReview': 'Run Review',
+  'journal.running': 'Running…',
+  'journal.reviewFailed': 'Review failed',
+  'journal.reviewsEmpty': "No reviews yet. Run one to archive today's takeaways.",
+  'journal.daysTitle': 'Trades by Day',
+  'journal.daysLoading': 'Loading trades…',
+  'journal.daysEmpty': 'No trades yet.',
+  'journal.tradeCount': '{n} trades',
+  'journal.dayRealized': 'Realized',
+  'journal.filterPlaceholder': 'Filter by ticker…',
+  'journal.filterAria': 'Filter trades by ticker',
+
+  // Arena page (P1 §7)
+  'arena.seasonsTitle': 'Season History',
+  'arena.season': 'Season {id}',
+  'arena.inProgress': 'In progress',
+  'arena.seasonsEmpty': 'No seasons yet.',
+  'arena.colRank': '#',
+  'arena.colTrader': 'Trader',
+  'arena.colFinalValue': 'Final Value',
+  'arena.colReturn': 'Return',
 };
 
 // ---------------------------------------------------------------------------
@@ -527,6 +599,77 @@ const zh: Dict = {
   'orders.cancelFailed': '撤单失败',
   'orders.cancelFailedStatus': '撤单失败（{status}）',
   'tradebar.wholeLotHint': '请输入整数手数。',
+
+  // --- P1 additions ----------------------------------------------------------
+  // Header navigation (P1 §2)
+  'nav.desk': '交易台',
+  'nav.market': '市场',
+  'nav.journal': '复盘',
+  'nav.arena': '竞技场',
+
+  // Market page (P1 §4)
+  'market.gridTitle': '全市场行情',
+  'market.colCode': '代码',
+  'market.colPrice': '现价',
+  'market.colDayPct': '涨跌幅',
+  'market.colHigh': '最高',
+  'market.colLow': '最低',
+  'market.colVolume': '成交量',
+  'market.colSector': '板块',
+  'market.loading': '正在等待实时行情…',
+  'market.heatmapTitle': '板块热力图',
+  'market.eventsTitle': '事件归档',
+  'market.eventsEmpty': '暂无市场事件归档。',
+  'market.loadMore': '加载更多',
+  'market.loadingMore': '加载中…',
+
+  // Symbol page (P1 §5)
+  'symbol.empty': '未选择标的。',
+  'symbol.statsTitle': '当日统计',
+  'symbol.prevClose': '昨收',
+  'symbol.high': '最高',
+  'symbol.low': '最低',
+  'symbol.amplitude': '振幅',
+  'symbol.volume': '成交量',
+  'symbol.bid': '买一',
+  'symbol.ask': '卖一',
+  'symbol.limitUp': '涨停价',
+  'symbol.limitDown': '跌停价',
+  'symbol.positionTitle': '我的持仓',
+  'symbol.positionEmpty': '暂无 {ticker} 持仓。',
+  'symbol.posQty': '数量',
+  'symbol.posAvgCost': '成本',
+  'symbol.posPnl': '浮动盈亏',
+  'symbol.tradesTitle': '我的成交',
+  'symbol.tradesEmpty': '暂无 {ticker} 成交。',
+  'symbol.eventsTitle': '事件史',
+  'symbol.eventsEmpty': '该标的暂无事件。',
+  'symbol.aiAnalyze': 'AI 分析',
+  'symbol.aiPrompt': '请帮我分析 {ticker}：结合我的当前持仓与今日走势，是否需要调整？',
+
+  // Journal page (P1 §6)
+  'journal.reviewsTitle': '复盘归档',
+  'journal.runReview': '生成复盘',
+  'journal.running': '生成中…',
+  'journal.reviewFailed': '复盘失败',
+  'journal.reviewsEmpty': '暂无复盘。点击「生成复盘」归档今日心得。',
+  'journal.daysTitle': '按日成交',
+  'journal.daysLoading': '正在加载成交…',
+  'journal.daysEmpty': '暂无成交。',
+  'journal.tradeCount': '{n} 笔',
+  'journal.dayRealized': '已实现',
+  'journal.filterPlaceholder': '按代码过滤…',
+  'journal.filterAria': '按代码过滤成交',
+
+  // Arena page (P1 §7)
+  'arena.seasonsTitle': '赛季史',
+  'arena.season': '第 {id} 赛季',
+  'arena.inProgress': '进行中',
+  'arena.seasonsEmpty': '暂无赛季。',
+  'arena.colRank': '#',
+  'arena.colTrader': '交易者',
+  'arena.colFinalValue': '期末市值',
+  'arena.colReturn': '收益',
 };
 
 const DICTS: Record<Lang, Dict> = { en, zh };

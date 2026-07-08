@@ -8,6 +8,7 @@
  */
 import useSWR from 'swr';
 import { fetcher } from '@/lib/fetcher';
+import SymbolLink from '@/components/SymbolLink';
 import type { MarketEvent, MarketEventsResponse } from '@/types/market';
 import { useT } from '@/lib/i18n';
 
@@ -24,6 +25,8 @@ function EventItem({ ev }: { ev: MarketEvent }) {
     <span className="inline-flex items-baseline gap-1 px-4 text-xs" data-testid={`news-item-${ev.id}`}>
       <span className="text-terminal-muted tabular-nums">{formatTime(ev.timestamp)}</span>
       <span style={{ color }}>{ev.direction === 'up' ? '▲' : '▼'}</span>
+      {/* Code links to the symbol detail page (P1 §2) */}
+      <SymbolLink code={ev.ticker} className="font-semibold text-terminal-text" />
       {/* LLM narrative when enriched (M3.2), template headline otherwise */}
       <span className="text-terminal-text">{ev.narrative ?? ev.headline}</span>
     </span>

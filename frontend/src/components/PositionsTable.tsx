@@ -4,6 +4,7 @@ import type { PortfolioResponse, Position } from '@/types/market';
 import { fetcher } from '@/lib/fetcher';
 import { useTicker } from '@/stores/priceStore';
 import { formatQuantity } from '@/lib/format';
+import SymbolLink from '@/components/SymbolLink';
 import { useT } from '@/lib/i18n';
 
 // Inner component: one row per position with live price + flash animation
@@ -59,7 +60,9 @@ function PositionsRow({ pos }: { pos: Position }) {
       data-testid={`position-row-${pos.ticker}`}
       className="border-b border-terminal-border hover:bg-terminal-surface/50"
     >
-      <td className="py-1 pl-1 font-semibold text-terminal-text tabular-nums">{pos.ticker}</td>
+      <td className="py-1 pl-1 font-semibold text-terminal-text tabular-nums">
+        <SymbolLink code={pos.ticker} />
+      </td>
       <td className="text-right py-1 tabular-nums text-terminal-text">{formatQuantity(pos.quantity)}</td>
       <td className="text-right py-1 tabular-nums text-terminal-text">${pos.avg_cost.toFixed(2)}</td>
       <td

@@ -32,6 +32,16 @@ interface UiState {
   // One-shot handoff: BacktestPanel consumes it and clears it back to null.
   backtestPrefill: BacktestPrefill | null;
   setBacktestPrefill: (prefill: BacktestPrefill | null) => void;
+  // P1 §2 — chat state lives here so the panel survives page navigation:
+  // open/closed state and the input draft persist across / ↔ /market ↔ … .
+  chatOpen: boolean;
+  setChatOpen: (open: boolean) => void;
+  chatDraft: string;
+  setChatDraft: (draft: string) => void;
+  // One-shot: a page (e.g. /symbol "AI analyze") sets it; ChatPanel's effect
+  // consumes it — sends it as a user message and clears it back to null.
+  pendingChatMessage: string | null;
+  setPendingChatMessage: (message: string | null) => void;
 }
 
 export const useUiStore = create<UiState>((set) => ({
@@ -39,4 +49,10 @@ export const useUiStore = create<UiState>((set) => ({
   setPortfolioTab: (tab) => set({ portfolioTab: tab }),
   backtestPrefill: null,
   setBacktestPrefill: (prefill) => set({ backtestPrefill: prefill }),
+  chatOpen: true,
+  setChatOpen: (open) => set({ chatOpen: open }),
+  chatDraft: '',
+  setChatDraft: (draft) => set({ chatDraft: draft }),
+  pendingChatMessage: null,
+  setPendingChatMessage: (message) => set({ pendingChatMessage: message }),
 }));

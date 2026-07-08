@@ -9,6 +9,7 @@ import { useState } from 'react';
 import useSWR from 'swr';
 import { fetcher } from '@/lib/fetcher';
 import { formatQuantity } from '@/lib/format';
+import SymbolLink from '@/components/SymbolLink';
 import { useUiStore } from '@/stores/uiStore';
 import { useT } from '@/lib/i18n';
 import type { RulesResponse, TradingRule, RuleStatus } from '@/types/market';
@@ -129,7 +130,7 @@ export default function RulesTable() {
                 {r.description}
               </td>
               <td className="py-1 tabular-nums text-terminal-muted">
-                <span className="font-semibold text-terminal-text">{r.ticker}</span>{' '}
+                <SymbolLink code={r.ticker} className="font-semibold text-terminal-text" />{' '}
                 {conditionText(r)}
               </td>
               <td

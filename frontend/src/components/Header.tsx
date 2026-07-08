@@ -18,6 +18,10 @@
  */
 import { useState } from 'react';
 import useSWR from 'swr';
+import Link from 'next/link';
+// next/compat/router (NOT next/router): returns null instead of throwing when
+// no RouterContext is mounted — jest renders <Header/> bare (P1 invariant).
+import { useRouter } from 'next/compat/router';
 import { usePriceStore } from '@/stores/priceStore';
 import type { PortfolioResponse, AuthMeResponse } from '@/types/market';
 import { fetcher } from '@/lib/fetcher';
@@ -146,6 +150,52 @@ const DOT_COLORS: Record<'connected' | 'reconnecting' | 'disconnected', string> 
   disconnected: 'bg-terminal-down',
 };
 
+// P1 §2 — global navigation between the brand and the right cluster.
+const NAV_ITEMS: { href: string; labelKey: string; testid: string }[] = [
+  { href: '/', labelKey: 'nav.desk', testid: 'nav-desk' },
+  { href: '/market', labelKey: 'nav.market', testid: 'nav-market' },
+  { href: '/journal', labelKey: 'nav.journal', testid: 'nav-journal' },
+  { href: '/arena', labelKey: 'nav.arena', testid: 'nav-arena' },
+];
+
+// Slash-normalize a path for active-state comparison: '/market/' → '/market',
+// '' → '/'. router.pathname already excludes the trailing slash, but asPath
+// (and defensive inputs) may carry one under trailingSlash: true.
+function normalizePath(path: string): string {
+  const stripped = path.replace(/\/+$/, '');
+  return stripped === '' ? '/' : stripped;
+}
+
+function HeaderNav() {
+  const t = useT();
+  // Null-safe: jest mounts <Header/> without a RouterContext → router is null.
+  const router = useRouter();
+  const current = normalizePath(router?.pathname ?? '/');
+
+  return (
+    <nav className="flex items-center gap-4" aria-label="Primary">
+      {NAV_ITEMS.map((item) => {
+        const active = current === normalizePath(item.href);
+        return (
+          <Link
+            key={item.href}
+            href={item.href}
+            data-testid={item.testid}
+            data-active={String(active)}
+            className={`text-xs font-semibold uppercase tracking-wider border-b-2 transition-colors ${
+              active
+                ? 'text-terminal-accent border-terminal-accent'
+                : 'text-terminal-muted border-transparent hover:text-terminal-text'
+            }`}
+          >
+            {t(item.labelKey)}
+          </Link>
+        );
+      })}
+    </nav>
+  );
+}
+
 export default function Header() {
   const t = useT();
   const profile = useMarketProfile();
@@ -196,6 +246,9 @@ export default function Header() {
         </span>
         <AuthChip />
       </span>
+
+      {/* Global navigation (P1 §2) */}
+      <HeaderNav />
 
       {/* Right cluster: Cash · Portfolio · Connection dot */}
       <div className="flex items-center gap-6">

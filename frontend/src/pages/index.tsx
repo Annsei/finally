@@ -1,6 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
 import useSWR, { useSWRConfig } from 'swr';
-import { usePriceStream } from '@/hooks/usePriceStream';
 import Header from '@/components/Header';
 import NewsTicker from '@/components/NewsTicker';
 import StatusBar from '@/components/StatusBar';
@@ -13,16 +12,18 @@ import TradeBar from '@/components/TradeBar';
 import ChatPanel from '@/components/ChatPanel';
 import { fetcher } from '@/lib/fetcher';
 import { TICKER_DIRECTORY } from '@/lib/tickers';
+import { useUiStore } from '@/stores/uiStore';
 import type { WatchlistResponse, PortfolioResponse } from '@/types/market';
 
 export default function Dashboard() {
-  // Single SSE connection for the page lifetime — call ONCE at root (Anti-pattern guard T-4-ES)
-  usePriceStream();
+  // SSE connection lives in _app (P1 §2) — do NOT call usePriceStream() here.
 
   const [selectedTicker, setSelectedTicker] = useState<string | null>(null);
 
-  // Chat panel open by default (D-09)
-  const [chatOpen, setChatOpen] = useState(true);
+  // Chat panel open by default (D-09); state lives in uiStore (P1 §2) so it
+  // survives client-side navigation to /market, /journal, /arena.
+  const chatOpen = useUiStore((s) => s.chatOpen);
+  const setChatOpen = useUiStore((s) => s.setChatOpen);
 
   // SWR for portfolio (bound mutate passed to TradeBar + ChatPanel for revalidation)
   const { mutate: mutatePortfolio } = useSWR<PortfolioResponse>('/api/portfolio/', fetcher);
