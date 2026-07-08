@@ -576,13 +576,18 @@ def create_portfolio_router(
         }
 
     @router.get("/trades")
-    async def get_trades(request: Request, limit: str | None = None) -> dict:
+    async def get_trades(
+        request: Request, limit: str | None = None, ticker: str | None = None
+    ) -> dict:
         """Return the trade blotter: executed trades, newest first.
 
         Query params:
             limit: maximum number of trades to return. Defaults to 50 and is
                 clamped to the range 1..500. Non-integer values return
                 HTTP 400 with ``{"error": "message"}``.
+            ticker: optional ticker filter (P1 §3.5) — uppercase-normalized
+                exact match. Blank values are treated as absent; when absent
+                the SQL and response are byte-identical to the pre-P1 shape.
 
         Ordering is executed_at DESC with rowid DESC as a tie-break so trades
         executed within the same timestamp still return in stable
@@ -602,20 +607,32 @@ def create_portfolio_router(
                 )
         limit_value = max(1, min(500, limit_value))
 
+        ticker_value = ticker.strip().upper() if ticker is not None and ticker.strip() else None
+
         user_id = get_current_user_id(request, db_path)
         conn = get_conn(db_path)
         try:
-            rows = conn.execute(
-                """
+            # Default (no ticker) keeps the pre-P1 SQL byte-for-byte.
+            query = """
                 SELECT id, ticker, side, quantity, price, commission,
                        realized_pnl, executed_at
                 FROM trades
                 WHERE user_id = ?
                 ORDER BY executed_at DESC, rowid DESC
                 LIMIT ?
-                """,
-                (user_id, limit_value),
-            ).fetchall()
+                """
+            params: tuple = (user_id, limit_value)
+            if ticker_value is not None:
+                query = """
+                SELECT id, ticker, side, quantity, price, commission,
+                       realized_pnl, executed_at
+                FROM trades
+                WHERE user_id = ? AND ticker = ?
+                ORDER BY executed_at DESC, rowid DESC
+                LIMIT ?
+                """
+                params = (user_id, ticker_value, limit_value)
+            rows = conn.execute(query, params).fetchall()
             return {
                 "trades": [
                     {

@@ -259,9 +259,12 @@ async def lifespan(app: FastAPI):
     )
     app.include_router(chat_router)
 
-    # Market data router (history backfill, events, session state)
+    # Market data router (history backfill, events + archive, quotes, session
+    # state) — db_path backs /events/archive, universe supplies quote sectors.
     from app.routes.market import create_market_router
-    market_router = create_market_router(price_cache, session_clock)
+    market_router = create_market_router(
+        price_cache, session_clock, db_path=db_path, universe=profile.universe
+    )
     app.include_router(market_router)
 
     # Market profile router (CN-1 — the frontend's runtime market config)
@@ -322,7 +325,21 @@ async def lifespan(app: FastAPI):
     app.state.briefs_watch_task = briefs_watch_task
     logger.info("FinAlly startup: AI briefs watcher background task started")
 
-    background_tasks = [snapshot_task, orders_fill_task, rules_eval_task, briefs_watch_task]
+    # Start background market-event archiver task (every ~5 seconds, P1 §3.2)
+    # — upserts the in-memory event ring buffer into the market_events table
+    # so the events archive endpoint survives eviction and restarts.
+    from app.events_archive import events_persist_loop
+    events_persist_task = asyncio.create_task(events_persist_loop(price_cache, db_path))
+    app.state.events_persist_task = events_persist_task
+    logger.info("FinAlly startup: market-event archiver background task started")
+
+    background_tasks = [
+        snapshot_task,
+        orders_fill_task,
+        rules_eval_task,
+        briefs_watch_task,
+        events_persist_task,
+    ]
 
     # Start the session clock driver (every ~1 second, M3.1) — settlement at
     # close (stamp closes + expire equity DAY orders), day-state roll at open.

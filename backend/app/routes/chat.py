@@ -6,7 +6,8 @@ Provides:
   (M2.2), strategy backtests (M5 — stateless engine runs, compact outcomes),
   and watchlist changes; persists conversation history to chat_messages.
 - GET /api/chat — last 20 chat_messages rows of every kind
-  ('chat' | 'brief' | 'review' | 'rule').
+  ('chat' | 'brief' | 'review' | 'rule'); optional ``kind``/``limit`` query
+  params filter and resize the window (P1 §3.6, defaults unchanged).
 - POST /api/chat/review — on-demand daily AI review (M2.4): summarizes
   today's trades, rule firings, P&L, and market events as a plain-text
   assistant message stored with kind='review'.
@@ -504,30 +505,59 @@ def create_chat_router(
     starting_cash = profile.seed_cash if profile is not None else STARTING_CASH
 
     @router.get("/")
-    async def get_chat_history(request: Request) -> dict:
-        """Return last 20 chat messages in ascending chronological order.
+    async def get_chat_history(
+        request: Request, kind: str | None = None, limit: str | None = None
+    ) -> dict:
+        """Return the last N chat messages in ascending chronological order.
 
         Query selects DESC then reverses so the response is ascending by created_at.
         The ``actions`` field is parsed from its stored JSON string to a dict (or None).
         Every kind is returned ('chat' | 'brief' | 'review' | 'rule') — the
         frontend labels non-conversation messages by their ``kind``.
 
+        Query params (P1 §3.6 — defaults keep the pre-P1 behavior byte-for-byte):
+            kind: optional filter to one message kind ('chat' | 'brief' |
+                'review' | 'rule'). Any other value returns HTTP 400 with
+                ``{"error": "message"}``.
+            limit: maximum number of most-recent messages to return. Defaults
+                to 20 and is clamped to the range 1..200. Non-integer values
+                return HTTP 400 with ``{"error": "message"}``.
+
         Returns:
             {"messages": [{"role", "content", "actions", "kind", "created_at"}, ...]}
         """
+        if kind is not None and kind not in ("chat", "brief", "review", "rule"):
+            return JSONResponse(
+                status_code=400,
+                content={"error": "kind must be one of: chat, brief, review, rule"},
+            )
+
+        if limit is None:
+            limit_value = 20
+        else:
+            try:
+                limit_value = int(limit)
+            except ValueError:
+                return JSONResponse(
+                    status_code=400, content={"error": "limit must be an integer"}
+                )
+        limit_value = max(1, min(200, limit_value))
+
         user_id = get_current_user_id(request, db_path)
         conn = get_conn(db_path)
         try:
-            rows = conn.execute(
-                """
+            query = """
                 SELECT role, content, actions, kind, created_at
                 FROM chat_messages
                 WHERE user_id = ?
-                ORDER BY created_at DESC
-                LIMIT 20
-                """,
-                (user_id,),
-            ).fetchall()
+                """
+            params: list[object] = [user_id]
+            if kind is not None:
+                query += " AND kind = ?"
+                params.append(kind)
+            query += " ORDER BY created_at DESC LIMIT ?"
+            params.append(limit_value)
+            rows = conn.execute(query, params).fetchall()
             messages = list(reversed([
                 {
                     "role": row["role"],
