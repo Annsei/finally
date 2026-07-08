@@ -1,7 +1,7 @@
 # A-share (CN) E2E harness (CN-4a): app container (FINALLY_MARKET=cn) + Playwright.
 # Mirrors docker-compose.test.yml but boots the A-share market profile and runs
-# ONLY the CN specs (cn.spec.ts + pages-cn.spec.ts). The US harness lives in
-# docker-compose.test.yml and is unchanged.
+# ONLY the CN specs (cn.spec.ts + pages-cn.spec.ts + strategies-cn.spec.ts).
+# The US harness lives in docker-compose.test.yml and is unchanged.
 #
 # Run from the test/ directory:
 #   docker compose -f docker-compose.cn.test.yml up --build --abort-on-container-exit --exit-code-from playwright
@@ -50,4 +50,4 @@ services:
       CN_E2E: "1"
     # Recommended for Chromium stability in containers.
     ipc: host
-    command: sh -c "npm ci && npx playwright test specs/cn.spec.ts specs/pages-cn.spec.ts"
+    command: sh -c "npm ci && npx playwright test specs/cn.spec.ts specs/pages-cn.spec.ts specs/strategies-cn.spec.ts"
