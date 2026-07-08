@@ -349,6 +349,183 @@ const en: Dict = {
   'arena.colTrader': 'Trader',
   'arena.colFinalValue': 'Final Value',
   'arena.colReturn': 'Return',
+
+  // --- P2 additions (strategy center + Run Library) --------------------------
+  // Header navigation (P2 §8)
+  'nav.strategies': 'Strategies',
+  'nav.runs': 'Runs',
+
+  // Chat kind + strategy action badges (P2 §7/§8)
+  'chat.kind.strategy': 'Strategy',
+  'badge.strategyCreated': 'Strategy created: {name} ({ticker})',
+  'badge.strategyDeployed': 'Strategy deployed: {name}',
+  'badge.strategyPaused': 'Strategy paused: {name}',
+  'badge.strategyFailed': 'Strategy failed: {name} — {error}',
+  // …Backtest is the stats head; …BacktestSaved is the tail ChatPanel appends
+  // after ' · ' (linked to /run?id={run_id} when the outcome carries one).
+  'badge.strategyBacktest': 'Backtest {name}: {ret} (B&H {bh}) · {rt} trades{win}',
+  'badge.strategyBacktestSaved': 'saved to Runs',
+
+  // Strategy pages (/strategies, /strategy?id=X)
+  'strategy.title': 'Strategy Center',
+  'strategy.templatesTitle': 'Templates',
+  'strategy.formTitle': 'Create Strategy',
+  'strategy.name': 'Name',
+  'strategy.ticker': 'Ticker',
+  'strategy.template': 'Template',
+  'strategy.templateCustom': 'Custom',
+  'strategy.entryTitle': 'Entry conditions',
+  'strategy.exitsTitle': 'Exits',
+  'strategy.sizingTitle': 'Sizing',
+  'strategy.addCondition': '+ Condition',
+  'strategy.removeCondition': 'Remove',
+  'strategy.create': 'Create Strategy',
+  'strategy.creating': 'Creating…',
+  'strategy.createFailed': 'Create failed',
+  'strategy.errName': 'Enter a name (1–40 characters).',
+  'strategy.errTicker': 'Enter a valid ticker.',
+  'strategy.errValue': 'Enter a value for every condition that needs one.',
+  'strategy.errValueRange': 'Condition value is out of range (price > 0, RSI 0–100, pullback > 0).',
+  'strategy.errFastSlow': 'Fast period must be less than slow period.',
+  'strategy.errExits':
+    'Exit values must be greater than 0; max days must be a whole number between 1 and 120.',
+  'strategy.errSizing': 'Enter a valid size: quantity > 0, or 1–100% of cash.',
+  'strategy.listTitle': 'My Strategies',
+  'strategy.listEmpty': 'No strategies yet. Start from a template above or build one from scratch.',
+  'strategy.colName': 'Name',
+  'strategy.colTicker': 'Ticker',
+  'strategy.colStatus': 'Status',
+  'strategy.colPnl': 'Realized P&L',
+  'strategy.colRuns': 'Runs',
+  'strategy.colActions': 'Actions',
+  'strategy.details': 'Details',
+  'strategy.empty': 'No strategy selected.',
+  'strategy.notFound': 'Strategy not found.',
+  'strategy.configTitle': 'Configuration',
+  'strategy.performanceTitle': 'Performance',
+  'strategy.backtestTitle': 'Backtests',
+  'strategy.runBacktest': 'Run Backtest',
+  'strategy.running': 'Running…',
+  'strategy.compare': 'Compare',
+  'strategy.compareHint': 'Select two runs to compare.',
+  'strategy.openPosition': 'Open position',
+  'strategy.noOpenPosition': 'No open position.',
+
+  // Status chips
+  'strategy.status.draft': 'Draft',
+  'strategy.status.live': 'Live',
+  'strategy.status.paused': 'Paused',
+  'strategy.status.archived': 'Archived',
+
+  // Lifecycle controls — soft deploy gate + pause/archive semantics (P2 §8)
+  'strategy.deploy': 'Deploy',
+  'strategy.pause': 'Pause',
+  'strategy.resume': 'Resume',
+  'strategy.archive': 'Archive',
+  'strategy.confirmArchive': 'Confirm archive?',
+  'strategy.deployConfirm': 'Confirm deploy?',
+  'strategy.deployNoRunsWarning':
+    'This strategy has never been backtested — click Deploy again to go live anyway.',
+  'strategy.pauseHint':
+    'Paused strategies are fully frozen — they stop managing any open position (no exits fire) until resumed.',
+  'strategy.archiveHint':
+    'Archiving stops the strategy for good; any open shares stay in your portfolio for manual handling.',
+
+  // Condition builder — field names (dropdown)
+  'strategy.cond.field.price': 'Price',
+  'strategy.cond.field.day_change_pct': 'Day change %',
+  'strategy.cond.field.ma': 'Price vs SMA',
+  'strategy.cond.field.ma_cross': 'SMA cross',
+  'strategy.cond.field.ema_cross': 'EMA cross',
+  'strategy.cond.field.rsi': 'RSI',
+  'strategy.cond.field.window_high': 'Rolling high breakout',
+  'strategy.cond.field.window_low': 'Rolling low breakdown',
+  'strategy.cond.field.pullback_from_high_pct': 'Pullback from high %',
+
+  // Condition human-readable text (conditionText) — group joiners, op words,
+  // and one sentence template per field
+  'strategy.cond.all': 'all of',
+  'strategy.cond.any': 'any of',
+  'strategy.cond.above': '≥',
+  'strategy.cond.below': '≤',
+  'strategy.cond.price': 'price {op} {sym}{value}',
+  'strategy.cond.day_change_pct': 'day change {op} {value}%',
+  'strategy.cond.ma': 'price {op} SMA({period}) by {value}%',
+  'strategy.cond.ma_cross.above': 'SMA({fast})/SMA({slow}) golden cross',
+  'strategy.cond.ma_cross.below': 'SMA({fast})/SMA({slow}) death cross',
+  'strategy.cond.ema_cross.above': 'EMA({fast})/EMA({slow}) golden cross',
+  'strategy.cond.ema_cross.below': 'EMA({fast})/EMA({slow}) death cross',
+  'strategy.cond.rsi': 'RSI({period}) {op} {value}',
+  'strategy.cond.window_high': 'breaks the {minutes}-minute high',
+  'strategy.cond.window_low': 'breaks the {minutes}-minute low',
+  'strategy.cond.pullback_from_high_pct': 'pulls back ≥ {value}% from the {minutes}-minute high',
+
+  // Exits — form labels + human-readable summary parts
+  'strategy.exitTp': 'TP %',
+  'strategy.exitSl': 'SL %',
+  'strategy.exitTrailing': 'Trail %',
+  'strategy.exitMaxDays': 'Max days',
+  'strategy.exit.take_profit_pct': 'TP {value}%',
+  'strategy.exit.stop_loss_pct': 'SL {value}%',
+  'strategy.exit.trailing_stop_pct': 'Trailing stop {value}%',
+  'strategy.exit.max_holding_days': 'Max hold {value}d',
+  'strategy.exit.none': 'No exits',
+
+  // Sizing — form labels + human-readable summary parts
+  'strategy.sizingFixed': 'Fixed qty',
+  'strategy.sizingCashPct': '% of cash',
+  'strategy.sizing.fixed_qty': 'Fixed qty {qty}',
+  'strategy.sizing.cash_pct': '{pct}% of cash',
+
+  // Template registry — names/descriptions keyed by template key (P2 §6)
+  'strategy.template.dip_buyer.name': 'Dip Buyer',
+  'strategy.template.dip_buyer.desc':
+    'Buys a sharp intraday dip (day change ≤ −3%); exits via TP 4% / SL 3%.',
+  'strategy.template.momentum_breakout.name': 'Momentum Breakout',
+  'strategy.template.momentum_breakout.desc':
+    'Buys a break of the 60-minute high; rides it with a 2.5% trailing stop / SL 3%.',
+  'strategy.template.ma_golden_cross.name': 'MA Golden Cross',
+  'strategy.template.ma_golden_cross.desc':
+    'Buys when SMA(5) crosses above SMA(20); exits via TP 5% / SL 3%.',
+  'strategy.template.grid_lite.name': 'Grid Lite',
+  'strategy.template.grid_lite.desc':
+    'Simplified grid: buys a ≥2% pullback from the 60-minute high; TP 2% / SL 6%.',
+  'strategy.template.rsi_rebound.name': 'RSI Rebound',
+  'strategy.template.rsi_rebound.desc':
+    'Buys oversold conditions when RSI(14) drops below 30; exits via TP 4% / SL 3%.',
+  'strategy.template.trend_rider.name': 'Trend Rider',
+  'strategy.template.trend_rider.desc':
+    'Buys strength — price above SMA(30) with day change ≥ 0.5%; 3% trailing stop.',
+
+  // Run Library (/runs, /run?id=X, Backtest-tab save)
+  'runs.title': 'Run Library',
+  'runs.filterTicker': 'Filter by ticker…',
+  'runs.filterTickerAria': 'Filter runs by ticker',
+  'runs.filterStrategy': 'Strategy',
+  'runs.allStrategies': 'All strategies',
+  'runs.colTime': 'Time',
+  'runs.colTicker': 'Ticker',
+  'runs.colStrategy': 'Strategy',
+  'runs.colLabel': 'Label',
+  'runs.colReturn': 'Return',
+  'runs.colWinRate': 'Win rate',
+  'runs.colMaxDd': 'Max DD',
+  'runs.delete': 'Delete',
+  'runs.confirmDelete': 'Confirm delete?',
+  'runs.deleteFailed': 'Delete failed',
+  'runs.empty':
+    'No saved backtests yet. Save one from the Backtest tab or run one from a strategy page.',
+  'runs.loading': 'Loading runs…',
+  'runs.noneSelected': 'No run selected.',
+  'runs.notFound': 'Run not found.',
+  'runs.detailTitle': 'Backtest Run',
+  'runs.backToRuns': 'Back to Runs',
+  'runs.backToStrategy': 'Back to strategy',
+  'runs.save': 'Save to Runs',
+  'runs.saving': 'Saving…',
+  'runs.saveLabelPlaceholder': 'Label (optional)…',
+  'runs.saved': 'Saved — view in Runs →',
+  'runs.saveFailed': 'Save failed',
 };
 
 // ---------------------------------------------------------------------------
@@ -670,9 +847,180 @@ const zh: Dict = {
   'arena.colTrader': '交易者',
   'arena.colFinalValue': '期末市值',
   'arena.colReturn': '收益',
+
+  // --- P2 additions (strategy center + Run Library) --------------------------
+  // Header navigation (P2 §8)
+  'nav.strategies': '策略',
+  'nav.runs': '回测库',
+
+  // Chat kind + strategy action badges (P2 §7/§8)
+  'chat.kind.strategy': '策略',
+  'badge.strategyCreated': '策略已创建: {name}（{ticker}）',
+  'badge.strategyDeployed': '策略已部署: {name}',
+  'badge.strategyPaused': '策略已暂停: {name}',
+  'badge.strategyFailed': '策略操作失败: {name} — {error}',
+  'badge.strategyBacktest': '回测 {name}: {ret} (基准 {bh}) · {rt} 笔{win}',
+  'badge.strategyBacktestSaved': '已存入回测库',
+
+  // Strategy pages (/strategies, /strategy?id=X)
+  'strategy.title': '策略中心',
+  'strategy.templatesTitle': '策略模板',
+  'strategy.formTitle': '创建策略',
+  'strategy.name': '名称',
+  'strategy.ticker': '代码',
+  'strategy.template': '模板',
+  'strategy.templateCustom': '自定义',
+  'strategy.entryTitle': '入场条件',
+  'strategy.exitsTitle': '出场',
+  'strategy.sizingTitle': '仓位',
+  'strategy.addCondition': '+ 条件',
+  'strategy.removeCondition': '删除',
+  'strategy.create': '创建策略',
+  'strategy.creating': '创建中…',
+  'strategy.createFailed': '创建失败',
+  'strategy.errName': '请输入名称（1-40 字）。',
+  'strategy.errTicker': '请输入有效代码。',
+  'strategy.errValue': '请为需要数值的条件填写数值。',
+  'strategy.errValueRange': '条件数值超出范围（价格 > 0，RSI 0–100，回撤 > 0）。',
+  'strategy.errFastSlow': '快线周期必须小于慢线周期。',
+  'strategy.errExits': '退出参数必须大于 0；最长持有天数须为 1–120 的整数。',
+  'strategy.errSizing': '请输入有效仓位：数量 > 0，或资金占比 1–100%。',
+  'strategy.listTitle': '我的策略',
+  'strategy.listEmpty': '暂无策略。可从上方模板开始，或从零构建一条。',
+  'strategy.colName': '名称',
+  'strategy.colTicker': '代码',
+  'strategy.colStatus': '状态',
+  'strategy.colPnl': '已实现盈亏',
+  'strategy.colRuns': '回测',
+  'strategy.colActions': '操作',
+  'strategy.details': '详情',
+  'strategy.empty': '未选择策略。',
+  'strategy.notFound': '未找到该策略。',
+  'strategy.configTitle': '配置',
+  'strategy.performanceTitle': '绩效',
+  'strategy.backtestTitle': '回测',
+  'strategy.runBacktest': '运行回测',
+  'strategy.running': '运行中…',
+  'strategy.compare': '对比',
+  'strategy.compareHint': '勾选两条回测进行对比。',
+  'strategy.openPosition': '当前持仓',
+  'strategy.noOpenPosition': '暂无持仓。',
+
+  // Status chips
+  'strategy.status.draft': '草稿',
+  'strategy.status.live': '运行中',
+  'strategy.status.paused': '已暂停',
+  'strategy.status.archived': '已归档',
+
+  // Lifecycle controls — soft deploy gate + pause/archive semantics (P2 §8)
+  'strategy.deploy': '部署',
+  'strategy.pause': '暂停',
+  'strategy.resume': '恢复',
+  'strategy.archive': '归档',
+  'strategy.confirmArchive': '确认归档？',
+  'strategy.deployConfirm': '确认部署？',
+  'strategy.deployNoRunsWarning': '该策略尚未回测 — 再次点击「部署」仍将强制上线。',
+  'strategy.pauseHint': '暂停即完全冻结 — 策略将停止管理持仓（止盈止损等出场不再触发），直至恢复。',
+  'strategy.archiveHint': '归档将永久停止该策略；已持有的份额留在组合中，由你手动处理。',
+
+  // Condition builder — field names (dropdown)
+  'strategy.cond.field.price': '价格',
+  'strategy.cond.field.day_change_pct': '日涨跌幅',
+  'strategy.cond.field.ma': '价格相对均线',
+  'strategy.cond.field.ma_cross': '均线交叉',
+  'strategy.cond.field.ema_cross': 'EMA 交叉',
+  'strategy.cond.field.rsi': 'RSI',
+  'strategy.cond.field.window_high': '滚动新高突破',
+  'strategy.cond.field.window_low': '滚动新低破位',
+  'strategy.cond.field.pullback_from_high_pct': '自高点回撤%',
+
+  // Condition human-readable text (conditionText) — group joiners, op words,
+  // and one sentence template per field
+  'strategy.cond.all': '全部满足',
+  'strategy.cond.any': '任一满足',
+  'strategy.cond.above': '≥',
+  'strategy.cond.below': '≤',
+  'strategy.cond.price': '价格 {op} {sym}{value}',
+  'strategy.cond.day_change_pct': '日涨跌幅 {op} {value}%',
+  'strategy.cond.ma': '价格较 SMA({period}) {op} {value}%',
+  'strategy.cond.ma_cross.above': 'SMA({fast})/SMA({slow}) 金叉',
+  'strategy.cond.ma_cross.below': 'SMA({fast})/SMA({slow}) 死叉',
+  'strategy.cond.ema_cross.above': 'EMA({fast})/EMA({slow}) 金叉',
+  'strategy.cond.ema_cross.below': 'EMA({fast})/EMA({slow}) 死叉',
+  'strategy.cond.rsi': 'RSI({period}) {op} {value}',
+  'strategy.cond.window_high': '突破 {minutes} 分钟新高',
+  'strategy.cond.window_low': '跌破 {minutes} 分钟新低',
+  'strategy.cond.pullback_from_high_pct': '自 {minutes} 分钟高点回撤 ≥ {value}%',
+
+  // Exits — form labels + human-readable summary parts
+  'strategy.exitTp': '止盈%',
+  'strategy.exitSl': '止损%',
+  'strategy.exitTrailing': '移动止损%',
+  'strategy.exitMaxDays': '最长持有天数',
+  'strategy.exit.take_profit_pct': '止盈 {value}%',
+  'strategy.exit.stop_loss_pct': '止损 {value}%',
+  'strategy.exit.trailing_stop_pct': '移动止损 {value}%',
+  'strategy.exit.max_holding_days': '最长持有 {value} 天',
+  'strategy.exit.none': '无出场',
+
+  // Sizing — form labels + human-readable summary parts
+  'strategy.sizingFixed': '固定数量',
+  'strategy.sizingCashPct': '现金占比%',
+  'strategy.sizing.fixed_qty': '固定数量 {qty}',
+  'strategy.sizing.cash_pct': '现金的 {pct}%',
+
+  // Template registry — names/descriptions keyed by template key (P2 §6)
+  'strategy.template.dip_buyer.name': '抄底',
+  'strategy.template.dip_buyer.desc': '当日大跌（≤ −3%）时买入；止盈 4% / 止损 3% 出场。',
+  'strategy.template.momentum_breakout.name': '动量突破',
+  'strategy.template.momentum_breakout.desc':
+    '突破 60 分钟新高时买入；以 2.5% 移动止损跟随 / 止损 3%。',
+  'strategy.template.ma_golden_cross.name': '均线金叉',
+  'strategy.template.ma_golden_cross.desc': 'SMA(5) 上穿 SMA(20) 金叉时买入；止盈 5% / 止损 3%。',
+  'strategy.template.grid_lite.name': '简化网格',
+  'strategy.template.grid_lite.desc':
+    '简化版网格：自 60 分钟高点回撤 ≥2% 时买入；止盈 2% / 止损 6%。',
+  'strategy.template.rsi_rebound.name': 'RSI 超卖反弹',
+  'strategy.template.rsi_rebound.desc': 'RSI(14) 跌破 30 超卖时买入；止盈 4% / 止损 3%。',
+  'strategy.template.trend_rider.name': '趋势跟随',
+  'strategy.template.trend_rider.desc':
+    '顺势买入 — 价格站上 SMA(30) 且日涨幅 ≥0.5%；3% 移动止损。',
+
+  // Run Library (/runs, /run?id=X, Backtest-tab save)
+  'runs.title': '回测库',
+  'runs.filterTicker': '按代码过滤…',
+  'runs.filterTickerAria': '按代码过滤回测',
+  'runs.filterStrategy': '策略',
+  'runs.allStrategies': '全部策略',
+  'runs.colTime': '时间',
+  'runs.colTicker': '代码',
+  'runs.colStrategy': '策略',
+  'runs.colLabel': '标签',
+  'runs.colReturn': '收益',
+  'runs.colWinRate': '胜率',
+  'runs.colMaxDd': '最大回撤',
+  'runs.delete': '删除',
+  'runs.confirmDelete': '确认删除？',
+  'runs.deleteFailed': '删除失败',
+  'runs.empty': '暂无已保存回测。可在回测页签保存结果，或在策略详情页运行回测。',
+  'runs.loading': '正在加载回测…',
+  'runs.noneSelected': '未选择回测。',
+  'runs.notFound': '未找到该回测。',
+  'runs.detailTitle': '回测详情',
+  'runs.backToRuns': '返回回测库',
+  'runs.backToStrategy': '返回策略',
+  'runs.save': '保存到回测库',
+  'runs.saving': '保存中…',
+  'runs.saveLabelPlaceholder': '标签（可选）…',
+  'runs.saved': '已保存 — 前往回测库 →',
+  'runs.saveFailed': '保存失败',
 };
 
 const DICTS: Record<Lang, Dict> = { en, zh };
+
+// Read-only view of the raw dictionaries — lets tests assert en/zh keyset
+// alignment per namespace without duplicating the key lists (P2 §10).
+export const DICTIONARIES: Readonly<Record<Lang, Readonly<Dict>>> = DICTS;
 
 function interpolate(template: string, params?: Record<string, string | number>): string {
   if (!params) return template;

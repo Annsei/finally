@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
+import Link from 'next/link';
 import useSWR from 'swr';
 import { fetcher } from '@/lib/fetcher';
 import { formatShares } from '@/lib/format';
@@ -13,6 +14,7 @@ import type {
   ChatOrderOutcome,
   ChatRuleOutcome,
   ChatBacktestOutcome,
+  StrategyOutcome,
 } from '@/types/market';
 
 // Shared props threaded into every action badge so the badges stay pure (no
@@ -182,13 +184,94 @@ function BacktestBadge({ outcome, t }: { outcome: ChatBacktestOutcome } & BadgeC
   );
 }
 
+// AI strategy actions (P2 §7) — mirrors BacktestBadge: status-driven variants
+// for create/deploy/pause plus a compact-stats badge for strategy backtests
+// (the full run is persisted to the Run Library; the badge cites it).
+function StrategyBadge({ outcome, t }: { outcome: StrategyOutcome } & BadgeCtx) {
+  const name = outcome.name ?? outcome.ticker ?? '';
+  if (outcome.status === 'failed') {
+    return (
+      <span
+        data-testid="strategy-badge-failed"
+        className="inline-block px-2 py-0.5 rounded text-xs mr-1 mt-1 bg-terminal-surface"
+        style={{ border: '1px solid var(--color-down)', color: 'var(--color-down)' }}
+      >
+        {t('badge.strategyFailed', { name, error: outcome.error ?? t('badge.rejected') })}
+      </span>
+    );
+  }
+  if (outcome.status === 'completed' && outcome.stats) {
+    const s = outcome.stats;
+    const sign = s.total_return_pct >= 0 ? '+' : '';
+    const bhSign = s.buy_hold_return_pct >= 0 ? '+' : '';
+    const winPart = s.win_rate != null ? ` · ${t('badge.win')} ${Math.round(s.win_rate * 100)}%` : '';
+    // 'saved to Runs' tail: when the outcome carries the persisted run's id,
+    // it deep-links to the /run detail page (same badge colour, underline on
+    // hover per the desk's inline-link convention).
+    const savedTail = t('badge.strategyBacktestSaved');
+    return (
+      <span
+        data-testid="strategy-badge-backtest"
+        className="inline-block px-2 py-0.5 rounded text-xs mr-1 mt-1 bg-terminal-surface"
+        style={{ border: '1px solid #209dd7', color: '#209dd7' }}
+      >
+        {t('badge.strategyBacktest', {
+          name,
+          ret: `${sign}${s.total_return_pct.toFixed(1)}%`,
+          bh: `${bhSign}${s.buy_hold_return_pct.toFixed(1)}%`,
+          rt: s.round_trips,
+          win: winPart,
+        })}
+        {' · '}
+        {outcome.run_id ? (
+          <Link
+            href={{ pathname: '/run', query: { id: outcome.run_id } }}
+            className="hover:underline"
+            style={{ color: 'inherit' }}
+          >
+            {savedTail}
+          </Link>
+        ) : (
+          savedTail
+        )}
+      </span>
+    );
+  }
+  if (outcome.status === 'paused') {
+    return (
+      <span
+        data-testid="strategy-badge-paused"
+        className="inline-block px-2 py-0.5 rounded text-xs mr-1 mt-1 bg-terminal-surface"
+        style={{ border: '1px solid #8b949e', color: '#8b949e' }}
+      >
+        {t('badge.strategyPaused', { name })}
+      </span>
+    );
+  }
+  const isDeploy = outcome.status === 'deployed';
+  return (
+    <span
+      data-testid={isDeploy ? 'strategy-badge-deployed' : 'strategy-badge-created'}
+      className="inline-block px-2 py-0.5 rounded text-xs mr-1 mt-1 bg-terminal-surface"
+      style={{ border: '1px solid #753991', color: '#b07cc6' }}
+    >
+      {t(isDeploy ? 'badge.strategyDeployed' : 'badge.strategyCreated', {
+        name,
+        ticker: outcome.ticker ?? '',
+      })}
+    </span>
+  );
+}
+
 // Agent-initiated message styling by kind (M2.3/2.4): briefs, reviews, rules.
 // Border colour by kind; the label is translated at render time. Exported so
 // the /journal review archive reuses the same kind semantics (P1 §6).
+// P2 §1 adds kind='strategy' (engine entry/exit notes) in the purple family.
 export const KIND_BORDER: Record<string, string> = {
   brief: '#209dd7',
   review: '#ecad0a',
   rule: '#b07cc6',
+  strategy: '#753991',
 };
 
 // Briefs arrive continuously and were drowning the conversation — clamp each
@@ -316,7 +399,8 @@ export default function ChatPanel({ open, onToggle, onNewTrade }: Props) {
         data.trades?.length ||
         data.watchlist_changes?.length ||
         data.orders?.length ||
-        data.rules?.length
+        data.rules?.length ||
+        data.strategies?.length
       ) {
         onNewTrade?.();
       }
@@ -461,6 +545,9 @@ export default function ChatPanel({ open, onToggle, onNewTrade }: Props) {
                   ))}
                   {msg.actions.backtests?.map((bt, i) => (
                     <BacktestBadge key={`bt-${i}`} outcome={bt} t={t} sym={sym} lot={lot} />
+                  ))}
+                  {msg.actions.strategies?.map((st, i) => (
+                    <StrategyBadge key={`strat-${i}`} outcome={st} t={t} sym={sym} lot={lot} />
                   ))}
                   {msg.actions.watchlist_changes?.map((change, i) => (
                     <WatchlistBadge key={`wl-${i}`} change={change} t={t} sym={sym} lot={lot} />

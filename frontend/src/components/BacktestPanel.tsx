@@ -7,19 +7,24 @@
  * cards, and the trade-by-trade blotter. Monte Carlo mode (runs > 1) shows
  * the median run plus a p5/p95 distribution strip. A rule's "test" button
  * (RulesTable) prefills the form via uiStore.
+ *
+ * P2 §8: the result-rendering pieces (EquityChart, StatCard, StatsGrid,
+ * RunsSummaryStrip, TradesBlotter) live in components/backtest/ so the
+ * /run and /strategy pages can assemble the same DOM — this panel is now
+ * pure composition over those parts (testids and markup unchanged).
  */
-import { useEffect, useRef, useState } from 'react';
-import { createChart, BaselineSeries, LineSeries } from 'lightweight-charts';
-import type { ISeriesApi, IChartApi, UTCTimestamp } from 'lightweight-charts';
-import { formatQuantity } from '@/lib/format';
+import { useEffect, useState } from 'react';
+import Link from 'next/link';
 import { useUiStore } from '@/stores/uiStore';
-import { US_PROFILE, directionColors, type MarketProfile } from '@/lib/marketProfile';
+import { US_PROFILE, type MarketProfile } from '@/lib/marketProfile';
 import { makeT, langFromLocale, type TFunction } from '@/lib/i18n';
+import EquityChart, { equityColors } from '@/components/backtest/EquityChart';
+import StatsGrid from '@/components/backtest/StatsGrid';
+import RunsSummaryStrip from '@/components/backtest/RunsSummaryStrip';
+import TradesBlotter from '@/components/backtest/TradesBlotter';
 import type {
   BacktestRequest,
   BacktestResponse,
-  BacktestPoint,
-  BacktestTradeReason,
   RuleTriggerType,
 } from '@/types/market';
 
@@ -31,161 +36,6 @@ const TRIGGERS: { key: RuleTriggerType; labelKey: string }[] = [
 ];
 
 const RUN_CHOICES = [1, 10, 30] as const;
-
-const REASON_KEY: Record<BacktestTradeReason, string> = {
-  trigger: 'backtest.reason.trigger',
-  take_profit: 'backtest.reason.take_profit',
-  stop_loss: 'backtest.reason.stop_loss',
-  horizon_end: 'backtest.reason.horizon_end',
-};
-
-const signed = (v: number, digits = 2) => `${v >= 0 ? '+' : ''}${v.toFixed(digits)}`;
-const pnlClass = (v: number) => (v >= 0 ? 'text-terminal-up' : 'text-terminal-down');
-
-// Direction fill tints for the equity canvas (lightweight-charts can't read CSS
-// vars). Above-baseline uses the "up" tint, below-baseline the "down" tint —
-// swapped on the A-share market. Mirrors PnLChart so the two charts agree.
-const G28 = 'rgba(34, 197, 94, 0.28)';
-const G03 = 'rgba(34, 197, 94, 0.03)';
-const R28 = 'rgba(239, 68, 68, 0.28)';
-const R03 = 'rgba(239, 68, 68, 0.03)';
-
-interface DirColors {
-  upHex: string;
-  downHex: string;
-  upFill1: string;
-  upFill2: string;
-  downFill1: string;
-  downFill2: string;
-}
-
-function equityColors(upIsRed: boolean): DirColors {
-  const { up: upHex, down: downHex } = directionColors(upIsRed);
-  return {
-    upHex,
-    downHex,
-    upFill1: upIsRed ? R28 : G28,
-    upFill2: upIsRed ? R03 : G03,
-    downFill1: upIsRed ? G03 : R03,
-    downFill2: upIsRed ? G28 : R28,
-  };
-}
-
-// Equity vs buy-and-hold chart — mounted only when a result exists, so the
-// chart is created fresh per mount (same lifecycle discipline as PnLChart).
-function EquityChart({
-  equity,
-  baseline,
-  colors,
-}: {
-  equity: BacktestPoint[];
-  baseline: BacktestPoint[];
-  colors: DirColors;
-}) {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const chartRef = useRef<IChartApi | null>(null);
-  const equityRef = useRef<ISeriesApi<'Baseline'> | null>(null);
-  const baselineRef = useRef<ISeriesApi<'Line'> | null>(null);
-  const { upHex, downHex, upFill1, upFill2, downFill1, downFill2 } = colors;
-
-  useEffect(() => {
-    if (!containerRef.current) return;
-
-    const chart = createChart(containerRef.current, {
-      autoSize: true,
-      layout: {
-        background: { color: 'transparent' },
-        textColor: '#8b949e',
-        // Attribution lives in the README — the logo ghosts over dark charts
-        attributionLogo: false,
-      },
-      grid: {
-        vertLines: { color: '#30363d' },
-        horzLines: { color: '#30363d' },
-      },
-      rightPriceScale: { borderColor: '#30363d' },
-      timeScale: { borderColor: '#30363d', timeVisible: false },
-    });
-
-    // Strategy equity: profit-tint above the $10k seed, loss-tint below. Colours
-    // come from the market profile (swapped on A-shares), same as PnLChart.
-    const equitySeries = chart.addSeries(BaselineSeries, {
-      baseValue: { type: 'price', price: 10000 },
-      topLineColor: upHex,
-      topFillColor1: upFill1,
-      topFillColor2: upFill2,
-      bottomLineColor: downHex,
-      bottomFillColor1: downFill1,
-      bottomFillColor2: downFill2,
-      lineWidth: 2,
-    });
-    // Buy & hold reference: muted dashed line
-    const baselineSeries = chart.addSeries(LineSeries, {
-      color: '#8b949e',
-      lineWidth: 1,
-      lineStyle: 2, // dashed
-      priceLineVisible: false,
-      lastValueVisible: false,
-    });
-
-    chartRef.current = chart;
-    equityRef.current = equitySeries as ISeriesApi<'Baseline'>;
-    baselineRef.current = baselineSeries as ISeriesApi<'Line'>;
-
-    return () => {
-      chart.remove();
-      chartRef.current = null;
-      equityRef.current = null;
-      baselineRef.current = null;
-    };
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Recolor when the market's direction colours resolve/change after mount.
-  useEffect(() => {
-    equityRef.current?.applyOptions({
-      topLineColor: upHex,
-      topFillColor1: upFill1,
-      topFillColor2: upFill2,
-      bottomLineColor: downHex,
-      bottomFillColor1: downFill1,
-      bottomFillColor2: downFill2,
-    });
-  }, [upHex, downHex, upFill1, upFill2, downFill1, downFill2]);
-
-  useEffect(() => {
-    if (!equityRef.current || !baselineRef.current) return;
-    const toPoints = (pts: BacktestPoint[]) =>
-      pts.map((p) => ({ time: p.time as UTCTimestamp, value: p.value }));
-    equityRef.current.setData(toPoints(equity));
-    baselineRef.current.setData(toPoints(baseline));
-    chartRef.current?.timeScale?.()?.fitContent?.();
-  }, [equity, baseline]);
-
-  return <div ref={containerRef} data-testid="backtest-chart" style={{ width: '100%', height: '180px' }} />;
-}
-
-function StatCard({
-  label,
-  value,
-  className,
-  testid,
-}: {
-  label: string;
-  value: string;
-  className?: string;
-  testid?: string;
-}) {
-  return (
-    <div className="px-2 py-1.5 rounded border border-terminal-border bg-terminal-bg">
-      <div className="text-[10px] font-semibold text-terminal-muted uppercase tracking-wider">
-        {label}
-      </div>
-      <div data-testid={testid} className={`text-sm font-semibold tabular-nums ${className ?? 'text-terminal-text'}`}>
-        {value}
-      </div>
-    </div>
-  );
-}
 
 export default function BacktestPanel({ profile = US_PROFILE }: { profile?: MarketProfile }) {
   const t: TFunction = makeT(langFromLocale(profile.locale));
@@ -202,6 +52,13 @@ export default function BacktestPanel({ profile = US_PROFILE }: { profile?: Mark
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<BacktestResponse | null>(null);
+  // P2 §8 — save the rendered result to the Run Library (POST /api/backtest/runs
+  // with the legacy field set incl. the echoed seed; the server re-runs the
+  // same config+seed and persists it).
+  const [saveLabel, setSaveLabel] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   const backtestPrefill = useUiStore((s) => s.backtestPrefill);
   const setBacktestPrefill = useUiStore((s) => s.setBacktestPrefill);
@@ -277,11 +134,50 @@ export default function BacktestPanel({ profile = US_PROFILE }: { profile?: Mark
         throw new Error(data?.error ?? `Backtest failed (${res.status})`);
       }
       setResult((await res.json()) as BacktestResponse);
+      // Fresh result → the save affordance re-arms.
+      setSaved(false);
+      setSaveError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : t('backtest.errFailed'));
       setResult(null);
     } finally {
       setLoading(false);
+    }
+  };
+
+  // Persist the rendered result: legacy fields in full — incl. the seed the
+  // server echoed — so the stored run is byte-reproducible (contract §5).
+  const save = async () => {
+    if (!result || saving || saved) return;
+    const cfg = result.config;
+    setSaving(true);
+    setSaveError(null);
+    try {
+      const res = await fetch('/api/backtest/runs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ticker: cfg.ticker,
+          trigger_type: cfg.trigger_type,
+          threshold: cfg.threshold,
+          quantity: cfg.quantity,
+          take_profit_pct: cfg.take_profit_pct,
+          stop_loss_pct: cfg.stop_loss_pct,
+          days: cfg.days,
+          runs: cfg.runs,
+          seed: cfg.seed,
+          ...(saveLabel.trim() !== '' ? { label: saveLabel.trim() } : {}),
+        }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data?.error ?? `${t('runs.saveFailed')} (${res.status})`);
+      }
+      setSaved(true);
+    } catch (e) {
+      setSaveError(e instanceof Error ? e.message : t('runs.saveFailed'));
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -466,37 +362,7 @@ export default function BacktestPanel({ profile = US_PROFILE }: { profile?: Mark
       {result && stats && (
         <div data-testid="backtest-stats" className="mt-3">
           {/* Stat cards */}
-          <div className="grid grid-cols-4 lg:grid-cols-8 gap-1.5">
-            <StatCard
-              label={t('backtest.statReturn')}
-              value={`${signed(stats.total_return_pct)}%`}
-              className={pnlClass(stats.total_return_pct)}
-              testid="backtest-return"
-            />
-            <StatCard
-              label={t('backtest.statBuyHold')}
-              value={`${signed(stats.buy_hold_return_pct)}%`}
-              className={pnlClass(stats.buy_hold_return_pct)}
-            />
-            <StatCard label={t('backtest.statMaxDd')} value={`−${stats.max_drawdown_pct.toFixed(2)}%`} />
-            <StatCard
-              label={t('backtest.statWinRate')}
-              value={stats.win_rate != null ? `${Math.round(stats.win_rate * 100)}%` : '—'}
-            />
-            <StatCard label={t('backtest.statEntries')} value={String(stats.fires)} />
-            <StatCard label={t('backtest.statRoundTrips')} value={String(stats.round_trips)} />
-            <StatCard
-              label={t('backtest.statProfitFactor')}
-              value={stats.profit_factor != null ? stats.profit_factor.toFixed(2) : '—'}
-            />
-            <StatCard
-              label={t('backtest.statFinalEquity')}
-              value={`$${stats.final_equity.toLocaleString('en-US', {
-                minimumFractionDigits: 2,
-                maximumFractionDigits: 2,
-              })}`}
-            />
-          </div>
+          <StatsGrid stats={stats} t={t} />
 
           {(stats.rejections.insufficient_cash > 0 || stats.commission_paid > 0) && (
             <p className="mt-1.5 text-[10px] text-terminal-muted">
@@ -513,38 +379,7 @@ export default function BacktestPanel({ profile = US_PROFILE }: { profile?: Mark
           )}
 
           {/* Monte Carlo distribution (runs > 1): median run charted below */}
-          {summary && (
-            <div
-              data-testid="backtest-runs-summary"
-              className="mt-2 flex items-baseline gap-4 px-2 py-1.5 rounded border border-terminal-border bg-terminal-bg text-xs tabular-nums"
-            >
-              <span className="text-[10px] font-semibold text-terminal-muted uppercase tracking-wider">
-                {t('backtest.summaryRuns', { n: summary.runs })}
-              </span>
-              <span className="text-terminal-muted">
-                {t('backtest.summaryMedian')}{' '}
-                <span className={pnlClass(summary.median_return_pct)}>
-                  {signed(summary.median_return_pct)}%
-                </span>
-              </span>
-              <span className="text-terminal-muted">
-                {t('backtest.summaryP5')}{' '}
-                <span className={pnlClass(summary.p05_return_pct)}>{signed(summary.p05_return_pct)}%</span>
-              </span>
-              <span className="text-terminal-muted">
-                {t('backtest.summaryP95')}{' '}
-                <span className={pnlClass(summary.p95_return_pct)}>{signed(summary.p95_return_pct)}%</span>
-              </span>
-              <span className="text-terminal-muted">
-                {t('backtest.summaryPositive')}{' '}
-                <span className="text-terminal-text">{Math.round(summary.positive_share * 100)}%</span>
-              </span>
-              <span className="text-terminal-muted">
-                {t('backtest.summaryMedianDd')}{' '}
-                <span className="text-terminal-text">−{summary.median_max_drawdown_pct.toFixed(2)}%</span>
-              </span>
-            </div>
-          )}
+          {summary && <RunsSummaryStrip summary={summary} t={t} />}
 
           {/* Equity vs buy & hold */}
           <div className="mt-2">
@@ -556,51 +391,46 @@ export default function BacktestPanel({ profile = US_PROFILE }: { profile?: Mark
           </div>
 
           {/* Trades blotter */}
-          {result.trades.length > 0 && (
-            <div className="mt-2 max-h-40 overflow-y-auto">
-              <table data-testid="backtest-trades" className="w-full text-xs border-collapse">
-                <thead>
-                  <tr className="text-terminal-muted border-b border-terminal-border">
-                    <th className="text-left py-1 pl-1 font-semibold">{t('backtest.colTime')}</th>
-                    <th className="text-left py-1 font-semibold">{t('backtest.colSide')}</th>
-                    <th className="text-right py-1 font-semibold">{t('backtest.colQty')}</th>
-                    <th className="text-right py-1 font-semibold">{t('backtest.colPrice')}</th>
-                    <th className="text-left py-1 pl-3 font-semibold">{t('backtest.colReason')}</th>
-                    <th className="text-right py-1 pr-1 font-semibold">{t('backtest.colPnl')}</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {result.trades.map((tr, i) => (
-                    <tr key={i} className="border-b border-terminal-border">
-                      <td className="py-1 pl-1 tabular-nums text-terminal-muted">
-                        {new Date(tr.time * 1000).toLocaleDateString('en-US', {
-                          month: 'short',
-                          day: 'numeric',
-                        })}
-                      </td>
-                      <td
-                        className={`py-1 font-semibold uppercase ${
-                          tr.side === 'buy' ? 'text-terminal-up' : 'text-terminal-down'
-                        }`}
-                      >
-                        {tr.side}
-                      </td>
-                      <td className="text-right py-1 tabular-nums">{formatQuantity(tr.quantity)}</td>
-                      <td className="text-right py-1 tabular-nums">${tr.price.toFixed(2)}</td>
-                      <td className="py-1 pl-3 text-terminal-muted">{t(REASON_KEY[tr.reason])}</td>
-                      <td
-                        className={`text-right py-1 pr-1 tabular-nums ${
-                          tr.pnl != null ? pnlClass(tr.pnl) : 'text-terminal-muted'
-                        }`}
-                      >
-                        {tr.pnl != null ? `${signed(tr.pnl)}` : '—'}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
+          {result.trades.length > 0 && <TradesBlotter trades={result.trades} t={t} />}
+
+          {/* Save to Run Library (P2 §8) — appended below the existing result
+              DOM so the panel's original markup stays untouched. */}
+          <div className="mt-2 flex items-center gap-2 flex-wrap">
+            <input
+              type="text"
+              data-testid="backtest-save-label"
+              aria-label={t('runs.colLabel')}
+              placeholder={t('runs.saveLabelPlaceholder')}
+              value={saveLabel}
+              onChange={(e) => setSaveLabel(e.target.value)}
+              disabled={saving}
+              className={`w-40 ${inputClass}`}
+            />
+            <button
+              type="button"
+              data-testid="backtest-save"
+              onClick={() => void save()}
+              disabled={saving || saved}
+              className="px-3 py-1.5 text-xs font-semibold rounded text-white disabled:opacity-50 disabled:cursor-not-allowed transition-opacity"
+              style={{ backgroundColor: '#753991' }}
+            >
+              {saving ? t('runs.saving') : t('runs.save')}
+            </button>
+            {saved && (
+              <Link
+                href="/runs"
+                data-testid="backtest-save-toast"
+                className="text-xs text-terminal-up hover:underline"
+              >
+                {t('runs.saved')}
+              </Link>
+            )}
+            {saveError && (
+              <span data-testid="backtest-save-error" className="text-xs text-terminal-down">
+                {saveError}
+              </span>
+            )}
+          </div>
         </div>
       )}
 

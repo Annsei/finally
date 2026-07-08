@@ -269,6 +269,151 @@ export interface ChatBacktestOutcome {
   stats?: BacktestStats;
 }
 
+// ---------------------------------------------------------------------------
+// Strategies (P2 §6) — declarative condition groups, exits, sizing.
+// ---------------------------------------------------------------------------
+export type StrategyStatus = 'draft' | 'live' | 'paused' | 'archived';
+
+// One declarative entry condition — validated against the backend registry
+// (app/indicators.py FIELD_SPECS). `field` stays a string so new backend
+// fields never break the frontend types.
+export interface StrategyCondition {
+  field: string; // price | day_change_pct | ma | ma_cross | ema_cross | rsi | window_high | window_low | pullback_from_high_pct
+  op: 'above' | 'below';
+  value?: number;
+  params?: Record<string, number>; // period / fast / slow / minutes
+}
+
+// Exactly one of `all` / `any`, holding 1..5 conditions.
+export type StrategyConditionGroup =
+  | { all: StrategyCondition[] }
+  | { any: StrategyCondition[] };
+
+// All exits optional; deploy (draft → live) requires at least one non-empty.
+export interface StrategyExits {
+  take_profit_pct?: number | null;
+  stop_loss_pct?: number | null;
+  trailing_stop_pct?: number | null;
+  max_holding_days?: number | null;
+}
+
+export type StrategySizing =
+  | { mode: 'fixed_qty'; qty: number }
+  | { mode: 'cash_pct'; pct: number };
+
+// GET /api/strategies — config + status + counters + derived performance:
+export interface Strategy {
+  id: string;
+  name: string;
+  ticker: string;
+  status: StrategyStatus;
+  entry: StrategyConditionGroup;
+  exits: StrategyExits;
+  sizing: StrategySizing;
+  template: string | null;
+  created_at: string;           // ISO timestamp string
+  deployed_at: string | null;
+  open_qty: number;
+  open_price: number | null;
+  opened_at: string | null;
+  entered_count: number;
+  exited_count: number;
+  last_fired_at: string | null;
+  runs_count: number;           // saved backtest runs for this strategy
+  realized_pnl: number;         // Σ realized P&L of this strategy's sells
+}
+
+export interface StrategiesResponse {
+  strategies: Strategy[];
+}
+
+export interface StrategyResponse {
+  strategy: Strategy;
+}
+
+// GET /api/strategies/{id}/performance:
+export interface StrategyPerformanceStats {
+  realized_pnl: number;
+  round_trips: number;
+  win_rate: number | null;
+  profit_factor: number | null;
+  max_drawdown_pct: number;
+  fires: number;
+}
+
+export interface StrategyPerformanceResponse {
+  stats: StrategyPerformanceStats;
+  equity_curve: BacktestPoint[]; // cumulative realized P&L (0-baseline)
+  trades: TradeRecord[];         // this strategy's fills
+}
+
+// GET /api/strategies/templates — static registry; names/descriptions are
+// rendered by the frontend via i18n `strategy.template.{key}.name/.desc`:
+export interface StrategyTemplate {
+  key: string; // dip_buyer | momentum_breakout | ma_golden_cross | grid_lite | rsi_rebound | trend_rider
+  ticker_hint: string | null;
+  entry: StrategyConditionGroup;
+  exits: StrategyExits;
+  sizing: StrategySizing;
+}
+
+export interface StrategyTemplatesResponse {
+  templates: StrategyTemplate[];
+}
+
+// ---------------------------------------------------------------------------
+// Run Library (P2 §5) — persisted backtest runs.
+// ---------------------------------------------------------------------------
+// Full run (POST /api/backtest/runs 201, GET /api/backtest/runs/{id}).
+// `config` may be the legacy shape (BacktestConfig) or the extended strategy
+// shape ({ticker, entry, exits, sizing, …, source: "strategy"}).
+export interface BacktestRun {
+  id: string;
+  strategy_id: string | null;
+  label: string | null;
+  created_at: string; // ISO timestamp string
+  config: (Partial<BacktestConfig> & Record<string, unknown>) & { ticker: string };
+  stats: BacktestStats;
+  equity_curve: BacktestPoint[];
+  baseline_curve: BacktestPoint[];
+  trades: BacktestTrade[];
+  runs_summary: BacktestRunsSummary | null;
+}
+
+export interface BacktestRunResponse {
+  run: BacktestRun;
+}
+
+// GET /api/backtest/runs list item — stats only, no curves:
+export interface BacktestRunListItem {
+  id: string;
+  strategy_id: string | null;
+  label: string | null;
+  created_at: string;
+  ticker: string;
+  days: number;
+  runs: number;
+  seed: number;
+  stats: BacktestStats;
+}
+
+export interface BacktestRunsListResponse {
+  runs: BacktestRunListItem[];
+}
+
+// Chat strategy outcomes (P2 §7) — create/backtest/deploy/pause actions:
+export interface StrategyOutcome {
+  status: 'created' | 'deployed' | 'paused' | 'completed' | 'failed';
+  action?: 'create' | 'backtest' | 'deploy' | 'pause';
+  strategy_id?: string;
+  name?: string;
+  ticker?: string;
+  error?: string;
+  // backtest action only — compact stats plus the persisted Run Library id:
+  run_id?: string;
+  stats?: BacktestStats;
+}
+
 // Chat action outcomes for AI-placed orders and AI-created rules (M2.1/2.2):
 export interface ChatOrderOutcome {
   status: string; // open | filled | failed
@@ -409,18 +554,19 @@ export interface WatchlistOutcome {
 }
 
 // GET /api/chat/ response message item:
-export type ChatMessageKind = 'chat' | 'brief' | 'review' | 'rule';
+export type ChatMessageKind = 'chat' | 'brief' | 'review' | 'rule' | 'strategy';
 
 export interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
-  kind?: ChatMessageKind; // agent-initiated messages: market briefs, reviews, rule firings
+  kind?: ChatMessageKind; // agent-initiated messages: market briefs, reviews, rule/strategy firings
   actions: {
     trades: TradeOutcome[];
     watchlist_changes: WatchlistOutcome[];
     orders?: ChatOrderOutcome[];
     rules?: ChatRuleOutcome[];
     backtests?: ChatBacktestOutcome[];
+    strategies?: StrategyOutcome[];
   } | null;
   created_at: string;
 }
@@ -438,4 +584,5 @@ export interface ChatPostResponse {
   orders?: ChatOrderOutcome[];
   rules?: ChatRuleOutcome[];
   backtests?: ChatBacktestOutcome[];
+  strategies?: StrategyOutcome[];
 }
