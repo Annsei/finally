@@ -33,6 +33,10 @@ def create_stream_router(price_cache: PriceCache) -> APIRouter:
 
         Includes a retry directive so the browser auto-reconnects on
         disconnection (EventSource built-in behavior).
+
+        Auth (P3 §7): public — no authentication required. Requests carrying
+        a Bearer API key behave identically (the gateway validates and
+        rate-limits the key but never buffers or alters the stream).
         """
         return StreamingResponse(
             _generate_events(price_cache, request),

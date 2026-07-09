@@ -296,6 +296,12 @@ async def lifespan(app: FastAPI):
     from app.routes.auth import create_auth_router
     app.include_router(create_auth_router(db_path))
 
+    # API keys router (P3 §6 — programmatic access management). Cookie
+    # identity ONLY: the gateway middleware 403s Bearer calls to /api/keys*
+    # before they reach these routes (keys cannot manage keys).
+    from app.routes.keys import create_keys_router
+    app.include_router(create_keys_router(db_path))
+
     # Leaderboard router (M4.2)
     from app.routes.leaderboard import create_leaderboard_router
     app.include_router(
@@ -413,13 +419,30 @@ async def lifespan(app: FastAPI):
     logger.info("FinAlly shutdown: complete")
 
 
-# Create FastAPI application
+# Create FastAPI application. P3 §7: the OpenAPI schema and Swagger UI live
+# under /api/* (/api/openapi.json + /api/docs) so the static frontend export
+# keeps the root paths; ReDoc is disabled. Note for API consumers: the SSE
+# stream GET /api/stream/prices requires no authentication — sending a Bearer
+# key is allowed and behaves identically (validated + rate limited, same
+# stream).
 app = FastAPI(
     title="FinAlly",
     description="AI-powered trading workstation",
     version="0.1.0",
     lifespan=lifespan,
+    openapi_url="/api/openapi.json",
+    docs_url="/api/docs",
+    redoc_url=None,
 )
+
+# API-key gateway (P3 §2-§5): pure ASGI middleware — requests without an
+# Authorization: Bearer header pass through untouched (SSE streaming and all
+# cookie/anonymous traffic are byte-identical to the pre-P3 stack). With no
+# explicit db_path it resolves the DB_PATH env var per request, the same
+# source lifespan() reads at startup.
+from app.api_gateway import ApiKeyGatewayMiddleware  # noqa: E402
+
+app.add_middleware(ApiKeyGatewayMiddleware)
 
 # Register routers that have no dependencies (can be registered at import time)
 from app.routes.health import router as health_router  # noqa: E402

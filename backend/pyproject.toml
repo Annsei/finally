@@ -21,6 +21,10 @@ dev = [
     "pytest-cov>=5.0.0",
     "ruff>=0.7.0",
     "httpx>=0.27.0",
+    # tests/test_example_bot.py imports examples/finally_bot.py, which uses
+    # requests — declare it instead of leaning on the litellm→tiktoken
+    # transitive dependency.
+    "requests>=2.31.0",
 ]
 
 [build-system]

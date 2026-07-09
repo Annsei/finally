@@ -98,6 +98,14 @@ def get_current_user_id(request: Request, db_path: str | None = None) -> str:
     ``'default'`` (the anonymous Guest user) on a missing, malformed, or
     forged cookie — never raises.
     """
+    # P3 (additive): a valid Bearer API key resolved by ApiKeyGatewayMiddleware
+    # injects request.state.api_user_id — when present it wins over any cookie.
+    # Requests without a Bearer header never carry this attribute, so the
+    # cookie/anonymous path below is completely unchanged (getattr keeps stub
+    # request doubles without .state on the anonymous path — never raises).
+    api_user_id = getattr(getattr(request, "state", None), "api_user_id", None)
+    if api_user_id is not None:
+        return api_user_id
     # getattr keeps handler-level unit tests (stub request doubles without
     # .cookies) on the anonymous path — same fallback as a missing cookie.
     cookies = getattr(request, "cookies", None)

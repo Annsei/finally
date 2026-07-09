@@ -245,6 +245,50 @@ CREATE TABLE IF NOT EXISTS market_events (
     timestamp      REAL NOT NULL
 );
 
+-- API keys (P3 §1): programmatic Bearer credentials for the open paper-broker
+-- API. Only the sha256 hex of the full plaintext is stored (key_hash) plus an
+-- 11-char display prefix ("fk_XXXXXXXX") for list identification — the
+-- plaintext appears exactly once, in the POST /api/keys creation response.
+-- allowed_tickers is a JSON array or NULL (= unrestricted); max_order_qty /
+-- daily_trade_cap NULL = unlimited. frozen=1 is the kill switch: the gateway
+-- middleware rejects the key with 403 on every request (checked per request).
+-- init_db() executes this script on every startup, so pre-existing database
+-- volumes pick this table up idempotently via IF NOT EXISTS (new table — no
+-- column migration).
+CREATE TABLE IF NOT EXISTS api_keys (
+    id              TEXT PRIMARY KEY,
+    user_id         TEXT NOT NULL,
+    label           TEXT NOT NULL,
+    key_hash        TEXT NOT NULL UNIQUE,
+    prefix          TEXT NOT NULL,
+    created_at      TEXT NOT NULL,
+    last_used_at    TEXT,
+    frozen          INTEGER NOT NULL DEFAULT 0,
+    allowed_tickers TEXT,
+    max_order_qty   REAL,
+    daily_trade_cap INTEGER
+);
+
+-- API audit ledger (P3 §5): one row per mutating Bearer request after its
+-- response (result 'ok' on 2xx, 'error' otherwise), plus 'denied' rows for
+-- frozen-key / guardrail rejections and throttled 'rate_limited' rows.
+-- payload_digest is the request body as compact JSON truncated to 200 chars —
+-- never key material. Rows outlive key deletion (no FK — append-only ledger).
+-- init_db() executes this script on every startup, so pre-existing database
+-- volumes pick this table up idempotently via IF NOT EXISTS (new table — no
+-- column migration).
+CREATE TABLE IF NOT EXISTS api_audit (
+    id             TEXT PRIMARY KEY,
+    key_id         TEXT NOT NULL,
+    user_id        TEXT NOT NULL,
+    method         TEXT NOT NULL,
+    endpoint       TEXT NOT NULL,
+    payload_digest TEXT,
+    result         TEXT NOT NULL,
+    status_code    INTEGER,
+    created_at     TEXT NOT NULL
+);
+
 -- Indexes for the hot query paths (chat history and P&L chart both filter by
 -- user_id and order by timestamp; the fill loop scans open orders and the
 -- rules evaluator scans active rules every second). init_db() executes this
@@ -270,3 +314,7 @@ CREATE INDEX IF NOT EXISTS idx_backtest_runs_user_created
     ON backtest_runs (user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_backtest_runs_strategy
     ON backtest_runs (strategy_id);
+CREATE INDEX IF NOT EXISTS idx_api_keys_user
+    ON api_keys (user_id);
+CREATE INDEX IF NOT EXISTS idx_api_audit_key_created
+    ON api_audit (key_id, created_at DESC);
