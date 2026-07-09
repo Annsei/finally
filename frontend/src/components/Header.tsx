@@ -152,6 +152,7 @@ const DOT_COLORS: Record<'connected' | 'reconnecting' | 'disconnected', string> 
 
 // P1 §2 — global navigation between the brand and the right cluster.
 // P2 §8 adds the strategy center (/strategies) and the Run Library (/runs).
+// P3 §8 adds the developer portal (/developers).
 const NAV_ITEMS: { href: string; labelKey: string; testid: string }[] = [
   { href: '/', labelKey: 'nav.desk', testid: 'nav-desk' },
   { href: '/market', labelKey: 'nav.market', testid: 'nav-market' },
@@ -159,6 +160,7 @@ const NAV_ITEMS: { href: string; labelKey: string; testid: string }[] = [
   { href: '/runs', labelKey: 'nav.runs', testid: 'nav-runs' },
   { href: '/journal', labelKey: 'nav.journal', testid: 'nav-journal' },
   { href: '/arena', labelKey: 'nav.arena', testid: 'nav-arena' },
+  { href: '/developers', labelKey: 'nav.developers', testid: 'nav-developers' },
 ];
 
 // Slash-normalize a path for active-state comparison: '/market/' → '/market',

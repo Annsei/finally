@@ -526,6 +526,87 @@ const en: Dict = {
   'runs.saveLabelPlaceholder': 'Label (optional)…',
   'runs.saved': 'Saved — view in Runs →',
   'runs.saveFailed': 'Save failed',
+
+  // --- P3 additions (developer portal, P3 §8) --------------------------------
+  // Header navigation
+  'nav.developers': 'Developers',
+
+  // Key list
+  'dev.keysTitle': 'API Keys',
+  'dev.keysLoading': 'Loading keys…',
+  'dev.keysEmpty': 'No API keys yet. Create one below to trade programmatically.',
+  'dev.colLabel': 'Label',
+  'dev.colPrefix': 'Prefix',
+  'dev.colCreated': 'Created',
+  'dev.colLastUsed': 'Last used',
+  'dev.colConstraints': 'Constraints',
+  'dev.colStatus': 'Status',
+  'dev.colActions': 'Actions',
+  'dev.neverUsed': 'Never',
+  'dev.active': 'Active',
+  'dev.frozen': 'Frozen',
+  'dev.freeze': 'Freeze',
+  'dev.unfreeze': 'Unfreeze',
+  'dev.revoke': 'Revoke',
+  'dev.confirmRevoke': 'Confirm revoke?',
+  'dev.edit': 'Edit',
+  'dev.cancel': 'Cancel',
+  'dev.save': 'Save',
+  'dev.saving': 'Saving…',
+  'dev.updateFailed': 'Update failed',
+  'dev.revokeFailed': 'Revoke failed',
+  'dev.unrestricted': 'Unrestricted',
+  'dev.constraintTickers': 'Tickers: {list}',
+  'dev.constraintMaxQty': 'Max qty {qty}',
+  'dev.constraintDailyCap': '{n} trades/day',
+  'dev.editHint': 'Leave a field empty for no limit.',
+
+  // Create form + one-time secret
+  'dev.createTitle': 'Create Key',
+  'dev.labelAria': 'Key label',
+  'dev.labelPlaceholder': 'Key label…',
+  'dev.tickersAria': 'Allowed tickers',
+  'dev.tickersPlaceholder': 'Allowed tickers, comma-separated (empty = all)…',
+  'dev.maxQtyAria': 'Max order quantity',
+  'dev.maxQtyPlaceholder': 'Max qty per order…',
+  'dev.dailyCapAria': 'Daily trade cap',
+  'dev.dailyCapPlaceholder': 'Max trades per day…',
+  'dev.create': 'Create Key',
+  'dev.creating': 'Creating…',
+  'dev.createFailed': 'Create failed',
+  'dev.errLabel': 'Enter a label (1–40 characters).',
+  'dev.errMaxQty': 'Max order quantity must be greater than 0 (or empty).',
+  'dev.errDailyCap': 'Daily trade cap must be a whole number ≥ 1 (or empty).',
+  'dev.secretTitle': 'Your new API key',
+  'dev.secretWarning':
+    'Shown only once — copy it now. FinAlly stores only a hash and cannot recover it.',
+  'dev.copy': 'Copy',
+  'dev.copied': 'Copied',
+  'dev.copyFailed': 'Copy failed',
+  'dev.dismiss': 'Dismiss',
+
+  // Audit ledger
+  'dev.auditTitle': 'Audit Log',
+  'dev.auditKeyAria': 'Audit key',
+  'dev.auditSelectKey': 'Select a key…',
+  'dev.auditLoading': 'Loading audit…',
+  'dev.auditEmpty': 'No audit entries for this key yet.',
+  'dev.auditColTime': 'Time',
+  'dev.auditColRequest': 'Request',
+  'dev.auditColResult': 'Result',
+  'dev.auditColDigest': 'Digest',
+  'dev.loadMore': 'Load more',
+  'dev.loadingMore': 'Loading…',
+
+  // Quickstart
+  'dev.quickstartTitle': 'Quickstart',
+  'dev.quickstartIntro':
+    'Authenticate every request with an Authorization: Bearer header. Rate limit: bursts of 10, refilled at 5 requests/second per key.',
+  'dev.curlTitle': 'curl',
+  'dev.pythonTitle': 'Python',
+  'dev.swaggerLink': 'Full API reference (Swagger) →',
+  'dev.botHint':
+    'A complete example trading bot ships with the repo at examples/finally_bot.py — see examples/README.md for the walkthrough.',
 };
 
 // ---------------------------------------------------------------------------
@@ -1014,6 +1095,86 @@ const zh: Dict = {
   'runs.saveLabelPlaceholder': '标签（可选）…',
   'runs.saved': '已保存 — 前往回测库 →',
   'runs.saveFailed': '保存失败',
+
+  // --- P3 additions (developer portal, P3 §8) --------------------------------
+  // Header navigation
+  'nav.developers': '开发者',
+
+  // Key list
+  'dev.keysTitle': 'API 密钥',
+  'dev.keysLoading': '正在加载密钥…',
+  'dev.keysEmpty': '暂无 API 密钥。在下方创建一个即可编程交易。',
+  'dev.colLabel': '名称',
+  'dev.colPrefix': '前缀',
+  'dev.colCreated': '创建时间',
+  'dev.colLastUsed': '最近使用',
+  'dev.colConstraints': '约束',
+  'dev.colStatus': '状态',
+  'dev.colActions': '操作',
+  'dev.neverUsed': '从未',
+  'dev.active': '启用中',
+  'dev.frozen': '已冻结',
+  'dev.freeze': '冻结',
+  'dev.unfreeze': '解冻',
+  'dev.revoke': '吊销',
+  'dev.confirmRevoke': '确认吊销？',
+  'dev.edit': '编辑',
+  'dev.cancel': '取消',
+  'dev.save': '保存',
+  'dev.saving': '保存中…',
+  'dev.updateFailed': '更新失败',
+  'dev.revokeFailed': '吊销失败',
+  'dev.unrestricted': '无限制',
+  'dev.constraintTickers': '标的: {list}',
+  'dev.constraintMaxQty': '单笔上限 {qty}',
+  'dev.constraintDailyCap': '每日 {n} 笔',
+  'dev.editHint': '留空即不限。',
+
+  // Create form + one-time secret
+  'dev.createTitle': '创建密钥',
+  'dev.labelAria': '密钥名称',
+  'dev.labelPlaceholder': '密钥名称…',
+  'dev.tickersAria': '允许标的',
+  'dev.tickersPlaceholder': '允许标的，逗号分隔（留空 = 不限）…',
+  'dev.maxQtyAria': '单笔数量上限',
+  'dev.maxQtyPlaceholder': '单笔数量上限…',
+  'dev.dailyCapAria': '每日下单上限',
+  'dev.dailyCapPlaceholder': '每日下单上限…',
+  'dev.create': '创建密钥',
+  'dev.creating': '创建中…',
+  'dev.createFailed': '创建失败',
+  'dev.errLabel': '请输入名称（1-40 字）。',
+  'dev.errMaxQty': '单笔数量上限必须大于 0（或留空）。',
+  'dev.errDailyCap': '每日下单上限须为 ≥ 1 的整数（或留空）。',
+  'dev.secretTitle': '你的新 API 密钥',
+  'dev.secretWarning': '仅显示一次 — 请立即复制。FinAlly 只保存哈希，无法找回明文。',
+  'dev.copy': '复制',
+  'dev.copied': '已复制',
+  'dev.copyFailed': '复制失败',
+  'dev.dismiss': '关闭',
+
+  // Audit ledger
+  'dev.auditTitle': '审计台账',
+  'dev.auditKeyAria': '审计密钥',
+  'dev.auditSelectKey': '选择密钥…',
+  'dev.auditLoading': '正在加载审计…',
+  'dev.auditEmpty': '该密钥暂无审计记录。',
+  'dev.auditColTime': '时间',
+  'dev.auditColRequest': '请求',
+  'dev.auditColResult': '结果',
+  'dev.auditColDigest': '摘要',
+  'dev.loadMore': '加载更多',
+  'dev.loadingMore': '加载中…',
+
+  // Quickstart
+  'dev.quickstartTitle': '快速上手',
+  'dev.quickstartIntro':
+    '每个请求都需携带 Authorization: Bearer 头。限流：每个密钥突发 10 次、每秒补充 5 次。',
+  'dev.curlTitle': 'curl',
+  'dev.pythonTitle': 'Python',
+  'dev.swaggerLink': '完整 API 文档（Swagger）→',
+  'dev.botHint':
+    '仓库内附完整示例交易机器人 examples/finally_bot.py — 教程见 examples/README.md。',
 };
 
 const DICTS: Record<Lang, Dict> = { en, zh };

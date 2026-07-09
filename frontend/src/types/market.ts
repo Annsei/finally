@@ -434,6 +434,54 @@ export interface ChatRuleOutcome {
   error?: string;
 }
 
+// ---------------------------------------------------------------------------
+// Developer API keys (P3 §5/§6) — the plaintext key appears ONLY in the
+// create response; every other payload carries metadata + display prefix.
+// ---------------------------------------------------------------------------
+export interface ApiKeyInfo {
+  id: string;
+  label: string;
+  prefix: string; // first 11 chars of the plaintext ("fk_XXXXXXXX") for display
+  created_at: string; // ISO timestamp string
+  last_used_at: string | null;
+  // SQLite stores 0/1 — accept either encoding and normalize with Boolean().
+  frozen: boolean | number;
+  allowed_tickers: string[] | null; // null = unrestricted
+  max_order_qty: number | null; // null = unrestricted
+  daily_trade_cap: number | null; // null = unrestricted
+}
+
+// GET /api/keys:
+export interface ApiKeysResponse {
+  keys: ApiKeyInfo[];
+}
+
+// POST /api/keys 201 — `key` is the one-time plaintext (never shown again):
+export interface ApiKeyCreateResponse {
+  key: string;
+  info: ApiKeyInfo;
+}
+
+// GET /api/keys/{id}/audit?limit=&before= entries:
+export type ApiAuditResult = 'ok' | 'denied' | 'error' | 'rate_limited';
+
+// key_id is NOT part of an entry — the endpoint is already key-scoped and the
+// backend row serializer never returns it.
+export interface ApiAuditEntry {
+  id: string;
+  method: string;
+  endpoint: string;
+  payload_digest: string | null; // compact-JSON body, truncated to 200 chars
+  result: ApiAuditResult;
+  status_code: number | null;
+  created_at: string; // ISO timestamp string (also the `before` cursor)
+}
+
+export interface ApiAuditResponse {
+  entries: ApiAuditEntry[];
+  has_more: boolean;
+}
+
 // Auth (M4.1) — anonymous requests act as the 'default' Guest user:
 export interface AuthUser {
   id: string;
