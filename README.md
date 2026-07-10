@@ -1,97 +1,130 @@
 # FinAlly — AI Trading Workstation
 
-A visually stunning AI-powered trading workstation that streams live market data, simulates portfolio trading, and integrates an LLM chat assistant that can analyze positions and execute trades via natural language.
+FinAlly is an AI-assisted paper-trading workstation and classroom arena. It
+streams a simulated or Massive-backed market, executes manual and AI-directed
+orders, runs declarative strategies and backtests, and lets external bots join
+the same leaderboard through guarded API keys.
 
-Built entirely by coding agents as a capstone project for an agentic AI coding course.
+The project is a modular monolith built as an agentic-AI coding course
+capstone. The default configuration is a trusted, loopback-only local demo.
 
-## Features
+## Current capabilities
 
-- **Live price streaming** via SSE with green/red flash animations
-- **Simulated portfolio** — $10k virtual cash, market orders, instant fills
-- **Portfolio visualizations** — heatmap (treemap), P&L chart, positions table
-- **AI chat assistant** — analyzes holdings, suggests and auto-executes trades
-- **Watchlist management** — track tickers manually or via AI
-- **Dark terminal aesthetic** — Bloomberg-inspired, data-dense layout
+- US and A-share runtime profiles with profile-specific currency, lots, fees,
+  sessions, T+1 and direction colors;
+- live SSE prices, candlestick/volume charts, market events and analytics;
+- market, symbol, journal, arena/player, strategy, run-library and developer
+  pages;
+- market, limit, stop and stop-limit orders with fills, costs and risk rails;
+- portfolio history, realized/unrealized P&L and trade journal;
+- standing rules, live declarative strategies, templates and persisted
+  backtests;
+- LLM chat actions, event briefs and deterministic offline mock mode;
+- lightweight classroom identities, seasons/leaderboard and external bot API
+  keys with ticker/order/daily guardrails and an audit ledger.
 
-## Architecture
+## Architecture and supported scale
 
-Single Docker container serving everything on port 8000:
+One Docker image serves the static Next.js frontend and FastAPI backend on port
+8000. SQLite stores durable state; market cache, rate limiting and background
+evaluators are process-local.
 
-- **Frontend**: Next.js (static export) with TypeScript and Tailwind CSS
-- **Backend**: FastAPI (Python/uv) with SSE streaming
-- **Database**: SQLite with lazy initialization
-- **AI**: LiteLLM → OpenRouter (Cerebras inference) with structured outputs
-- **Market data**: Built-in GBM simulator (default) or Massive API (optional)
+FinAlly supports one process/replica with a persistent volume. It does not yet
+support horizontal scaling. Read [planning/CURRENT.md](planning/CURRENT.md) and
+[planning/OPERATIONS.md](planning/OPERATIONS.md) before shared deployment.
 
-## Quick Start
+## Quick start
 
 ```bash
-# Clone and configure
 cp .env.example .env
-# Add your OPENROUTER_API_KEY to .env
+# For an offline demo, set LLM_MOCK=true in .env.
+# For live chat, set OPENROUTER_API_KEY instead.
 
-# Run with Docker
-docker build -t finally .
-docker run -v finally-data:/app/db -p 8000:8000 --env-file .env finally
-
-# Open http://localhost:8000
+docker compose up --build -d
+curl --fail http://127.0.0.1:8000/api/ready
 ```
 
-### Quick start with scripts
+Open <http://127.0.0.1:8000>. Docker binds only to localhost by default.
+
+Start the isolated A-share service alongside US:
 
 ```bash
-# macOS/Linux — builds the image if needed, starts the container, waits for health
+docker compose --profile cn up --build -d
+# US: http://127.0.0.1:8000  CN: http://127.0.0.1:8001
+```
+
+The two services use different project-scoped SQLite volumes. Do not switch one
+existing volume between market profiles.
+
+### Start scripts
+
+```bash
 ./scripts/start_mac.sh --open
-./scripts/stop_mac.sh        # stop (data volume preserved)
+./scripts/stop_mac.sh
 ```
 
 ```powershell
-# Windows PowerShell
 .\scripts\start_windows.ps1 -Open
 .\scripts\stop_windows.ps1
 ```
 
-Or with Docker Compose: `docker compose up --build -d`
+The scripts rebuild using Docker's cache, replace containers gracefully, wait
+for readiness and fail non-zero when startup is unhealthy. Override
+`FINALLY_BIND_HOST` only for a secured classroom server.
 
-## Environment Variables
+## Configuration
 
-| Variable | Required | Description |
-|---|---|---|
-| `OPENROUTER_API_KEY` | Yes | OpenRouter API key for AI chat |
-| `MASSIVE_API_KEY` | No | Massive (Polygon.io) key for real market data; omit to use simulator |
-| `LLM_MOCK` | No | Set `true` for deterministic mock LLM responses (testing) |
+`.env.example` is the complete public configuration contract. Important groups
+are:
 
-## Project Structure
+- runtime/security: `FINALLY_RUNTIME_MODE`, `FINALLY_HOST`, server/admin
+  secrets, single-replica acknowledgement;
+- integrations: `OPENROUTER_API_KEY`, `MASSIVE_API_KEY`, `LLM_MOCK`;
+- market mechanics: profile, commission, session timing and quote freshness;
+- orchestration: host bind address, US/CN ports and standalone-script names.
 
-```
-finally/
-├── frontend/    # Next.js static export
-├── backend/     # FastAPI uv project
-├── planning/    # Project documentation and agent contracts
-├── test/        # Playwright E2E tests + docker-compose.test.yml
-├── db/          # SQLite volume mount target (finally.db created at runtime)
-└── scripts/     # Start/stop helpers (macOS/Linux + Windows)
-```
+Shared `classroom-server` mode requires explicit secrets, persistent storage
+and exactly one replica. See [planning/SECURITY.md](planning/SECURITY.md).
 
 ## Testing
 
 ```bash
-# Backend unit tests (pytest)
-cd backend && uv sync --extra dev && uv run pytest
+# Backend unit/integration tests + coverage
+cd backend
+uv sync --extra dev
+uv run pytest --cov=app
 
-# Frontend unit tests (Jest)
-cd frontend && npm test
+# Frontend unit tests, type/build checks
+cd ../frontend
+npm ci
+npm test -- --watchAll=false
+npx tsc --noEmit
+npm run lint
+npm run build
 
-# E2E tests (Playwright; runs the app with LLM_MOCK=true and a fresh DB)
-cd test && docker compose -f docker-compose.test.yml up --build --abort-on-container-exit
+# Full US and CN browser suites
+cd ../test
+docker compose -f docker-compose.test.yml up --build --abort-on-container-exit --exit-code-from playwright
+docker compose -f docker-compose.cn.test.yml up --build --abort-on-container-exit --exit-code-from playwright
 ```
 
-See [test/README.md](test/README.md) for running the E2E suite against a local instance.
+See [test/README.md](test/README.md) for quick smoke subsets and artifacts.
+
+## Documentation map
+
+- [Current state and architecture](planning/CURRENT.md)
+- [Operations, backup and restore](planning/OPERATIONS.md)
+- [Security boundary](planning/SECURITY.md)
+- [API compatibility policy](planning/API.md)
+- [Active audit remediation](planning/AUDIT_REMEDIATION_PLAN.md)
+- [Examples and bot tutorial](examples/README.md)
+
+`planning/PLAN.md`, `.planning/**` and `planning/archive/**` are historical
+design inputs, not the current status source.
 
 ## Acknowledgements
 
-Charts are rendered with [TradingView Lightweight Charts™](https://www.tradingview.com/lightweight-charts/)
-(the in-chart attribution logo is disabled; attribution lives here instead).
+Charts use [TradingView Lightweight Charts](https://www.tradingview.com/lightweight-charts/).
 
 ## License
 

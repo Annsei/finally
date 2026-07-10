@@ -1,7 +1,24 @@
-# FinAlly Project - the Finance Ally
+# FinAlly project instructions
 
-All project documentation is in the `planning` directory.
+Read `planning/CURRENT.md` first. It is the current product/architecture truth
+source. `planning/PLAN.md`, `.planning/**` and `planning/archive/**` are
+historical unless CURRENT explicitly links them for background.
 
-The key document is PLAN.md included in full below; the market data component has been completed and is summarized in the file `planning/MARKET_DATA_SUMMARY.md` with more details in the `planning/archive` folder. Consult these docs only when required. The remainder of the platform is still to be developed.
+The supported runtime is a single-process, single-replica modular monolith with
+persistent SQLite. Do not describe Postgres, Redis, multiple workers or public
+production deployment as implemented.
 
-@planning/PLAN.md
+Active hardening scope and status are in `planning/AUDIT_REMEDIATION_PLAN.md`.
+Preserve the default localhost boundary, US/CN volume isolation, declarative
+strategy safety and existing API/test contracts.
+
+Before changing deployment, security or public API behavior, read:
+
+- `planning/OPERATIONS.md`
+- `planning/SECURITY.md`
+- `planning/API.md`
+
+Verify backend, frontend and the affected US/CN E2E smoke path. Never commit
+`.env`, database files, API keys, cookies or generated browser reports.
+
+@planning/CURRENT.md
