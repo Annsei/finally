@@ -302,20 +302,121 @@ class TestLeaderboard:
 class TestSeasonReset:
     """POST /api/season/reset and GET /api/seasons (M4.3)."""
 
+    @staticmethod
+    def _headers(request_id: str | None = None) -> dict[str, str]:
+        headers = {"x-finally-admin-token": "local-demo-admin"}
+        if request_id is not None:
+            headers["idempotency-key"] = request_id
+        return headers
+
     async def test_confirm_gate(self, arena):
         anon = await arena.make_client()
         for payload in ({}, {"confirm": False}):
-            resp = await anon.post("/api/season/reset", json=payload)
+            resp = await anon.post(
+                "/api/season/reset", json=payload, headers=self._headers()
+            )
             assert resp.status_code == 400
             assert resp.json() == {"error": "Confirmation required"}
         # Missing body entirely is also rejected.
-        resp = await anon.post("/api/season/reset")
+        resp = await anon.post("/api/season/reset", headers=self._headers())
         assert resp.status_code == 400
         assert resp.json() == {"error": "Confirmation required"}
         # Nothing was archived or reset.
         seasons = (await anon.get("/api/seasons")).json()["seasons"]
         assert len(seasons) == 1
         assert seasons[0]["ended_at"] is None
+
+    async def test_local_demo_token_optional_but_validated(self, arena):
+        # local-demo does not require the admin token (classroom-server does —
+        # see test_runtime_hardening), but a supplied token is still checked,
+        # and the Idempotency-Key header is mandatory in every mode.
+        anon = await arena.make_client()
+        wrong = await anon.post(
+            "/api/season/reset",
+            json={"confirm": True},
+            headers={
+                "x-finally-admin-token": "wrong",
+                "idempotency-key": "wrong-token",
+            },
+        )
+        assert wrong.status_code == 403
+        no_key = await anon.post(
+            "/api/season/reset",
+            json={"confirm": True},
+            headers=self._headers(),
+        )
+        assert no_key.status_code == 400
+
+    async def test_local_demo_reset_succeeds_without_admin_token(self, arena):
+        anon = await arena.make_client()
+        resp = await anon.post(
+            "/api/season/reset",
+            json={"confirm": True},
+            headers={"idempotency-key": "local-demo-no-token"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["season"]["id"] == 2
+
+    async def test_reset_retry_is_idempotent_and_audited_once(self, arena):
+        anon = await arena.make_client()
+        headers = self._headers("same-reset")
+        first = await anon.post(
+            "/api/season/reset", json={"confirm": True}, headers=headers
+        )
+        second = await anon.post(
+            "/api/season/reset", json={"confirm": True}, headers=headers
+        )
+        assert first.status_code == second.status_code == 200
+        assert first.json() == second.json()
+        conn = get_conn(arena.db_file)
+        try:
+            assert conn.execute("SELECT COUNT(*) FROM seasons").fetchone()[0] == 2
+            assert conn.execute("SELECT COUNT(*) FROM admin_audit").fetchone()[0] == 1
+            assert (
+                conn.execute(
+                    "SELECT COUNT(*) FROM seasons WHERE ended_at IS NULL"
+                ).fetchone()[0]
+                == 1
+            )
+        finally:
+            conn.close()
+
+    async def test_reset_pauses_and_clears_live_strategy_state(self, arena):
+        conn = get_conn(arena.db_file)
+        try:
+            conn.execute(
+                "INSERT INTO strategies "
+                "(id, user_id, name, ticker, status, entry, exits, sizing, "
+                "created_at, open_qty, open_price, opened_at, high_water, cooldown_until) "
+                "VALUES ('live-1', 'default', 'live', 'AAPL', 'live', '{}', '{}', "
+                "'{}', 'now', 5, 100, 'now', 110, 123)"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        anon = await arena.make_client()
+        resp = await anon.post(
+            "/api/season/reset",
+            json={"confirm": True},
+            headers=self._headers("strategy-reset"),
+        )
+        assert resp.status_code == 200
+        conn = get_conn(arena.db_file)
+        try:
+            row = conn.execute(
+                "SELECT status, open_qty, open_price, opened_at, high_water, "
+                "cooldown_until FROM strategies WHERE id = 'live-1'"
+            ).fetchone()
+        finally:
+            conn.close()
+        assert dict(row) == {
+            "status": "paused",
+            "open_qty": 0.0,
+            "open_price": None,
+            "opened_at": None,
+            "high_water": None,
+            "cooldown_until": None,
+        }
 
     async def test_reset_archives_standings_and_resets_everyone(self, arena):
         alice, bob = [await arena.make_client() for _ in range(2)]
@@ -341,7 +442,11 @@ class TestSeasonReset:
         )).json()["rule"]
         assert (await alice.post("/api/chat/review")).status_code == 200
 
-        resp = await bob.post("/api/season/reset", json={"confirm": True})
+        resp = await bob.post(
+            "/api/season/reset",
+            json={"confirm": True},
+            headers=self._headers("archive-season-1"),
+        )
         assert resp.status_code == 200
         body = resp.json()
 
@@ -387,7 +492,11 @@ class TestSeasonReset:
         alice = await arena.make_client()
         await _login(alice, "Alice")
         assert (
-            await alice.post("/api/season/reset", json={"confirm": True})
+            await alice.post(
+                "/api/season/reset",
+                json={"confirm": True},
+                headers=self._headers("shape-season-1"),
+            )
         ).status_code == 200
 
         seasons = (await alice.get("/api/seasons")).json()["seasons"]
@@ -408,9 +517,17 @@ class TestSeasonReset:
 
     async def test_second_reset_archives_season_two(self, arena):
         anon = await arena.make_client()
-        first = await anon.post("/api/season/reset", json={"confirm": True})
+        first = await anon.post(
+            "/api/season/reset",
+            json={"confirm": True},
+            headers=self._headers("first-reset"),
+        )
         assert first.json()["season"]["id"] == 2
-        second = await anon.post("/api/season/reset", json={"confirm": True})
+        second = await anon.post(
+            "/api/season/reset",
+            json={"confirm": True},
+            headers=self._headers("second-reset"),
+        )
         assert second.json()["season"]["id"] == 3
         assert second.json()["archived"]["season_id"] == 2
 

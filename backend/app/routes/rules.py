@@ -50,7 +50,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, FiniteFloat
 
 from app.auth import get_current_user_id
 from app.db.connection import get_conn
@@ -91,9 +91,9 @@ _RULE_SELECT_COLUMNS = (
 class CreateRuleRequest(BaseModel):
     ticker: str
     trigger_type: str
-    threshold: float
+    threshold: FiniteFloat
     side: str  # "buy" or "sell"
-    quantity: float
+    quantity: FiniteFloat
     description: str | None = None
 
 
@@ -280,6 +280,9 @@ def _fire_rule_if_triggered(
     quote = price_cache.get(rule["ticker"])
     if quote is None:
         return "skipped"  # No quote (e.g. removed from cache) — stays active.
+    if not price_cache.is_fresh(rule["ticker"]):
+        price_cache.warn_stale_rejection(rule["ticker"])
+        return "skipped"  # Never consume a rule against a stale quote.
     if not _rule_triggered(quote, rule["trigger_type"], rule["threshold"]):
         return "skipped"
 

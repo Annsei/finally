@@ -6,7 +6,7 @@ databases are never re-seeded — the pre-CN-1 semantics.
 
 from __future__ import annotations
 
-from app.db.connection import get_conn, init_db
+from app.db.connection import CURRENT_SCHEMA_VERSION, get_conn, init_db
 from app.market.seed_prices import DEFAULT_WATCHLIST
 from app.market.seed_prices_cn import CN_DEFAULT_WATCHLIST
 
@@ -75,3 +75,19 @@ class TestInitDbProfileSeeding:
             conn.close()
         assert count == 14
         assert users == 1
+
+    def test_schema_version_is_recorded_once_across_startups(self, tmp_path):
+        db_file = str(tmp_path / "versioned.db")
+        init_db(db_file)
+        init_db(db_file)
+        conn = get_conn(db_file)
+        try:
+            rows = conn.execute(
+                "SELECT version, name, applied_at FROM schema_migrations"
+            ).fetchall()
+        finally:
+            conn.close()
+        assert len(rows) == 1
+        assert rows[0]["version"] == CURRENT_SCHEMA_VERSION
+        assert rows[0]["name"]
+        assert rows[0]["applied_at"]

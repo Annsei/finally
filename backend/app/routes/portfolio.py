@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, FiniteFloat
 
 from app.auth import get_current_user_id
 from app.db.connection import get_conn
@@ -48,7 +48,7 @@ MARKET_CLOSED_ERROR = "Market closed"
 
 class TradeRequest(BaseModel):
     ticker: str
-    quantity: float
+    quantity: FiniteFloat
     side: str  # "buy" or "sell"
 
 
@@ -71,12 +71,12 @@ def _record_snapshot(
     cash_balance: float = row["cash_balance"] if row else 0.0
 
     positions = conn.execute(
-        "SELECT ticker, quantity FROM positions WHERE user_id = ?", (user_id,)
+        "SELECT ticker, quantity, avg_cost FROM positions WHERE user_id = ?", (user_id,)
     ).fetchall()
 
     total_value = cash_balance + sum(
-        qty * (price_cache.get_price(ticker) or 0.0)
-        for ticker, qty in ((p["ticker"], p["quantity"]) for p in positions)
+        p["quantity"] * (price_cache.get_price(p["ticker"]) or p["avg_cost"])
+        for p in positions
     )
 
     conn.execute(
@@ -343,6 +343,10 @@ def _execute_trade_impl(
             "error": market_closed_message(profile),
         }
 
+    if not price_cache.is_fresh(ticker):
+        price_cache.warn_stale_rejection(ticker)
+        return {"status": "failed", "ticker": ticker, "error": "Quote is stale"}
+
     # Fill at the quote: buy at ask, sell at bid. When the source supplies no
     # quote, bid == ask == price (model default) and the fill is at the price.
     if quote.bid is not None and quote.ask is not None and quote.bid != quote.ask:
@@ -552,7 +556,9 @@ def create_portfolio_router(
                 ticker: str = row["ticker"]
                 quantity: float = row["quantity"]
                 avg_cost: float = row["avg_cost"]
-                current_price: float = price_cache.get_price(ticker) or 0.0
+                live_price = price_cache.get_price(ticker)
+                quote_stale = live_price is None or not price_cache.is_fresh(ticker)
+                current_price: float = avg_cost if live_price is None else live_price
 
                 unrealized_pnl = (current_price - avg_cost) * quantity
                 pnl_pct = ((current_price - avg_cost) / avg_cost * 100) if avg_cost > 0 else 0.0
@@ -566,6 +572,7 @@ def create_portfolio_router(
                         "current_price": current_price,
                         "unrealized_pnl": unrealized_pnl,
                         "pnl_pct": pnl_pct,
+                        "quote_stale": quote_stale,
                     }
                 )
 
@@ -813,11 +820,13 @@ def create_portfolio_router(
 
             sector_values: dict[str, float] = {"cash": cash_balance}
             for row in conn.execute(
-                "SELECT ticker, quantity FROM positions WHERE user_id = ?",
+                "SELECT ticker, quantity, avg_cost FROM positions WHERE user_id = ?",
                 (user_id,),
             ):
                 sector = sector_for(row["ticker"])
-                value = row["quantity"] * (price_cache.get_price(row["ticker"]) or 0.0)
+                value = row["quantity"] * (
+                    price_cache.get_price(row["ticker"]) or row["avg_cost"]
+                )
                 sector_values[sector] = sector_values.get(sector, 0.0) + value
 
             total_value = sum(sector_values.values())

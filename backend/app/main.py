@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -29,6 +30,7 @@ from app.market import (
     session_clock_loop,
 )
 from app.market.profiles import MarketProfile, resolve_market_profile
+from app.settings import RuntimeSettings
 
 logger = logging.getLogger(__name__)
 
@@ -56,8 +58,8 @@ def _read_commission_bps(profile: MarketProfile | None = None) -> float:
     except ValueError:
         logger.warning("Invalid FINALLY_COMMISSION_BPS=%r — using 0.0", raw)
         return 0.0
-    if value < 0:
-        logger.warning("Negative FINALLY_COMMISSION_BPS=%r — using 0.0", raw)
+    if not math.isfinite(value) or value < 0:
+        logger.warning("Invalid FINALLY_COMMISSION_BPS=%r — using 0.0", raw)
         return 0.0
     return value
 
@@ -85,7 +87,7 @@ def _read_session_config() -> tuple[float, float] | None:
         except ValueError:
             logger.warning("Invalid %s=%r — using 24/7 market mode", name, raw)
             return None
-        if value <= 0:
+        if not math.isfinite(value) or value <= 0:
             logger.info("%s=%r is <= 0 — using 24/7 market mode", name, raw)
             return None
         values.append(value)
@@ -162,6 +164,9 @@ async def _snapshot_loop(price_cache: PriceCache, db_path: str, interval: int = 
 async def lifespan(app: FastAPI):
     """Manage application lifecycle: start/stop market data and initialize DB."""
     db_path = os.getenv("DB_PATH", "db/finally.db")
+    settings = RuntimeSettings.from_env().validate(db_path=db_path)
+    app.state.settings = settings
+    logger.info("FinAlly effective config: %s", settings.effective_config())
 
     # Market profile (CN-1): FINALLY_MARKET read ONCE here (default 'us') and
     # injected everywhere — universe into the data source, seed cash into DB
@@ -169,6 +174,11 @@ async def lifespan(app: FastAPI):
     # 整手/涨跌停/T+1/fee/午休 mechanics into every trade-executing factory/loop.
     profile = resolve_market_profile()
     logger.info("FinAlly startup: market profile '%s' active", profile.key)
+    if profile.key == "cn" and os.getenv("MASSIVE_API_KEY", "").strip():
+        raise ValueError(
+            "MASSIVE_API_KEY currently supports only the US market profile; "
+            "unset it to use the CN simulator"
+        )
 
     # Commission (CN-2 §1): env wins, else the profile default (cn=2.5 万分).
     commission_bps = _read_commission_bps(profile)
@@ -205,6 +215,7 @@ async def lifespan(app: FastAPI):
     price_cache = PriceCache(
         history_capacity=required_history_seconds(),
         limit_pct_fn=profile.price_limit_pct,
+        max_quote_age_seconds=settings.quote_max_age_seconds,
     )
     source = create_market_data_source(price_cache, session_clock, profile.universe)
 
@@ -213,8 +224,8 @@ async def lifespan(app: FastAPI):
     # default watchlist (us: the 10 equities — crypto joins via watchlist
     # adds; cn: the full 14-ticker A-share universe).
     conn = get_conn(db_path)
-    rows = conn.execute("SELECT DISTINCT ticker FROM watchlist").fetchall()
-    tickers = [row["ticker"] for row in rows]
+    from app.routes.watchlist import required_market_tickers
+    tickers = required_market_tickers(conn)
     conn.close()
     if not tickers:
         tickers = list(profile.universe.default_watchlist)
@@ -237,11 +248,12 @@ async def lifespan(app: FastAPI):
     )
     app.include_router(portfolio_router)
 
-    # Orders router (limit / stop / stop_limit) — the placement path has no
-    # session clock, so it uses the 24/7-neutralized trading_profile.
+    # Orders router (limit / stop / stop_limit) — the session clock scopes the
+    # placement-time quote freshness gate to open markets (after-hours resting
+    # orders stay legal); T+1 still uses the 24/7-neutralized trading_profile.
     from app.routes.orders import create_orders_router, orders_fill_loop
     orders_router = create_orders_router(
-        price_cache, db_path, commission_bps, trading_profile
+        price_cache, db_path, commission_bps, trading_profile, session_clock
     )
     app.include_router(orders_router)
 
@@ -294,13 +306,14 @@ async def lifespan(app: FastAPI):
 
     # Auth router (M4.1 — name-only login, cookie session)
     from app.routes.auth import create_auth_router
-    app.include_router(create_auth_router(db_path))
+    app.include_router(create_auth_router(db_path, profile=profile, settings=settings))
 
     # API keys router (P3 §6 — programmatic access management). Cookie
     # identity ONLY: the gateway middleware 403s Bearer calls to /api/keys*
-    # before they reach these routes (keys cannot manage keys).
+    # before they reach these routes (keys cannot manage keys). Settings gate
+    # Guest key creation to local-demo (classroom-server requires a login).
     from app.routes.keys import create_keys_router
-    app.include_router(create_keys_router(db_path))
+    app.include_router(create_keys_router(db_path, settings=settings))
 
     # Leaderboard router (M4.2)
     from app.routes.leaderboard import create_leaderboard_router
@@ -318,7 +331,12 @@ async def lifespan(app: FastAPI):
     # Seasons router (M4.3 — reset + archive)
     from app.routes.seasons import create_seasons_router
     app.include_router(
-        create_seasons_router(price_cache, db_path, seed_cash=profile.seed_cash)
+        create_seasons_router(
+            price_cache,
+            db_path,
+            seed_cash=profile.seed_cash,
+            settings=settings,
+        )
     )
 
     # Mount static files LAST — must not shadow /api/* routes.

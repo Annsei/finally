@@ -1,9 +1,10 @@
-"""Auth API routes for FinAlly (M4.1) — name-only login, cookie session.
+"""Auth API routes for FinAlly (M4.1) — mode-aware login, cookie session.
 
 Provides:
 - POST /api/auth/login  — {"name": str} → upsert user, seed new users
   ($10k cash + default 10-ticker watchlist), set the ``finally_session``
-  cookie. 200 {"user": {"id", "name"}}.
+  cookie. In classroom-server mode, ``access_code`` is required. 200
+  {"user": {"id", "name"}}.
 - POST /api/auth/logout — expire the cookie. 200 {"ok": true}.
 - GET  /api/auth/me     — current user; anonymous resolves to
   {"user": {"id": "default", "name": "Guest"}}.
@@ -21,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import re
+import secrets
 import uuid
 from datetime import datetime, timezone
 
@@ -35,8 +37,9 @@ from app.auth import (
     session_cookie_value,
 )
 from app.db.connection import get_conn
-from app.market.seed_prices import DEFAULT_WATCHLIST
+from app.market.profiles import US_PROFILE, MarketProfile
 from app.routes.watchlist import sync_market_source
+from app.settings import RuntimeSettings
 
 logger = logging.getLogger(__name__)
 
@@ -48,31 +51,45 @@ RESERVED_USER_IDS = {"default"}
 
 class LoginRequest(BaseModel):
     name: str
+    access_code: str | None = None
 
 
-def _set_session_cookie(response: JSONResponse, user_id: str, db_path: str) -> None:
+def _set_session_cookie(
+    response: JSONResponse,
+    user_id: str,
+    db_path: str,
+    *,
+    secure: bool = False,
+) -> None:
     """Attach the signed 30-day session cookie (HttpOnly, SameSite=Lax, path=/)."""
     response.set_cookie(
         key=COOKIE_NAME,
         value=session_cookie_value(user_id, db_path),
         max_age=SESSION_MAX_AGE_SECONDS,
         httponly=True,
+        secure=secure,
         samesite="lax",
         path="/",
     )
 
 
-def create_auth_router(db_path: str) -> APIRouter:
+def create_auth_router(
+    db_path: str,
+    profile: MarketProfile | None = None,
+    settings: RuntimeSettings | None = None,
+) -> APIRouter:
     """Factory: build the auth APIRouter with the injected database path."""
     router = APIRouter(prefix="/api/auth", tags=["auth"])
+    active_profile = profile or US_PROFILE
+    runtime = settings or RuntimeSettings()
 
     @router.post("/login")
     async def login(body: LoginRequest, request: Request) -> JSONResponse:
         """Log in (creating the account on first use) and set the session cookie.
 
-        New users start with $10,000 cash and the default 10-ticker
-        watchlist. An existing user logging in again just refreshes the
-        session (display-name casing is updated to the latest login).
+        New users start with the active market profile's seed cash and
+        default watchlist. An existing user logging in again just refreshes
+        the session (display-name casing is updated to the latest login).
         """
         name = body.name.strip()
         if not (NAME_MIN_LEN <= len(name) <= NAME_MAX_LEN):
@@ -90,6 +107,14 @@ def create_auth_router(db_path: str) -> APIRouter:
         user_id = name.lower()
         if user_id in RESERVED_USER_IDS:
             return JSONResponse(status_code=400, content={"error": "Name is reserved"})
+        if runtime.is_server:
+            if not body.access_code:
+                return JSONResponse(
+                    status_code=401, content={"error": "Access code required"}
+                )
+            expected = runtime.server_auth_secret or ""
+            if not secrets.compare_digest(body.access_code, expected):
+                return JSONResponse(status_code=403, content={"error": "Invalid access code"})
 
         now = datetime.now(timezone.utc).isoformat()
         is_new_user = False
@@ -103,10 +128,10 @@ def create_auth_router(db_path: str) -> APIRouter:
                 is_new_user = True
                 conn.execute(
                     "INSERT INTO users_profile (id, cash_balance, created_at, display_name) "
-                    "VALUES (?, 10000.0, ?, ?)",
-                    (user_id, now, name),
+                    "VALUES (?, ?, ?, ?)",
+                    (user_id, active_profile.seed_cash, now, name),
                 )
-                for ticker in DEFAULT_WATCHLIST:
+                for ticker in active_profile.universe.default_watchlist:
                     conn.execute(
                         "INSERT OR IGNORE INTO watchlist (id, user_id, ticker, added_at) "
                         "VALUES (?, ?, ?, ?)",
@@ -129,12 +154,12 @@ def create_auth_router(db_path: str) -> APIRouter:
             # another user may have removed some from the shared source.
             # add_ticker is idempotent; failures are logged in the helper and
             # the source re-syncs from the DB union on the next startup.
-            for ticker in DEFAULT_WATCHLIST:
+            for ticker in active_profile.universe.default_watchlist:
                 await sync_market_source(request, ticker, "add")
             logger.info("New user %r created (display name %r)", user_id, name)
 
         response = JSONResponse(content={"user": {"id": user_id, "name": name}})
-        _set_session_cookie(response, user_id, db_path)
+        _set_session_cookie(response, user_id, db_path, secure=runtime.is_server)
         return response
 
     @router.post("/logout")

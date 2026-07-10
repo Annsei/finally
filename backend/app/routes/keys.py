@@ -17,7 +17,10 @@ never unfreeze itself, lift its own limits, mint new keys, or read its
 ledger. The gateway middleware rejects valid Bearer calls before routing;
 the check here keeps the boundary even in apps that mount this router
 without the middleware. Cross-user access is always 404 (existence is not
-revealed). Guest ('default') may create keys — single-user mode works as-is.
+revealed). Guest ('default') may create keys in local-demo mode (the P3
+single-user contract); in classroom-server mode a named login is required —
+a shared deployment must not mint durable credentials for the anonymous
+identity every visitor resolves to.
 
 Factory ``create_keys_router(db_path)`` mirrors the other routers.
 """
@@ -26,6 +29,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import uuid
 from typing import Any
 
@@ -35,6 +39,7 @@ from fastapi.responses import JSONResponse
 from app.api_gateway import generate_api_key, utc_now_iso
 from app.auth import get_current_user_id
 from app.db.connection import get_conn
+from app.settings import RuntimeSettings
 
 logger = logging.getLogger(__name__)
 
@@ -114,9 +119,15 @@ def _validate_allowed_tickers(value: Any) -> tuple[str | None, str | None]:
 def _validate_max_order_qty(value: Any) -> tuple[float | None, str | None]:
     if value is None:
         return None, None
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None, "max_order_qty must be a positive number"
-    return float(value), None
+    try:
+        numeric = float(value)
+    except (OverflowError, ValueError):
+        return None, "max_order_qty must be a positive number"
+    if not math.isfinite(numeric) or numeric <= 0:
+        return None, "max_order_qty must be a positive number"
+    return numeric, None
 
 
 def _validate_daily_trade_cap(value: Any) -> tuple[int | None, str | None]:
@@ -136,9 +147,17 @@ async def _read_json_object(request: Request) -> dict | None:
     return payload if isinstance(payload, dict) else None
 
 
-def create_keys_router(db_path: str) -> APIRouter:
-    """Factory: build the /api/keys APIRouter with the injected database path."""
+def create_keys_router(
+    db_path: str, settings: RuntimeSettings | None = None
+) -> APIRouter:
+    """Factory: build the /api/keys APIRouter with the injected database path.
+
+    ``settings`` selects the runtime mode: classroom-server refuses to mint
+    keys for the anonymous Guest, local-demo (the default) keeps the P3
+    single-user contract where Guest keys work.
+    """
     router = APIRouter(prefix="/api/keys", tags=["keys"])
+    runtime = settings or RuntimeSettings()
 
     def _load_own_key(conn, key_id: str, user_id: str):
         """Fetch a key scoped to its owner — cross-user rows resolve to None
@@ -155,6 +174,11 @@ def create_keys_router(db_path: str) -> APIRouter:
         if rejection is not None:
             return rejection
         user_id = get_current_user_id(request, db_path)
+        # Classroom-server only: the anonymous Guest is a shared identity
+        # there, so it must not own durable credentials. Local-demo keeps
+        # the P3 contract — Guest can mint and use keys (single-user mode).
+        if runtime.is_server and user_id == "default":
+            return _error(403, "Guest users cannot create API keys")
 
         payload = await _read_json_object(request)
         if payload is None:

@@ -37,7 +37,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, FiniteFloat
 
 from app.auth import get_current_user_id
 from app.backtest import (
@@ -73,11 +73,11 @@ class SaveRunRequest(BaseModel):
     # Legacy Backtest-tab fields (used when strategy_id is absent):
     ticker: str | None = None
     trigger_type: str | None = None
-    threshold: float | None = None
-    quantity: float | None = None
+    threshold: FiniteFloat | None = None
+    quantity: FiniteFloat | None = None
     side: str | None = None
-    take_profit_pct: float | None = None
-    stop_loss_pct: float | None = None
+    take_profit_pct: FiniteFloat | None = None
+    stop_loss_pct: FiniteFloat | None = None
 
 
 def insert_backtest_run_on_conn(

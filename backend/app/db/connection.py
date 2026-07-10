@@ -19,6 +19,12 @@ DB_PATH: str = os.getenv("DB_PATH", "db/finally.db")
 
 _SCHEMA_FILE = Path(__file__).parent / "schema.sql"
 
+# Increment when the startup migration set changes.  Migrations remain
+# idempotent and are deliberately lightweight for this single-file SQLite app;
+# the ledger makes deployed/backup schema state observable without Alembic.
+CURRENT_SCHEMA_VERSION = 1
+CURRENT_SCHEMA_NAME = "baseline-runtime-hardening"
+
 
 def get_conn(db_path: str = DB_PATH) -> sqlite3.Connection:
     """Open a SQLite connection configured for FinAlly use.
@@ -219,6 +225,58 @@ def _ensure_arena_state(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _heal_duplicate_open_seasons(conn: sqlite3.Connection) -> None:
+    """Close all-but-the-newest open season on legacy volumes. Idempotent.
+
+    Databases created before the ``idx_seasons_one_current`` unique partial
+    index (schema.sql) could accumulate several rows with ``ended_at IS
+    NULL`` (e.g. from a crashed or concurrent pre-index season reset).
+    Creating that index over such data raises IntegrityError inside
+    ``executescript`` and bricks startup, so this runs BEFORE the schema is
+    applied: the open season with the latest ``started_at`` (id as the
+    tie-break) stays current; every other open row is stamped
+    ``ended_at = now``. Healthy databases (zero or one open season, or no
+    seasons table yet) are untouched.
+    """
+    table = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'seasons'"
+    ).fetchone()
+    if table is None:
+        return
+    open_rows = conn.execute(
+        "SELECT id FROM seasons WHERE ended_at IS NULL "
+        "ORDER BY started_at DESC, id DESC"
+    ).fetchall()
+    if len(open_rows) <= 1:
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    stale_ids = [row["id"] for row in open_rows[1:]]
+    conn.executemany(
+        "UPDATE seasons SET ended_at = ? WHERE id = ?",
+        [(now, season_id) for season_id in stale_ids],
+    )
+    conn.commit()
+    logger.warning(
+        "Healed %d duplicate open season(s) on startup; season %s remains current",
+        len(stale_ids),
+        open_rows[0]["id"],
+    )
+
+
+def _record_schema_version(conn: sqlite3.Connection) -> None:
+    """Record the current idempotent migration set exactly once."""
+    conn.execute(
+        "INSERT OR IGNORE INTO schema_migrations "
+        "(version, name, applied_at) VALUES (?, ?, ?)",
+        (
+            CURRENT_SCHEMA_VERSION,
+            CURRENT_SCHEMA_NAME,
+            datetime.now(timezone.utc).isoformat(),
+        ),
+    )
+    conn.commit()
+
+
 def init_db(
     db_path: str = DB_PATH,
     *,
@@ -245,8 +303,12 @@ def init_db(
     conn = get_conn(db_path)
     try:
         schema_sql = _SCHEMA_FILE.read_text(encoding="utf-8")
+        # Legacy volumes may hold several open seasons; heal them BEFORE the
+        # schema lands its unique partial index over ended_at IS NULL.
+        _heal_duplicate_open_seasons(conn)
         conn.executescript(schema_sql)
         _migrate_schema(conn)
+        _record_schema_version(conn)
         _ensure_arena_state(conn)
         logger.debug("Schema applied successfully")
 

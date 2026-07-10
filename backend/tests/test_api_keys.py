@@ -17,18 +17,22 @@ import json
 import uuid
 
 import pytest
+from httpx import ASGITransport, AsyncClient
 
 from app.api_gateway import utc_now_iso, write_audit
-from app.db.connection import get_conn
+from app.db.connection import get_conn, init_db
+from app.market import PriceCache
 
 # Imported fixtures/helpers (pytest picks fixtures up from this namespace).
 from tests.gateway_fixtures import (  # noqa: F401
     audit_rows,
     bearer,
+    build_app,
     create_key,
     gateway_env,
     key_row,
     login,
+    server_settings,
 )
 
 INFO_FIELDS = {
@@ -152,6 +156,25 @@ class TestCreateKey:
         assert resp.status_code == 400
         assert fragment in resp.json()["error"]
 
+    async def test_non_finite_max_order_quantity_rejected(self, gateway_env):
+        await login(gateway_env.client, "alice")
+        resp = await gateway_env.client.post(
+            "/api/keys",
+            content=b'{"label":"k","max_order_qty":Infinity}',
+            headers={"content-type": "application/json"},
+        )
+        assert resp.status_code == 400
+        assert "max_order_qty" in resp.json()["error"]
+
+    async def test_overflowing_max_order_quantity_rejected(self, gateway_env):
+        await login(gateway_env.client, "alice")
+        resp = await gateway_env.client.post(
+            "/api/keys",
+            json={"label": "k", "max_order_qty": 10**400},
+        )
+        assert resp.status_code == 400
+        assert "max_order_qty" in resp.json()["error"]
+
     async def test_ten_keys_per_user_limit(self, gateway_env):
         await login(gateway_env.client, "alice")
         for i in range(10):
@@ -172,10 +195,27 @@ class TestCreateKey:
 
     async def test_guest_can_create_key(self, gateway_env):
         # Anonymous (no cookie) resolves to 'default' — single-user mode works.
+        # local-demo keeps the P3 contract; server mode is tested below.
         resp = await gateway_env.client.post("/api/keys", json={"label": "guest bot"})
         assert resp.status_code == 201
         row = key_row(gateway_env.db_file, resp.json()["info"]["id"])
         assert row["user_id"] == "default"
+
+    async def test_guest_cannot_create_key_in_server_mode(self, tmp_path, monkeypatch):
+        # classroom-server: the anonymous Guest is a shared identity and must
+        # not own durable credentials — creation requires a named login.
+        db_file = str(tmp_path / "server-keys.db")
+        monkeypatch.setenv("DB_PATH", db_file)
+        init_db(db_file)
+        test_app = build_app(
+            db_file, PriceCache(), with_middleware=True, settings=server_settings()
+        )
+        async with AsyncClient(
+            transport=ASGITransport(app=test_app), base_url="http://test"
+        ) as client:
+            resp = await client.post("/api/keys", json={"label": "guest bot"})
+        assert resp.status_code == 403
+        assert resp.json() == {"error": "Guest users cannot create API keys"}
 
     async def test_invalid_json_body_400(self, gateway_env):
         resp = await gateway_env.client.post(

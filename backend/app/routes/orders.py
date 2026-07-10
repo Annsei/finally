@@ -62,13 +62,15 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, FiniteFloat
 
 from app.auth import get_current_user_id
 from app.db.connection import get_conn
 from app.market.cache import PriceCache
 from app.market.models import PriceUpdate
 from app.market.profiles import MarketProfile
+from app.market.seed_prices import asset_class_for
+from app.market.session import SessionClock
 from app.mechanics import lot_size_error, order_band_error
 from app.routes.portfolio import _execute_trade_on_conn, _record_snapshot
 
@@ -86,11 +88,11 @@ DAY_ORDER_TTL = timedelta(hours=24)
 
 class PlaceOrderRequest(BaseModel):
     ticker: str
-    quantity: float
+    quantity: FiniteFloat
     side: str  # "buy" or "sell"
     kind: str = "limit"  # "limit" | "stop" | "stop_limit"
-    limit_price: float | None = None
-    stop_price: float | None = None
+    limit_price: FiniteFloat | None = None
+    stop_price: FiniteFloat | None = None
     time_in_force: str = "gtc"  # "day" | "gtc"
 
 
@@ -359,6 +361,9 @@ def _try_fill_order(
     quote = price_cache.get(ticker)
     if quote is None:
         return "skipped"  # No quote (e.g. removed from cache) — leave open.
+    if not price_cache.is_fresh(ticker):
+        price_cache.warn_stale_rejection(ticker)
+        return "skipped"  # Never fill from a stale provider quote.
 
     if kind == "stop":
         if stop_price is None or not _stop_triggered(quote, side, stop_price):
@@ -527,6 +532,19 @@ def _validate_order_request(
     return None
 
 
+def _market_open_for(session_clock: SessionClock | None, ticker: str) -> bool:
+    """True when ``ticker``'s market currently trades (crypto: always).
+
+    Mirrors the asset-class handling of the market-closed check in
+    ``portfolio._execute_trade_impl``: with no clock (or a 24/7 clock) every
+    market is open; with a cycling clock, equities follow the session while
+    crypto trades around the clock.
+    """
+    if session_clock is None or session_clock.is_open:
+        return True
+    return asset_class_for(ticker) != "equity"
+
+
 def place_order_on_conn(
     conn: sqlite3.Connection,
     price_cache: PriceCache,
@@ -582,6 +600,49 @@ def _place_order_on_conn(
     user_id: str = "default",
     profile: MarketProfile | None = None,
 ) -> dict:
+    """Profile-aware placement entry point — the CN-2 signature, frozen.
+
+    Pinned by the CN-2 signature regression tests (it must not grow
+    parameters); delegates to :func:`_place_order_impl` with no session
+    clock, byte-identical to the pre-session-aware behavior (the quote
+    freshness gate always applies). The POST route calls
+    ``_place_order_impl`` directly with the app's session clock — the single
+    additive hook, mirroring how P2 added ``strategy_id`` on
+    ``_execute_trade_impl`` without touching the public wrappers.
+    """
+    return _place_order_impl(
+        conn,
+        price_cache,
+        ticker=ticker,
+        side=side,
+        quantity=quantity,
+        kind=kind,
+        limit_price=limit_price,
+        stop_price=stop_price,
+        time_in_force=time_in_force,
+        commission_bps=commission_bps,
+        user_id=user_id,
+        profile=profile,
+        session_clock=None,
+    )
+
+
+def _place_order_impl(
+    conn: sqlite3.Connection,
+    price_cache: PriceCache,
+    *,
+    ticker: str,
+    side: str,
+    quantity: float,
+    kind: str,
+    limit_price: float | None,
+    stop_price: float | None,
+    time_in_force: str | None,
+    commission_bps: float = 0.0,
+    user_id: str = "default",
+    profile: MarketProfile | None = None,
+    session_clock: SessionClock | None = None,
+) -> dict:
     """Place an order (limit / stop / stop_limit) on an open SQLite connection.
 
     Shared placement path for the POST /api/portfolio/orders route and the
@@ -622,6 +683,13 @@ def _place_order_on_conn(
             [limit_down, limit_up] are rejected — market fills are never
             blocked here), and the A-share fee/T+1 mechanics of an immediate
             marketable fill. None/us is a no-op.
+        session_clock: Session clock (M3.1, keyword-only). Scopes the quote
+            freshness gate to markets that are OPEN for the ticker: while an
+            equity session is closed its quote freezes at the last close and
+            ages past the TTL by design, so resting limit/stop orders are
+            still accepted into the book (they fill at the next open through
+            the fill loop's own freshness gate). Crypto trades 24/7, so its
+            gate always applies. None keeps the always-on gate (fail closed).
     """
     ticker = ticker.strip().upper()
     side = side.lower()
@@ -629,6 +697,18 @@ def _place_order_on_conn(
     time_in_force = (time_in_force or "gtc").lower()
 
     quote = price_cache.get(ticker)
+    # Fail closed on stale quotes — but only while the ticker's market is
+    # open. A closed equity market legitimately serves a frozen (aged) quote;
+    # rejecting placements then would block all after-hours order entry
+    # (market orders are separately rejected with "Market closed" on the
+    # trade path).
+    if (
+        quote is not None
+        and _market_open_for(session_clock, ticker)
+        and not price_cache.is_fresh(ticker)
+    ):
+        price_cache.warn_stale_rejection(ticker)
+        return {"status": "failed", "ticker": ticker, "error": "Quote is stale"}
     error = _validate_order_request(
         side=side,
         kind=kind,
@@ -663,8 +743,13 @@ def _place_order_on_conn(
     )
     # Only limit orders can fill at placement. Stops never fill immediately:
     # the wrong-side check above guarantees they are untriggered right now.
+    # A stale quote (only reachable here while the market is closed) never
+    # fills at placement either — the order rests and the fill loop executes
+    # it once fresh quotes return at the open.
     marketable = (
-        kind == "limit" and _marketable_price(quote, side, limit_price) is not None
+        kind == "limit"
+        and _marketable_price(quote, side, limit_price) is not None
+        and price_cache.is_fresh(ticker)
     )
 
     # Take the write lock up front when we own the transaction (TOCTOU
@@ -752,6 +837,7 @@ def create_orders_router(
     db_path: str,
     commission_bps: float = 0.0,
     profile: MarketProfile | None = None,
+    session_clock: SessionClock | None = None,
 ) -> APIRouter:
     """Factory: build the orders APIRouter with injected dependencies.
 
@@ -762,6 +848,10 @@ def create_orders_router(
             fill (FINALLY_COMMISSION_BPS, read once at app startup in main.py).
         profile: Active market profile (CN-2) — drives the 整手/涨跌停/fee/T+1
             mechanics in ``place_order_on_conn``. None/us is a no-op.
+        session_clock: Session clock (M3.1) — scopes the placement-time quote
+            freshness gate to markets that are open for the ticker, so
+            after-hours limit/stop orders still enter the book. None keeps
+            the always-on gate.
 
     Returns:
         A configured FastAPI APIRouter ready to be registered with ``app.include_router``.
@@ -786,7 +876,7 @@ def create_orders_router(
         user_id = get_current_user_id(request, db_path)
         conn = get_conn(db_path)
         try:
-            result = _place_order_on_conn(
+            result = _place_order_impl(
                 conn,
                 price_cache,
                 ticker=body.ticker,
@@ -799,6 +889,7 @@ def create_orders_router(
                 commission_bps=commission_bps,
                 user_id=user_id,
                 profile=profile,
+                session_clock=session_clock,
             )
             if result["status"] == "failed":
                 # place_order_on_conn already unwound its own writes; the

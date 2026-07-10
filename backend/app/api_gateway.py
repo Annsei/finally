@@ -44,6 +44,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.db.connection import get_conn
+from app.settings import RuntimeSettings
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +81,6 @@ AUDITED_PREFIXES = (
 TRADE_ENDPOINT = "/api/portfolio/trade"
 ORDERS_ENDPOINT = "/api/portfolio/orders"
 GUARDED_ENDPOINTS = frozenset({TRADE_ENDPOINT, ORDERS_ENDPOINT})
-DIGEST_MAX_CHARS = 200
 
 
 def generate_api_key() -> tuple[str, str, str]:
@@ -99,20 +99,10 @@ def hash_api_key(plaintext: str) -> str:
 
 
 def payload_digest(body: bytes | None) -> str | None:
-    """Compact-JSON digest of a request body, truncated to 200 chars (§1).
-
-    Non-JSON or empty bodies yield None — the digest is a human-readable
-    audit hint, not a checksum, and must never contain key material (the
-    Authorization header is not part of the body).
-    """
+    """SHA-256 request-body digest; never stores raw business content."""
     if not body:
         return None
-    try:
-        parsed = json.loads(body)
-    except (ValueError, UnicodeDecodeError):
-        return None
-    compact = json.dumps(parsed, separators=(",", ":"), ensure_ascii=False)
-    return compact[:DIGEST_MAX_CHARS]
+    return hashlib.sha256(body).hexdigest()
 
 
 def utc_now_iso() -> str:
@@ -203,7 +193,11 @@ async def _send_json(send: Send, status: int, payload: dict) -> None:
     await send({"type": "http.response.body", "body": body})
 
 
-async def _buffer_body(receive: Receive) -> tuple[bytes, Receive]:
+class BodyTooLargeError(Exception):
+    """Raised before forwarding an oversized audited Bearer request."""
+
+
+async def _buffer_body(receive: Receive, max_bytes: int) -> tuple[bytes, Receive]:
     """Drain the request body and return ``(body, replay_receive)``.
 
     The downstream app sees a single ``http.request`` message with the full
@@ -218,6 +212,8 @@ async def _buffer_body(receive: Receive) -> tuple[bytes, Receive]:
             # http.disconnect mid-body: stop reading; downstream gets what we have.
             break
         chunks.append(message.get("body", b""))
+        if sum(len(chunk) for chunk in chunks) > max_bytes:
+            raise BodyTooLargeError
         if not message.get("more_body", False):
             break
     body = b"".join(chunks)
@@ -251,10 +247,18 @@ class ApiKeyGatewayMiddleware:
         app: Callable[[Scope, Receive, Send], Awaitable[None]],
         db_path: str | None = None,
         now: Callable[[], float] = time.monotonic,
+        max_body_bytes: int | None = None,
+        settings: RuntimeSettings | None = None,
     ) -> None:
         self.app = app
         self._db_path = db_path
         self._now = now
+        self._settings = settings if settings is not None else RuntimeSettings.from_env()
+        self._max_body_bytes = (
+            max_body_bytes
+            if max_body_bytes is not None
+            else self._settings.max_bearer_body_bytes
+        )
         # key_id -> (tokens, last_refill_monotonic)
         self._buckets: dict[str, tuple[float, float]] = {}
         # key_id -> monotonic of the last last_used_at DB write
@@ -379,16 +383,11 @@ class ApiKeyGatewayMiddleware:
             return None
 
         # 1. allowed_tickers — uppercase-normalized membership check.
-        allowed_raw = key_row["allowed_tickers"]
-        if allowed_raw:
-            try:
-                allowed = json.loads(allowed_raw)
-            except ValueError:
-                allowed = None
-            if allowed:
-                ticker = str(parsed.get("ticker") or "").strip().upper()
-                if ticker not in {str(t).strip().upper() for t in allowed}:
-                    return "Ticker not allowed for this key"
+        allowed = self._allowed_ticker_set(key_row)
+        if allowed is not None:
+            ticker = str(parsed.get("ticker") or "").strip().upper()
+            if ticker not in allowed:
+                return "Ticker not allowed for this key"
 
         # 2. max_order_qty — compare anything float() accepts, including
         #    numeric STRINGS: pydantic lax mode coerces "999" to 999.0 at the
@@ -396,11 +395,7 @@ class ApiKeyGatewayMiddleware:
         #    Values float() rejects can't execute anyway (the route 422s).
         max_qty = key_row["max_order_qty"]
         if max_qty is not None:
-            quantity = parsed.get("quantity")
-            try:
-                quantity_f = None if isinstance(quantity, bool) else float(quantity)
-            except (TypeError, ValueError):
-                quantity_f = None
+            quantity_f = self._coerce_quantity(parsed.get("quantity"))
             if quantity_f is not None and quantity_f > float(max_qty):
                 return "Quantity exceeds key limit"
 
@@ -410,6 +405,134 @@ class ApiKeyGatewayMiddleware:
         if cap is not None and count_todays_ok_orders(db_path, key_row["id"]) >= cap:
             return "Daily trade cap reached"
 
+        return None
+
+    @staticmethod
+    def _has_trading_constraints(key_row) -> bool:
+        return any(
+            key_row[name] is not None
+            for name in ("allowed_tickers", "max_order_qty", "daily_trade_cap")
+        )
+
+    @staticmethod
+    def _allowed_ticker_set(key_row) -> set[str] | None:
+        """The key's allowed_tickers as an uppercase set; None = unrestricted.
+
+        Mirrors the historical parse-tolerance: an unparseable or empty
+        stored value behaves as unrestricted (the field is validated at
+        write time by the keys router).
+        """
+        raw = key_row["allowed_tickers"]
+        if not raw:
+            return None
+        try:
+            allowed = json.loads(raw)
+        except ValueError:
+            return None
+        if not allowed:
+            return None
+        return {str(t).strip().upper() for t in allowed}
+
+    @staticmethod
+    def _coerce_quantity(value: Any) -> float | None:
+        """float() coercion shared by every guardrail quantity check.
+
+        Accepts numeric strings (pydantic lax mode coerces them at the
+        route, so skipping them would be a bypass); bools and anything
+        float() rejects yield None.
+        """
+        try:
+            return None if isinstance(value, bool) else float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _deferred_creation_denial(
+        self, key_row, body: bytes, *, surface: str
+    ) -> str | None:
+        """Validate a rule/strategy CREATION payload against key constraints.
+
+        ``surface`` is ``"rule"`` (per-fire quantity lives at body.quantity)
+        or ``"strategy"`` (share count is only knowable for fixed_qty sizing,
+        at body.sizing.qty). Returns the denial message, or None when the
+        payload provably respects the key's allowed_tickers/max_order_qty.
+        Unparseable payloads and missing fields are denied (fail closed).
+        """
+        try:
+            payload = json.loads(body) if body else None
+        except (ValueError, UnicodeDecodeError):
+            payload = None
+        if not isinstance(payload, dict):
+            return f"Constrained API keys require a valid JSON body to create a {surface}"
+
+        allowed = self._allowed_ticker_set(key_row)
+        if allowed is not None:
+            ticker = str(payload.get("ticker") or "").strip().upper()
+            if ticker not in allowed:
+                return "Ticker not allowed for this key"
+
+        max_qty = key_row["max_order_qty"]
+        if max_qty is not None:
+            if surface == "rule":
+                quantity = self._coerce_quantity(payload.get("quantity"))
+            else:
+                # cash_pct sizing yields an unknowable share count at fill
+                # time — only fixed_qty can be pre-validated. Fail closed.
+                sizing = payload.get("sizing")
+                if not isinstance(sizing, dict) or sizing.get("mode") != "fixed_qty":
+                    return (
+                        "Constrained API keys may only create strategies "
+                        "with fixed_qty sizing"
+                    )
+                quantity = self._coerce_quantity(sizing.get("qty"))
+            if quantity is None or quantity > float(max_qty):
+                return "Quantity exceeds key limit"
+
+        return None
+
+    def _indirect_trading_denial(
+        self, key_row, method: str, path: str, body: bytes
+    ) -> str | None:
+        """Guard the deferred/LLM trade surfaces for constrained keys (§4).
+
+        Rules and live strategies execute AFTER the originating request, when
+        the per-request order guardrails can no longer see the eventual fill,
+        so their CREATION payloads are pre-validated against the key's static
+        constraints instead of being blanket-denied: the ticker must be inside
+        allowed_tickers, and the per-fire quantity (rules) / fixed_qty sizing
+        (strategies) must not exceed max_order_qty. Unparseable payloads,
+        missing fields, and non-fixed_qty sizing under a max_order_qty key are
+        denied — fail closed. PATCH stays pause-only, and POST /api/chat stays
+        a blanket 403: the LLM can execute arbitrary trades/rules/strategies
+        server-side, so no payload pre-check is possible. Cookie traffic and
+        unconstrained keys are unchanged.
+
+        KNOWN LIMITATION (recorded in planning/SECURITY.md): fills executed
+        later by an accepted rule/strategy do NOT count toward the key's
+        daily_trade_cap — the cap counts successful placements on the two
+        order endpoints only.
+        """
+        if not self._has_trading_constraints(key_row):
+            return None
+        if method == "POST" and (path == "/api/chat" or path.startswith("/api/chat/")):
+            return "Constrained API keys cannot use AI trading actions"
+        if method == "POST" and path == "/api/rules":
+            return self._deferred_creation_denial(key_row, body, surface="rule")
+        if method == "PATCH" and path.startswith("/api/rules/"):
+            try:
+                payload = json.loads(body)
+            except (ValueError, UnicodeDecodeError):
+                payload = None
+            if not isinstance(payload, dict) or payload.get("status") != "paused":
+                return "Constrained API keys may only pause trading rules"
+        if method == "POST" and path == "/api/strategies":
+            return self._deferred_creation_denial(key_row, body, surface="strategy")
+        if method == "PATCH" and path.startswith("/api/strategies/"):
+            try:
+                payload = json.loads(body)
+            except (ValueError, UnicodeDecodeError):
+                payload = None
+            if not isinstance(payload, dict) or payload.get("status") != "paused":
+                return "Constrained API keys may only pause automated strategies"
         return None
 
     # ------------------------------------------------------------- bearer path
@@ -436,6 +559,27 @@ class ApiKeyGatewayMiddleware:
 
         key_id: str = key_row["id"]
         user_id: str = key_row["user_id"]
+
+        # Classroom-server only: the anonymous Guest is a shared identity on a
+        # shared deployment, so Guest-owned keys (e.g. minted before the
+        # volume was promoted to server mode) stay visible/revocable in the
+        # ledger but can no longer authenticate. Local-demo keeps the P3
+        # single-user contract: Guest keys work.
+        if user_id == "default" and self._settings.is_server:
+            if self._audit_window_clear(
+                self._frozen_audit_written, key_id, FROZEN_AUDIT_THROTTLE_SECONDS
+            ):
+                self._audit(
+                    db_path,
+                    key_id=key_id,
+                    user_id=user_id,
+                    method=method,
+                    endpoint=path,
+                    result="denied",
+                    status_code=403,
+                )
+            await _send_json(send, 403, {"error": "Guest API keys are disabled"})
+            return
 
         # §2/§4: frozen is the kill switch — immediate 403, audited. The audit
         # write is throttled per key (mirrors the rate_limited throttle) so a
@@ -487,7 +631,35 @@ class ApiKeyGatewayMiddleware:
         audited = method in MUTATING_METHODS and path.startswith(AUDITED_PREFIXES)
         body: bytes = b""
         if audited:
-            body, receive = await _buffer_body(receive)
+            try:
+                body, receive = await _buffer_body(receive, self._max_body_bytes)
+            except BodyTooLargeError:
+                self._audit(
+                    db_path,
+                    key_id=key_id,
+                    user_id=user_id,
+                    method=method,
+                    endpoint=path,
+                    result="denied",
+                    status_code=413,
+                )
+                await _send_json(send, 413, {"error": "Request body too large"})
+                return
+
+        indirect_denial = self._indirect_trading_denial(key_row, method, path, body)
+        if indirect_denial is not None:
+            self._audit(
+                db_path,
+                key_id=key_id,
+                user_id=user_id,
+                method=method,
+                endpoint=path,
+                result="denied",
+                status_code=403,
+                digest=payload_digest(body),
+            )
+            await _send_json(send, 403, {"error": indirect_denial})
+            return
 
         # §4: authorization guardrails on the two order-placing endpoints.
         if method == "POST" and path in GUARDED_ENDPOINTS:

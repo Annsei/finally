@@ -31,7 +31,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, FiniteFloat
 
 from app.auth import get_current_user_id
 from app.backtest import (
@@ -235,7 +235,7 @@ class ChatRequest(BaseModel):
 class TradeInstruction(BaseModel):
     ticker: str
     side: str  # "buy" | "sell"
-    quantity: float
+    quantity: FiniteFloat
 
 
 class WatchlistChange(BaseModel):
@@ -248,10 +248,10 @@ class OrderInstruction(BaseModel):
 
     ticker: str
     side: str  # "buy" | "sell"
-    quantity: float
+    quantity: FiniteFloat
     kind: str  # "limit" | "stop" | "stop_limit"
-    limit_price: float | None = None
-    stop_price: float | None = None
+    limit_price: FiniteFloat | None = None
+    stop_price: FiniteFloat | None = None
     # None tolerated (strict structured-output modes emit null for optionals);
     # place_order_on_conn normalizes None/empty to "gtc".
     time_in_force: str | None = None  # "day" | "gtc" (default "gtc")
@@ -262,9 +262,9 @@ class RuleInstruction(BaseModel):
 
     ticker: str
     trigger_type: str  # price_above | price_below | day_change_pct_above | day_change_pct_below
-    threshold: float
+    threshold: FiniteFloat
     side: str  # "buy" | "sell"
-    quantity: float
+    quantity: FiniteFloat
     description: str | None = None
 
 
@@ -278,10 +278,10 @@ class BacktestInstruction(BaseModel):
 
     ticker: str
     trigger_type: str  # price_above | price_below | day_change_pct_above | day_change_pct_below
-    threshold: float
-    quantity: float
-    take_profit_pct: float | None = None
-    stop_loss_pct: float | None = None
+    threshold: FiniteFloat
+    quantity: FiniteFloat
+    take_profit_pct: FiniteFloat | None = None
+    stop_loss_pct: FiniteFloat | None = None
     days: int | None = None
     runs: int | None = None
 
@@ -382,7 +382,7 @@ def _assemble_portfolio_context(
         ticker: str = row["ticker"]
         quantity: float = row["quantity"]
         avg_cost: float = row["avg_cost"]
-        current_price: float = price_cache.get_price(ticker) or 0.0
+        current_price: float = price_cache.get_price(ticker) or avg_cost
         pnl = (current_price - avg_cost) * quantity
         pnl_pct = ((current_price - avg_cost) / avg_cost * 100) if avg_cost > 0 else 0.0
         market_value += quantity * current_price

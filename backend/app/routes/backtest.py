@@ -17,7 +17,7 @@ import time
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, FiniteFloat
 
 from app.backtest import STARTING_CASH, normalize_backtest_config, run_backtest
 from app.market.cache import PriceCache
@@ -27,11 +27,11 @@ from app.market.profiles import MarketProfile
 class BacktestRequest(BaseModel):
     ticker: str
     trigger_type: str
-    threshold: float
-    quantity: float
+    threshold: FiniteFloat
+    quantity: FiniteFloat
     side: str | None = None  # default "buy" — the only supported side
-    take_profit_pct: float | None = None  # exit: percent above entry (> 0)
-    stop_loss_pct: float | None = None  # exit: percent below entry (> 0)
+    take_profit_pct: FiniteFloat | None = None  # exit: percent above entry (> 0)
+    stop_loss_pct: FiniteFloat | None = None  # exit: percent below entry (> 0)
     days: int | None = None  # default 30 (5-120)
     runs: int | None = None  # default 1 (1-50 Monte Carlo re-runs)
     seed: int | None = None  # omitted -> drawn randomly, always echoed back

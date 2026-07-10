@@ -25,6 +25,15 @@ CREATE TABLE IF NOT EXISTS app_meta (
     value TEXT NOT NULL
 );
 
+-- Lightweight migration ledger.  The application still applies its small,
+-- idempotent SQLite migrations in connection.py; this table makes the
+-- resulting schema version explicit for startup checks, backups, and support.
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version    INTEGER PRIMARY KEY,
+    name       TEXT NOT NULL,
+    applied_at TEXT NOT NULL
+);
+
 -- Watchlist: tickers the user wants to track
 CREATE TABLE IF NOT EXISTS watchlist (
     id       TEXT PRIMARY KEY,
@@ -276,8 +285,9 @@ CREATE TABLE IF NOT EXISTS api_keys (
 -- API audit ledger (P3 §5): one row per mutating Bearer request after its
 -- response (result 'ok' on 2xx, 'error' otherwise), plus 'denied' rows for
 -- frozen-key / guardrail rejections and throttled 'rate_limited' rows.
--- payload_digest is the request body as compact JSON truncated to 200 chars —
--- never key material. Rows outlive key deletion (no FK — append-only ledger).
+-- payload_digest is the SHA-256 hex digest of the exact request body, never
+-- raw business content or key material. Rows outlive key deletion (no FK —
+-- append-only ledger).
 -- init_db() executes this script on every startup, so pre-existing database
 -- volumes pick this table up idempotently via IF NOT EXISTS (new table — no
 -- column migration).
@@ -291,6 +301,20 @@ CREATE TABLE IF NOT EXISTS api_audit (
     result         TEXT NOT NULL,
     status_code    INTEGER,
     created_at     TEXT NOT NULL
+);
+
+-- Administrator actions are separate from API-key audit rows because they
+-- authenticate with the dedicated FINALLY_ADMIN_TOKEN. request_id is the
+-- idempotency key supplied by the caller; details stores the completed reset
+-- response so an exact retry can return without running the mutation twice.
+CREATE TABLE IF NOT EXISTS admin_audit (
+    id         TEXT PRIMARY KEY,
+    action     TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    result     TEXT NOT NULL,
+    details    TEXT,
+    created_at TEXT NOT NULL,
+    UNIQUE (action, request_id)
 );
 
 -- Indexes for the hot query paths (chat history and P&L chart both filter by
@@ -322,3 +346,8 @@ CREATE INDEX IF NOT EXISTS idx_api_keys_user
     ON api_keys (user_id);
 CREATE INDEX IF NOT EXISTS idx_api_audit_key_created
     ON api_audit (key_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_admin_audit_created
+    ON admin_audit (created_at DESC);
+-- Database-level backstop for the season-reset concurrency invariant.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_seasons_one_current
+    ON seasons ((1)) WHERE ended_at IS NULL;

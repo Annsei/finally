@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from collections.abc import AsyncGenerator
 
 from fastapi import APIRouter, Request
@@ -32,7 +33,8 @@ def create_stream_router(price_cache: PriceCache) -> APIRouter:
             data: {"AAPL": {"ticker": "AAPL", "price": 190.50, ...}, ...}
 
         Includes a retry directive so the browser auto-reconnects on
-        disconnection (EventSource built-in behavior).
+        disconnection (EventSource built-in behavior), plus named
+        ``heartbeat`` events while prices are unchanged.
 
         Auth (P3 §7): public — no authentication required. Requests carrying
         a Bearer API key behave identically (the gateway validates and
@@ -55,16 +57,19 @@ async def _generate_events(
     price_cache: PriceCache,
     request: Request,
     interval: float = 0.5,
+    heartbeat_interval: float = 15.0,
 ) -> AsyncGenerator[str, None]:
     """Async generator that yields SSE-formatted price events.
 
-    Sends all prices every `interval` seconds. Stops when the client
-    disconnects (detected via request.is_disconnected()).
+    Sends changed prices at `interval` polling cadence and a named heartbeat
+    at least every `heartbeat_interval` seconds even when the cache version is
+    unchanged. Stops when the client disconnects.
     """
     # Tell the client to retry after 1 second if the connection drops
     yield "retry: 1000\n\n"
 
     last_version = -1
+    last_heartbeat = time.monotonic()
     client_ip = request.client.host if request.client else "unknown"
     logger.info("SSE client connected: %s", client_ip)
 
@@ -84,6 +89,11 @@ async def _generate_events(
                     data = {ticker: update.to_dict() for ticker, update in prices.items()}
                     payload = json.dumps(data)
                     yield f"data: {payload}\n\n"
+
+            now = time.monotonic()
+            if now - last_heartbeat >= heartbeat_interval:
+                last_heartbeat = now
+                yield "event: heartbeat\ndata: {}\n\n"
 
             await asyncio.sleep(interval)
     except asyncio.CancelledError:

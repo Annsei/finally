@@ -20,12 +20,12 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import logging
 
 from httpx import ASGITransport, AsyncClient
 
-from app.db.connection import get_conn
+from app.db.connection import get_conn, init_db
+from app.market import PriceCache
 
 # Imported fixtures/helpers (pytest picks fixtures up from this namespace).
 from tests.gateway_fixtures import (  # noqa: F401
@@ -36,6 +36,7 @@ from tests.gateway_fixtures import (  # noqa: F401
     gateway_env,
     key_row,
     login,
+    server_settings,
 )
 
 TRADE = {"ticker": "AAPL", "side": "buy", "quantity": 1}
@@ -138,6 +139,48 @@ class TestBearerResolution:
         )
         assert resp.status_code == 200
         assert resp.json()["user"]["id"] == "default"
+
+    async def test_guest_key_works_in_local_demo(self, gateway_env):
+        # local-demo keeps the P3 single-user contract: the anonymous Guest
+        # can mint a key and authenticate with it (server mode is the
+        # exception, tested below).
+        key, _ = await create_key(gateway_env.client, label="guest bot")
+        resp = await gateway_env.client.post(
+            "/api/portfolio/trade", json=TRADE, headers=bearer(key)
+        )
+        assert resp.status_code == 200
+        anon = await gateway_env.make_client()
+        me = (await anon.get("/api/auth/me", headers=bearer(key))).json()
+        assert me["user"]["id"] == "default"
+
+    async def test_guest_key_is_disabled_in_server_mode(self, tmp_path, monkeypatch):
+        # classroom-server: Guest is a shared identity — keys owned by
+        # 'default' (e.g. minted before the volume was promoted to server
+        # mode) stay revocable but can no longer authenticate.
+        db_file = str(tmp_path / "server-gateway.db")
+        monkeypatch.setenv("DB_PATH", db_file)
+        init_db(db_file)
+        plaintext = "fk_legacy_guest_key"
+        conn = get_conn(db_file)
+        try:
+            conn.execute(
+                "INSERT INTO api_keys "
+                "(id, user_id, label, key_hash, prefix, created_at) "
+                "VALUES ('legacy-guest', 'default', 'old', ?, 'fk_legacy', 'now')",
+                (hashlib.sha256(plaintext.encode()).hexdigest(),),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        test_app = build_app(
+            db_file, PriceCache(), with_middleware=True, settings=server_settings()
+        )
+        async with AsyncClient(
+            transport=ASGITransport(app=test_app), base_url="http://test"
+        ) as client:
+            resp = await client.get("/api/portfolio/", headers=bearer(plaintext))
+        assert resp.status_code == 403
+        assert resp.json() == {"error": "Guest API keys are disabled"}
 
     async def test_frozen_key_403_and_audited_denied(self, gateway_env):
         key, info = await _alice_with_key(gateway_env)
@@ -413,7 +456,8 @@ class TestGuardrails:
         assert resp.json() == {"error": "Ticker not allowed for this key"}
         rows = audit_rows(gateway_env.db_file, info["id"])
         assert [r["result"] for r in rows] == ["denied"]
-        assert "TSLA" in rows[0]["payload_digest"]
+        assert len(rows[0]["payload_digest"]) == 64
+        int(rows[0]["payload_digest"], 16)
 
     async def test_ticker_comparison_is_case_normalized(self, gateway_env):
         key, _ = await _alice_with_key(gateway_env, allowed_tickers=["aapl"])
@@ -561,7 +605,7 @@ class TestGuardrails:
         assert resp.status_code == 422  # the route rejects it, not the guardrail
         rows = audit_rows(gateway_env.db_file, info["id"])
         assert [r["result"] for r in rows] == ["error"]
-        assert rows[0]["payload_digest"] is None
+        assert rows[0]["payload_digest"] == hashlib.sha256(b"{not json").hexdigest()
 
     async def test_guardrails_do_not_apply_to_cookie_traffic(self, gateway_env):
         # The same user's cookie session is not constrained by their key.
@@ -578,6 +622,147 @@ class TestGuardrails:
         assert resp.status_code == 200
         assert [r["result"] for r in audit_rows(gateway_env.db_file, info["id"])] == ["ok"]
 
+    async def test_constrained_key_creates_rule_inside_constraints(self, gateway_env):
+        # Creation payloads are validated against the key's static
+        # constraints instead of blanket-denied: an in-whitelist,
+        # under-limit rule goes through and is audited 'ok'.
+        key, info = await _alice_with_key(
+            gateway_env, allowed_tickers=["AAPL"], max_order_qty=5
+        )
+        resp = await gateway_env.client.post(
+            "/api/rules",
+            json={
+                "ticker": "AAPL",
+                "trigger_type": "price_above",
+                "threshold": 200,
+                "side": "buy",
+                "quantity": 1,
+            },
+            headers=bearer(key),
+        )
+        assert resp.status_code == 200
+        assert resp.json()["rule"]["ticker"] == "AAPL"
+        assert audit_rows(gateway_env.db_file, info["id"])[0]["result"] == "ok"
+
+    async def test_constrained_key_rule_outside_whitelist_denied(self, gateway_env):
+        key, info = await _alice_with_key(gateway_env, allowed_tickers=["AAPL"])
+        resp = await gateway_env.client.post(
+            "/api/rules",
+            json={
+                "ticker": "TSLA",
+                "trigger_type": "price_above",
+                "threshold": 200,
+                "side": "buy",
+                "quantity": 1,
+            },
+            headers=bearer(key),
+        )
+        assert resp.status_code == 403
+        assert resp.json() == {"error": "Ticker not allowed for this key"}
+        assert audit_rows(gateway_env.db_file, info["id"])[0]["result"] == "denied"
+
+    async def test_constrained_key_rule_over_qty_denied(self, gateway_env):
+        key, _ = await _alice_with_key(gateway_env, max_order_qty=5)
+        resp = await gateway_env.client.post(
+            "/api/rules",
+            json={
+                "ticker": "AAPL",
+                "trigger_type": "price_above",
+                "threshold": 200,
+                "side": "buy",
+                "quantity": 10,
+            },
+            headers=bearer(key),
+        )
+        assert resp.status_code == 403
+        assert resp.json() == {"error": "Quantity exceeds key limit"}
+
+    async def test_constrained_key_creates_strategy_with_fixed_qty_inside_limit(
+        self, gateway_env
+    ):
+        key, info = await _alice_with_key(
+            gateway_env, allowed_tickers=["AAPL"], max_order_qty=5
+        )
+        resp = await gateway_env.client.post(
+            "/api/strategies",
+            json={
+                "name": "gateway bot",
+                "ticker": "AAPL",
+                "entry": {"all": [{"field": "price", "op": "above", "value": 9_999_999}]},
+                "sizing": {"mode": "fixed_qty", "qty": 2},
+            },
+            headers=bearer(key),
+        )
+        assert resp.status_code == 201
+        assert resp.json()["strategy"]["ticker"] == "AAPL"
+        assert audit_rows(gateway_env.db_file, info["id"])[0]["result"] == "ok"
+
+    async def test_constrained_key_strategy_over_qty_or_unbounded_sizing_denied(
+        self, gateway_env
+    ):
+        key, _ = await _alice_with_key(gateway_env, max_order_qty=5)
+        base = {
+            "name": "gateway bot",
+            "ticker": "AAPL",
+            "entry": {"all": [{"field": "price", "op": "above", "value": 9_999_999}]},
+        }
+        over = await gateway_env.client.post(
+            "/api/strategies",
+            json={**base, "sizing": {"mode": "fixed_qty", "qty": 10}},
+            headers=bearer(key),
+        )
+        assert over.status_code == 403
+        assert over.json() == {"error": "Quantity exceeds key limit"}
+        # cash_pct sizing has no knowable share count — fail closed.
+        unbounded = await gateway_env.client.post(
+            "/api/strategies",
+            json={**base, "sizing": {"mode": "cash_pct", "pct": 50}},
+            headers=bearer(key),
+        )
+        assert unbounded.status_code == 403
+        assert "fixed_qty" in unbounded.json()["error"]
+
+    async def test_constrained_key_chat_still_denied_and_patch_pause_only(
+        self, gateway_env
+    ):
+        # Chat can execute arbitrary actions server-side — blanket 403 stays.
+        key, _ = await _alice_with_key(gateway_env, max_order_qty=1)
+        resp = await gateway_env.client.post(
+            "/api/chat", json={"message": "buy everything"}, headers=bearer(key)
+        )
+        assert resp.status_code == 403
+        assert "AI trading actions" in resp.json()["error"]
+        # Incomplete strategy payload (no sizing) fails closed under a
+        # max_order_qty key.
+        resp = await gateway_env.client.post(
+            "/api/strategies", json={"ticker": "AAPL"}, headers=bearer(key)
+        )
+        assert resp.status_code == 403
+
+        edit = await gateway_env.client.patch(
+            "/api/strategies/existing",
+            json={"sizing": {"mode": "fixed_qty", "qty": 1000}},
+            headers=bearer(key),
+        )
+        assert edit.status_code == 403
+        assert "only pause" in edit.json()["error"]
+
+    async def test_oversized_audited_body_rejected_before_route(self, gateway_env):
+        key, info = await _alice_with_key(gateway_env)
+        resp = await gateway_env.client.post(
+            "/api/portfolio/trade",
+            json={**TRADE, "note": "x" * 70_000},
+            headers=bearer(key),
+        )
+        assert resp.status_code == 413
+        assert resp.json() == {"error": "Request body too large"}
+        row = audit_rows(gateway_env.db_file, info["id"])[0]
+        assert (row["result"], row["status_code"], row["payload_digest"]) == (
+            "denied",
+            413,
+            None,
+        )
+
 
 class TestAuditLedger:
     async def test_ok_row_shape_on_successful_trade(self, gateway_env):
@@ -593,8 +778,8 @@ class TestAuditLedger:
         assert row["result"] == "ok"
         assert row["status_code"] == 200
         assert row["user_id"] == "alice"
-        digest = json.loads(row["payload_digest"])
-        assert digest == TRADE
+        assert len(row["payload_digest"]) == 64
+        int(row["payload_digest"], 16)
 
     async def test_error_row_on_route_400(self, gateway_env):
         key, info = await _alice_with_key(gateway_env)
@@ -637,7 +822,7 @@ class TestAuditLedger:
         assert [(r["method"], r["result"]) for r in rows] == [("POST", "ok"), ("DELETE", "ok")]
         assert rows[1]["payload_digest"] is None  # DELETE has no body
 
-    async def test_digest_is_compact_json_truncated_to_200(self, gateway_env):
+    async def test_digest_is_fixed_sha256_without_raw_content(self, gateway_env):
         key, info = await _alice_with_key(gateway_env)
         padded = {**TRADE, "note": "x" * 500}  # extra fields are ignored by the route
         resp = await gateway_env.client.post(
@@ -645,8 +830,9 @@ class TestAuditLedger:
         )
         assert resp.status_code == 200
         row = audit_rows(gateway_env.db_file, info["id"])[0]
-        assert len(row["payload_digest"]) == 200
-        assert '"ticker":"AAPL"' in row["payload_digest"]  # compact separators
+        assert len(row["payload_digest"]) == 64
+        int(row["payload_digest"], 16)
+        assert "AAPL" not in row["payload_digest"]
 
     async def test_zero_leak_of_plaintext_and_hash(self, gateway_env, caplog):
         """The creation response is the ONLY place the plaintext ever appears:

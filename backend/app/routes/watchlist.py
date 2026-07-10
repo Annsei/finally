@@ -31,16 +31,39 @@ class AddTickerRequest(BaseModel):
     ticker: str
 
 
-def ticker_watched_by_anyone(conn: sqlite3.Connection, ticker: str) -> bool:
-    """True when ANY user still watches ``ticker`` (M4 market-source rule).
+def required_market_tickers(conn: sqlite3.Connection) -> list[str]:
+    """All tickers required by user-visible or trade-capable state."""
+    return [
+        row["ticker"]
+        for row in conn.execute(
+            "SELECT ticker FROM watchlist "
+            "UNION SELECT ticker FROM positions "
+            "UNION SELECT ticker FROM orders WHERE status = 'open' "
+            "UNION SELECT ticker FROM rules WHERE status = 'active' "
+            "UNION SELECT ticker FROM strategies WHERE status = 'live' "
+            "ORDER BY ticker"
+        )
+    ]
 
-    The market data source tracks the union of all users' watchlists, so a
-    ticker may be dropped from the source only when no user watches it.
-    """
+
+def ticker_required_by_anyone(conn: sqlite3.Connection, ticker: str) -> bool:
+    """True while any watchlist/position/order/rule/strategy needs ``ticker``."""
     row = conn.execute(
-        "SELECT 1 FROM watchlist WHERE ticker = ? LIMIT 1", (ticker,)
+        "SELECT 1 FROM ("
+        " SELECT ticker FROM watchlist"
+        " UNION SELECT ticker FROM positions"
+        " UNION SELECT ticker FROM orders WHERE status = 'open'"
+        " UNION SELECT ticker FROM rules WHERE status = 'active'"
+        " UNION SELECT ticker FROM strategies WHERE status = 'live'"
+        ") WHERE ticker = ? LIMIT 1",
+        (ticker,),
     ).fetchone()
     return row is not None
+
+
+def ticker_watched_by_anyone(conn: sqlite3.Connection, ticker: str) -> bool:
+    """Backward-compatible alias for the stronger market-demand check."""
+    return ticker_required_by_anyone(conn, ticker)
 
 
 def apply_watchlist_change_on_conn(
@@ -238,11 +261,11 @@ def create_watchlist_router(price_cache: PriceCache, db_path: str) -> APIRouter:
                 (user_id, ticker),
             )
             conn.commit()
-            still_watched = ticker_watched_by_anyone(conn, ticker)
+            still_required = ticker_required_by_anyone(conn, ticker)
         finally:
             conn.close()
 
-        if not still_watched:
+        if not still_required:
             await sync_market_source(request, ticker, "remove")
 
         return {"status": "ok", "ticker": ticker}

@@ -302,7 +302,7 @@ class TestBriefCompactness:
         assert content.endswith("…")
         assert not content.startswith('"')
 
-    def test_prompt_constrains_length_and_forbids_shorting(self):
+    async def test_prompt_constrains_length_and_forbids_shorting(self):
         from app.briefs import BRIEF_MAX_CHARS, BRIEF_SYSTEM_PROMPT
 
         # The parked M2.3 refinement: briefs once suggested short entries the

@@ -31,7 +31,19 @@ from app.api_gateway import ApiKeyGatewayMiddleware
 from app.db.connection import get_conn, init_db
 from app.market import PriceCache, create_stream_router
 from app.market.seed_prices import SEED_PRICES
+from app.settings import CLASSROOM_SERVER, RuntimeSettings
 from tests.conftest import FakeMarketSource, FakeTime
+
+
+def server_settings() -> RuntimeSettings:
+    """Classroom-server RuntimeSettings for the runtime-mode gating tests."""
+    return RuntimeSettings(
+        mode=CLASSROOM_SERVER,
+        bind_host="0.0.0.0",
+        server_auth_secret="classroom-secret-123",
+        admin_token="admin-secret-123456",
+        single_replica=True,
+    )
 
 
 def build_app(
@@ -40,11 +52,14 @@ def build_app(
     *,
     with_middleware: bool,
     now=None,
+    settings=None,
 ) -> FastAPI:
     """Build a test app mirroring main.py's router set (sans chat/LLM).
 
     ``with_middleware=False`` yields the exact same app without the gateway —
     the byte-regression tests diff responses between the two stacks.
+    ``settings`` (a RuntimeSettings) selects the runtime mode for the keys
+    router and the gateway middleware; None keeps the local-demo default.
     """
     from app.routes.auth import create_auth_router
     from app.routes.backtest import create_backtest_router
@@ -53,6 +68,7 @@ def build_app(
     from app.routes.orders import create_orders_router
     from app.routes.portfolio import create_portfolio_router
     from app.routes.rules import create_rules_router
+    from app.routes.strategies import create_strategies_router
     from app.routes.watchlist import create_watchlist_router
 
     test_app = FastAPI()
@@ -62,14 +78,17 @@ def build_app(
     test_app.include_router(create_portfolio_router(price_cache, db_file))
     test_app.include_router(create_orders_router(price_cache, db_file))
     test_app.include_router(create_rules_router(price_cache, db_file))
+    test_app.include_router(create_strategies_router(price_cache, db_file))
     test_app.include_router(create_backtest_router(price_cache))
     test_app.include_router(create_watchlist_router(price_cache, db_file))
     test_app.include_router(create_auth_router(db_file))
-    test_app.include_router(create_keys_router(db_file))
+    test_app.include_router(create_keys_router(db_file, settings=settings))
     if with_middleware:
         kwargs = {"db_path": db_file}
         if now is not None:
             kwargs["now"] = now
+        if settings is not None:
+            kwargs["settings"] = settings
         test_app.add_middleware(ApiKeyGatewayMiddleware, **kwargs)
     return test_app
 

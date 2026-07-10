@@ -480,7 +480,9 @@ def process_strategies_once(
         for row in rows:
             try:
                 quote = price_cache.get(row["ticker"])
-                if quote is None:
+                if quote is None or not price_cache.is_fresh(row["ticker"]):
+                    if quote is not None:
+                        price_cache.warn_stale_rejection(row["ticker"])
                     counts["skipped"] += 1
                     continue
                 if row["open_qty"] > 0:

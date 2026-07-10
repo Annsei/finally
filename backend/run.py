@@ -9,5 +9,13 @@ In production, run via Docker using uvicorn directly.
 
 import uvicorn
 
+from app.settings import LOCAL_DEMO, RuntimeSettings
+
 if __name__ == "__main__":
-    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
+    settings = RuntimeSettings.from_env().validate()
+    uvicorn.run(
+        "app.main:app",
+        host=settings.bind_host,
+        port=8000,
+        reload=settings.mode == LOCAL_DEMO,
+    )

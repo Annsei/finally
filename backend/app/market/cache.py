@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 import uuid
 from collections import deque
@@ -11,8 +12,15 @@ from threading import Lock
 
 from .models import MarketEvent, PriceUpdate
 
+logger = logging.getLogger(__name__)
+
 # ~2 hours of 1-second bars per ticker.
 DEFAULT_HISTORY_CAPACITY = 7200
+
+# Throttle for the stale-quote rejection warning: at most one log line per
+# ticker per this many seconds (wall clock), no matter how many execution
+# paths keep rejecting on the same frozen quote.
+STALE_WARN_INTERVAL_SECONDS = 60.0
 
 # Market-event detection (news feed): a single-tick move of at least this
 # magnitude (percent, absolute) records a MarketEvent.
@@ -42,6 +50,7 @@ class PriceCache:
         self,
         history_capacity: int = DEFAULT_HISTORY_CAPACITY,
         limit_pct_fn: Callable[[str], float | None] | None = None,
+        max_quote_age_seconds: float | None = None,
     ) -> None:
         # Per-ticker daily price-limit percent (CN-2 §4). When provided and the
         # ticker has a session prev_close, ``update()``/``roll_session()`` derive
@@ -50,6 +59,7 @@ class PriceCache:
         # simulator's ticks, random events, and sector bursts are all bounded.
         # None (us) disables clamping entirely — the pre-CN-2 behavior.
         self._limit_pct_fn = limit_pct_fn
+        self._max_quote_age_seconds = max_quote_age_seconds
         self._prices: dict[str, PriceUpdate] = {}
         self._lock = Lock()
         self._version: int = 0  # Monotonically increasing; bumped on every update
@@ -65,6 +75,9 @@ class PriceCache:
         # Official session closes stamped at market close (M3.1); consumed by
         # roll_session() at the next open to become each ticker's prev_close.
         self._settled_closes: dict[str, float] = {}
+        # Per-ticker wall-clock time of the last stale-rejection warning
+        # (throttle state for warn_stale_rejection).
+        self._stale_warned: dict[str, float] = {}
 
     def update(
         self,
@@ -382,6 +395,53 @@ class PriceCache:
         update = self.get(ticker)
         return update.price if update else None
 
+    def is_fresh(self, ticker: str, now: float | None = None) -> bool:
+        """Whether ``ticker`` has a quote inside the configured trading TTL.
+
+        A cache created without ``max_quote_age_seconds`` keeps the legacy
+        no-expiry behavior used by isolated unit tests. The real application
+        always injects an explicit TTL from :class:`RuntimeSettings`.
+        """
+        update = self.get(ticker)
+        if update is None:
+            return False
+        if self._max_quote_age_seconds is None:
+            return True
+        reference = time.time() if now is None else now
+        return reference - update.timestamp <= self._max_quote_age_seconds
+
+    def get_fresh(self, ticker: str, now: float | None = None) -> PriceUpdate | None:
+        """Return the latest quote only when it is fresh enough to trade."""
+        update = self.get(ticker)
+        return update if update is not None and self.is_fresh(ticker, now) else None
+
+    def warn_stale_rejection(self, ticker: str, now: float | None = None) -> None:
+        """Log (throttled) that an execution path rejected ``ticker`` as stale.
+
+        The trade/order/rule/strategy paths all fail closed on a stale quote
+        (deliberately — never fill at a frozen price). Without observability
+        that looks like a silent freeze, so every rejection site calls this
+        single helper, which emits at most one ``logger.warning`` per ticker
+        per ``STALE_WARN_INTERVAL_SECONDS`` including the quote's age. The
+        throttle state is shared across all call sites — the log line exists
+        to flag the condition, not to count rejections.
+        """
+        reference = time.time() if now is None else now
+        update = self.get(ticker)
+        with self._lock:
+            last = self._stale_warned.get(ticker)
+            if last is not None and reference - last < STALE_WARN_INTERVAL_SECONDS:
+                return
+            self._stale_warned[ticker] = reference
+        age = reference - update.timestamp if update is not None else None
+        logger.warning(
+            "Rejecting execution on stale quote for %s: quote age %s "
+            "exceeds TTL %ss (fail-closed; will retry when fresh data arrives)",
+            ticker,
+            f"{age:.1f}s" if age is not None else "unknown (no quote)",
+            self._max_quote_age_seconds,
+        )
+
     def remove(self, ticker: str) -> None:
         """Remove a ticker from the cache (e.g., when removed from watchlist).
 
@@ -394,6 +454,7 @@ class PriceCache:
             self._bars.pop(ticker, None)
             self._last_event_ts.pop(ticker, None)
             self._settled_closes.pop(ticker, None)
+            self._stale_warned.pop(ticker, None)
 
     @property
     def version(self) -> int:

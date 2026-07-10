@@ -98,7 +98,14 @@ class TestSeasonResetSeedCashInjection:
         conn.commit()
         conn.close()
 
-        response = await client.post("/api/season/reset", json={"confirm": True})
+        response = await client.post(
+            "/api/season/reset",
+            json={"confirm": True},
+            headers={
+                "x-finally-admin-token": "local-demo-admin",
+                "idempotency-key": "cn-seed-reset",
+            },
+        )
         assert response.status_code == 200
 
         # Archived standings use the CN baseline: 150k on 100k = +50%.

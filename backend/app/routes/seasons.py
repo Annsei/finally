@@ -5,8 +5,9 @@ Provides:
   {"error": "Confirmation required"}). In ONE transaction: archives the
   current standings into ``season_results``, stamps the current season's
   ``ended_at``, inserts the next season, and resets EVERY user — cash back to
-  $10,000, positions deleted, open orders cancelled, active rules paused.
-  Trades, chat messages, and snapshots are kept as history.
+  profile seed cash, positions deleted, open orders cancelled, active rules
+  paused, and live strategy state cleared. Trades, chat messages, and
+  snapshots are kept as history.
 
     200 {"season": {"id", "started_at", "ended_at": null},
          "archived": {"season_id": int,
@@ -20,24 +21,35 @@ Provides:
                   "results": [...archived entries...] | null}]}
 
 Routes are created via the factory ``create_seasons_router`` closing over the
-shared ``PriceCache`` and database path. The reset is deliberately unauthenticated
-admin-lite (it's a classroom sim); the confirm gate is the only guard.
+shared ``PriceCache`` and database path. Reset always requires an
+``Idempotency-Key``; the ``X-FinAlly-Admin-Token`` header is mandatory in
+classroom-server mode and optional-but-validated in local-demo, so the local
+reset button keeps working without configuration. Both checks run before the
+transaction.
 """
 
 from __future__ import annotations
 
+import json
 import logging
+import secrets
+import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from app.db.connection import get_conn
 from app.market.cache import PriceCache
-from app.routes.leaderboard import compute_standings, get_current_season
+from app.routes.leaderboard import compute_standings
+from app.settings import RuntimeSettings
 
 logger = logging.getLogger(__name__)
+
+ADMIN_HEADER = "x-finally-admin-token"
+IDEMPOTENCY_HEADER = "idempotency-key"
+RESET_ACTION = "season.reset"
 
 
 class SeasonResetRequest(BaseModel):
@@ -45,7 +57,10 @@ class SeasonResetRequest(BaseModel):
 
 
 def create_seasons_router(
-    price_cache: PriceCache, db_path: str, seed_cash: float = 10_000.0
+    price_cache: PriceCache,
+    db_path: str,
+    seed_cash: float = 10_000.0,
+    settings: RuntimeSettings | None = None,
 ) -> APIRouter:
     """Factory: build the seasons APIRouter with injected dependencies.
 
@@ -54,28 +69,71 @@ def create_seasons_router(
     active market profile's seed cash; default keeps the US $10,000).
     """
     router = APIRouter(tags=["seasons"])
+    runtime = settings or RuntimeSettings()
 
     @router.post("/api/season/reset")
-    async def reset_season(body: SeasonResetRequest | None = None) -> dict:
-        """Archive the current season and restart everyone at $10,000.
+    async def reset_season(
+        request: Request, body: SeasonResetRequest | None = None
+    ) -> dict:
+        """Archive the current season and restart everyone at profile seed cash.
 
         Requires ``{"confirm": true}``; anything else returns HTTP 400 and
         changes nothing. All writes land in a single transaction.
         """
+        # Admin token: REQUIRED in classroom-server mode (shared deployment —
+        # a reset touches every user). Local-demo does not require it (the
+        # loopback demo's reset button works out of the box), but a supplied
+        # token is still validated in every mode.
+        supplied_token = request.headers.get(ADMIN_HEADER)
+        if runtime.is_server and not supplied_token:
+            return JSONResponse(
+                status_code=401, content={"error": "Administrator token required"}
+            )
+        if supplied_token:
+            expected_token = runtime.admin_token or ""
+            if not expected_token or not secrets.compare_digest(
+                supplied_token, expected_token
+            ):
+                return JSONResponse(
+                    status_code=403, content={"error": "Invalid administrator token"}
+                )
         if body is None or not body.confirm:
             return JSONResponse(
                 status_code=400, content={"error": "Confirmation required"}
+            )
+        request_id = (request.headers.get(IDEMPOTENCY_HEADER) or "").strip()
+        if not request_id or len(request_id) > 128:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "Idempotency-Key header is required (max 128 chars)"},
             )
 
         now = datetime.now(timezone.utc).isoformat()
         conn = get_conn(db_path)
         try:
-            # get_current_season may lazily insert (hand-edited DB) — do it
-            # before taking the write lock so the reset transaction below is
-            # a single BEGIN IMMEDIATE block.
-            season = get_current_season(conn)
-
             conn.execute("BEGIN IMMEDIATE")
+            replay = conn.execute(
+                "SELECT details FROM admin_audit "
+                "WHERE action = ? AND request_id = ? AND result = 'ok'",
+                (RESET_ACTION, request_id),
+            ).fetchone()
+            if replay is not None and replay["details"]:
+                conn.rollback()
+                return json.loads(replay["details"])
+
+            # Read the current season only after taking the write lock. This
+            # prevents two concurrent resets from archiving the same season and
+            # creating two rows with ended_at IS NULL.
+            season = conn.execute(
+                "SELECT id, started_at, ended_at FROM seasons "
+                "WHERE ended_at IS NULL ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            if season is None:
+                cur = conn.execute("INSERT INTO seasons (started_at) VALUES (?)", (now,))
+                season = conn.execute(
+                    "SELECT id, started_at, ended_at FROM seasons WHERE id = ?",
+                    (cur.lastrowid,),
+                ).fetchone()
             standings = compute_standings(conn, price_cache, seed_cash)
             archived_entries = [
                 {
@@ -118,6 +176,27 @@ def create_seasons_router(
             conn.execute(
                 "UPDATE rules SET status = 'paused' WHERE status = 'active'"
             )
+            conn.execute(
+                "UPDATE strategies SET status = 'paused', open_qty = 0, "
+                "open_price = NULL, opened_at = NULL, high_water = NULL, "
+                "cooldown_until = NULL WHERE status = 'live' OR open_qty > 0"
+            )
+            result = {
+                "season": {"id": new_season_id, "started_at": now, "ended_at": None},
+                "archived": {"season_id": season["id"], "entries": archived_entries},
+            }
+            conn.execute(
+                "INSERT INTO admin_audit "
+                "(id, action, request_id, result, details, created_at) "
+                "VALUES (?, ?, ?, 'ok', ?, ?)",
+                (
+                    str(uuid.uuid4()),
+                    RESET_ACTION,
+                    request_id,
+                    json.dumps(result, separators=(",", ":")),
+                    now,
+                ),
+            )
             conn.commit()
         except Exception:
             conn.rollback()
@@ -130,10 +209,7 @@ def create_seasons_router(
             "Season %s archived (%d entries); season %s started",
             season["id"], len(archived_entries), new_season_id,
         )
-        return {
-            "season": {"id": new_season_id, "started_at": now, "ended_at": None},
-            "archived": {"season_id": season["id"], "entries": archived_entries},
-        }
+        return result
 
     @router.get("/api/seasons")
     async def list_seasons() -> dict:
