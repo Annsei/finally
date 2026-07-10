@@ -56,6 +56,7 @@ from app.market.cache import PriceCache
 from app.market.models import MarketEvent
 from app.market.profiles import MarketProfile
 from app.market.seed_prices import asset_class_for
+from app.market.sentiment import compute_market_sentiment, sentiment_context_line
 
 logger = logging.getLogger(__name__)
 
@@ -211,6 +212,17 @@ async def _generate_brief_text(
         f"Day change: {quote.day_change_percent:+.2f}%" if quote else "Day change: n/a"
     )
 
+    # P4 §1: append the market sentiment line to the event context — only
+    # when the cache holds >= 2 tickers (the helper returns None below the
+    # gate). The mock branch above returned already, so LLM_MOCK output is
+    # byte-identical to pre-P4.
+    event_context = f"Market event: {event.headline}\n{position_line}\n{day_line}"
+    sentiment_line = sentiment_context_line(
+        compute_market_sentiment(price_cache), zh=is_zh
+    )
+    if sentiment_line is not None:
+        event_context += f"\n{sentiment_line}"
+
     messages = [
         {
             "role": "system",
@@ -218,7 +230,7 @@ async def _generate_brief_text(
         },
         {
             "role": "user",
-            "content": f"Market event: {event.headline}\n{position_line}\n{day_line}",
+            "content": event_context,
         },
     ]
     try:

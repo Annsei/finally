@@ -5,13 +5,17 @@
 -- User profile: cash balance and account state.
 -- display_name (M4.1) is the login name with its original casing; the row id
 -- is the lowercased name. The anonymous 'default' row displays as 'Guest'.
+-- public_profile (P4 §4) is the player-page privacy toggle: 1 (default)
+-- exposes the public summary on GET /api/players/{id}; 0 hides it from
+-- everyone but the owner.
 -- NOTE: new columns here must also be added to _migrate_schema() in
 -- connection.py — CREATE TABLE IF NOT EXISTS does not evolve existing tables.
 CREATE TABLE IF NOT EXISTS users_profile (
-    id           TEXT PRIMARY KEY,
-    cash_balance REAL NOT NULL DEFAULT 10000.0,
-    created_at   TEXT NOT NULL,
-    display_name TEXT
+    id             TEXT PRIMARY KEY,
+    cash_balance   REAL NOT NULL DEFAULT 10000.0,
+    created_at     TEXT NOT NULL,
+    display_name   TEXT,
+    public_profile INTEGER NOT NULL DEFAULT 1
 );
 
 -- App-level key/value metadata (M4.1). Holds the HMAC session secret

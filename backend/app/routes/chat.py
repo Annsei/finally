@@ -43,6 +43,7 @@ from app.backtest import (
 from app.db.connection import get_conn
 from app.market.cache import PriceCache
 from app.market.profiles import MarketProfile
+from app.market.sentiment import compute_market_sentiment, sentiment_context_line
 from app.market.session import SessionClock
 from app.routes.backtest_runs import insert_backtest_run_on_conn
 
@@ -340,6 +341,7 @@ def _assemble_portfolio_context(
     conn: sqlite3.Connection,
     price_cache: PriceCache,
     user_id: str = "default",
+    zh: bool = False,
 ) -> str:
     """Build a compact portfolio context string for injection into the system prompt.
 
@@ -350,11 +352,17 @@ def _assemble_portfolio_context(
     Args:
         conn: An open SQLite connection (caller manages lifecycle).
         price_cache: Live price cache for current market prices.
+        user_id: The requesting user's id (M4 multi-user scoping).
+        zh: Render locale-sensitive context additions (the P4 §1 market
+            sentiment line) in Chinese. The default keeps the English line.
 
     Returns:
         Multi-line string with cash, total value, positions table, watchlist
-        with current prices, and (when any exist) the newest market events so
-        the assistant can reference sudden moves.
+        with current prices, (when any exist) the newest market events so the
+        assistant can reference sudden moves, and (P4 §1, only when the cache
+        holds >= 2 tickers) the market sentiment line. The SYSTEM_PROMPT
+        constants are never modified — sentiment rides the per-request
+        context assembled here.
     """
     # Cash balance
     user_row = conn.execute(
@@ -418,6 +426,15 @@ def _assemble_portfolio_context(
             for e in events
         )
         context += f"\nRecent market events:\n{event_lines}"
+
+    # P4 §1: market sentiment line — appended ONLY when the cache holds at
+    # least 2 tickers (sentiment_context_line returns None below the gate),
+    # so thin/empty caches keep the context byte-identical to pre-P4.
+    sentiment_line = sentiment_context_line(
+        compute_market_sentiment(price_cache), zh=zh
+    )
+    if sentiment_line is not None:
+        context += f"\n{sentiment_line}"
 
     return context
 
@@ -730,8 +747,9 @@ def create_chat_router(
             ).fetchall()
             history = list(reversed(rows))
 
-            # Step 2: Assemble portfolio context (D-01/D-02)
-            context = _assemble_portfolio_context(conn, price_cache, user_id)
+            # Step 2: Assemble portfolio context (D-01/D-02; P4 §1 threads the
+            # locale so the sentiment line is Chinese on a zh-CN profile)
+            context = _assemble_portfolio_context(conn, price_cache, user_id, zh=is_zh)
 
             # Step 3: Build messages list for LLM
             messages: list[dict] = [

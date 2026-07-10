@@ -15,6 +15,12 @@ Provides:
 - GET /api/market/session — current trading-session state from the
   SessionClock (M3.1). Drives the Header session badge and lets the frontend
   render open/closed state and a countdown to the next transition.
+- GET /api/market/sentiment — the three-axis market sentiment index (P4 §1)
+  computed from the PriceCache snapshot + 1-second ring buffers. Feeds the
+  /market page gauge and the AI context line.
+- GET /api/market/correlation — NxN Pearson correlation of 1-minute log
+  returns over a recent window (P4 §2), tickers grouped by sector. Feeds the
+  /market page heatmap.
 
 All routes are created via the factory function ``create_market_router`` which
 closes over the shared ``PriceCache`` instance and the ``SessionClock``.
@@ -23,13 +29,16 @@ closes over the shared ``PriceCache`` instance and the ``SessionClock``.
 from __future__ import annotations
 
 import logging
+import math
 import os
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from app.db.connection import get_conn
+from app.indicators import aggregate_minute_bars
 from app.market.cache import DEFAULT_HISTORY_CAPACITY, EVENT_BUFFER_SIZE, PriceCache
+from app.market.sentiment import compute_market_sentiment
 from app.market.session import SessionClock
 from app.market.universe import US_UNIVERSE, MarketUniverse
 
@@ -39,6 +48,104 @@ DEFAULT_HISTORY_LIMIT = 3600  # ~1h of 1-second bars
 DEFAULT_EVENTS_LIMIT = 20
 DEFAULT_ARCHIVE_LIMIT = 50  # P1 §3.3: default page size for /events/archive
 MAX_ARCHIVE_LIMIT = 200  # P1 §3.3: hard cap for /events/archive
+
+# P4 §2: correlation window (minutes of 1-minute bars) and eligibility gate.
+DEFAULT_CORRELATION_MINUTES = 30
+MIN_CORRELATION_MINUTES = 5
+MAX_CORRELATION_MINUTES = 120
+MIN_CORRELATION_BARS = 10  # tickers with fewer completed bars are excluded
+
+
+def _pearson(xs: list[float], ys: list[float]) -> float:
+    """Pearson correlation of two equal-length series.
+
+    Returns 0.0 when either series is constant (zero variance — the P4 §2
+    "恒价分母 0" rule) or shorter than 2 points. Never raises.
+    """
+    n = len(xs)
+    if n < 2:
+        return 0.0
+    mean_x = sum(xs) / n
+    mean_y = sum(ys) / n
+    cov = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys))
+    var_x = sum((x - mean_x) ** 2 for x in xs)
+    var_y = sum((y - mean_y) ** 2 for y in ys)
+    if var_x <= 0.0 or var_y <= 0.0:
+        return 0.0
+    return cov / math.sqrt(var_x * var_y)
+
+
+def compute_correlation_matrix(
+    price_cache: PriceCache, universe: MarketUniverse, minutes: int
+) -> dict:
+    """Pearson correlation of 1-minute log returns over the last ``minutes`` (P4 §2).
+
+    For every ticker in the cache the 1-second ring buffer is aggregated to
+    COMPLETED one-minute bars (:func:`aggregate_minute_bars`); the window is
+    anchored on the newest completed bar across the board and covers the
+    last ``minutes`` minutes. Tickers with fewer than
+    :data:`MIN_CORRELATION_BARS` bars inside the window are excluded (early
+    session — not enough signal). Log returns are keyed by bar time and each
+    pair correlates over its common timestamps, so tickers with gaps never
+    misalign.
+
+    Output tickers are grouped by sector (sorted by ``(sector, ticker)``) so
+    sector blocks sit together on the heatmap. Self-correlation is exactly
+    1.0; constant-price series (zero variance) correlate 0.0. Fewer than two
+    eligible tickers -> ``{"tickers": [], "sectors": {}, "matrix": [],
+    "minutes": minutes}``.
+    """
+    snapshot = price_cache.get_all()
+    bars_by_ticker: dict[str, list[dict]] = {}
+    for ticker in snapshot:
+        bars = aggregate_minute_bars(price_cache.get_history(ticker))
+        if bars:
+            bars_by_ticker[ticker] = bars
+    empty = {"tickers": [], "sectors": {}, "matrix": [], "minutes": minutes}
+    if not bars_by_ticker:
+        return empty
+
+    anchor = max(bars[-1]["time"] for bars in bars_by_ticker.values())
+    cutoff = anchor - minutes * 60
+    returns_by_ticker: dict[str, dict[int, float]] = {}
+    for ticker, bars in bars_by_ticker.items():
+        window = [bar for bar in bars if bar["time"] > cutoff]
+        if len(window) < MIN_CORRELATION_BARS:
+            continue
+        returns: dict[int, float] = {}
+        prev_close: float | None = None
+        for bar in window:
+            close = bar["close"]
+            if prev_close is not None and prev_close > 0 and close > 0:
+                returns[bar["time"]] = math.log(close / prev_close)
+            prev_close = close
+        returns_by_ticker[ticker] = returns
+
+    if len(returns_by_ticker) < 2:
+        return empty
+
+    tickers = sorted(returns_by_ticker, key=lambda t: (universe.sector_for(t), t))
+    matrix: list[list[float]] = []
+    for a in tickers:
+        row: list[float] = []
+        for b in tickers:
+            if a == b:
+                row.append(1.0)
+                continue
+            common = sorted(set(returns_by_ticker[a]) & set(returns_by_ticker[b]))
+            r = _pearson(
+                [returns_by_ticker[a][t] for t in common],
+                [returns_by_ticker[b][t] for t in common],
+            )
+            # ``+ 0.0`` normalizes the -0.0 that round() can produce.
+            row.append(round(r, 2) + 0.0)
+        matrix.append(row)
+    return {
+        "tickers": tickers,
+        "sectors": {t: universe.sector_for(t) for t in tickers},
+        "matrix": matrix,
+        "minutes": minutes,
+    }
 
 
 def create_market_router(
@@ -238,6 +345,49 @@ def create_market_router(
             ],
             "has_more": has_more,
         }
+
+    @router.get("/sentiment")
+    async def get_sentiment(request: Request) -> dict:
+        """Return the three-axis market sentiment index (P4 §1). No auth.
+
+        Response shape (contract fixed — frontend built in parallel):
+            {"score": int, "label": "frozen"|"cool"|"neutral"|"active"|"hot",
+             "axes": {"breadth": n, "volatility": n, "volume": n},
+             "sample_size": int}
+
+        Fewer than 2 tickers in the cache reads neutral (all axes 50).
+        """
+        return compute_market_sentiment(price_cache)
+
+    @router.get("/correlation")
+    async def get_correlation(request: Request, minutes: str | None = None) -> dict:
+        """Return the sector-grouped correlation matrix (P4 §2). No auth.
+
+        Query params:
+            minutes: window of 1-minute bars to correlate over. Defaults to
+                30 and is clamped to the range 5..120. Non-integer values
+                return HTTP 400 with ``{"error": "message"}``.
+
+        Response shape (contract fixed — frontend built in parallel):
+            {"tickers": [str], "sectors": {ticker: sector},
+             "matrix": [[float 2dp]], "minutes": int}
+
+        Fewer than two tickers with >= 10 completed bars inside the window
+        (early session) returns the empty shape with ``tickers == []``.
+        """
+        if minutes is None:
+            minutes_value = DEFAULT_CORRELATION_MINUTES
+        else:
+            try:
+                minutes_value = int(minutes)
+            except ValueError:
+                return JSONResponse(
+                    status_code=400, content={"error": "minutes must be an integer"}
+                )
+        minutes_value = max(
+            MIN_CORRELATION_MINUTES, min(MAX_CORRELATION_MINUTES, minutes_value)
+        )
+        return compute_correlation_matrix(price_cache, universe, minutes_value)
 
     @router.get("/quotes")
     async def get_quotes(request: Request) -> dict:

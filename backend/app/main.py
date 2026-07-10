@@ -308,6 +308,13 @@ async def lifespan(app: FastAPI):
         create_leaderboard_router(price_cache, db_path, seed_cash=profile.seed_cash)
     )
 
+    # Players router (P4 §4 — public player profiles + privacy toggle).
+    # seed_cash keeps /player return% on the leaderboard's exact baseline.
+    from app.routes.players import create_players_router
+    app.include_router(
+        create_players_router(price_cache, db_path, seed_cash=profile.seed_cash)
+    )
+
     # Seasons router (M4.3 — reset + archive)
     from app.routes.seasons import create_seasons_router
     app.include_router(

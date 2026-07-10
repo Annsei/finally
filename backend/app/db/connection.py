@@ -77,8 +77,12 @@ _CHAT_MESSAGES_NEW_COLUMNS: tuple[tuple[str, str], ...] = (
 # M4.1: login display name (original casing; row id is the lowercased name).
 # Pre-existing rows get NULL; the anonymous 'default' row is stamped 'Guest'
 # by _migrate_schema so /api/auth/me and the leaderboard always have a name.
+# P4 §4: public_profile is the player-page privacy toggle — pre-existing rows
+# get 1 (public), exactly the pre-P4 "everyone visible on the leaderboard"
+# semantics.
 _USERS_PROFILE_NEW_COLUMNS: tuple[tuple[str, str], ...] = (
     ("display_name", "TEXT"),
+    ("public_profile", "INTEGER NOT NULL DEFAULT 1"),
 )
 # CN-2: T+1 lock — shares bought today, non-sellable until the next session.
 # Pre-existing rows get 0 (no lock), exactly the pre-CN-2 semantics.
