@@ -12,6 +12,7 @@ import useSWR from 'swr';
 import { usePriceStore } from '@/stores/priceStore';
 import { fetcher } from '@/lib/fetcher';
 import type { MarketSessionResponse } from '@/types/market';
+import { useMarketProfile } from '@/lib/marketProfile';
 import { useT } from '@/lib/i18n';
 
 function latestTickTs(prices: Record<string, { timestamp: number }>): number | null {
@@ -62,6 +63,7 @@ function SessionBadge({ now }: { now: number }) {
 
 export default function StatusBar() {
   const t = useT();
+  const profile = useMarketProfile();
   const prices = usePriceStore((s) => s.prices);
   const [now, setNow] = useState(() => Date.now());
 
@@ -86,8 +88,8 @@ export default function StatusBar() {
       : t('status.feed', { age: `${ageSec < 1 ? '<1' : Math.round(ageSec)}s` });
 
   return (
-    <footer className="h-6 shrink-0 flex items-center justify-between px-4 border-t border-terminal-border bg-terminal-surface text-xs">
-      <span className="flex items-center gap-3 text-terminal-muted">
+    <footer className="h-6 shrink-0 flex items-center justify-between gap-3 overflow-x-auto whitespace-nowrap px-2 sm:px-4 border-t border-terminal-border bg-terminal-surface text-xs">
+      <span className="flex shrink-0 items-center gap-3 text-terminal-muted">
         <SessionBadge now={now} />
         <span className="hidden md:inline">
           {t('status.shortcuts')} <kbd className="px-1">/</kbd> {t('status.scSearch')} ·{' '}
@@ -95,12 +97,12 @@ export default function StatusBar() {
           <kbd className="px-1">B</kbd>/<kbd className="px-1">S</kbd> {t('status.scTrade')}
         </span>
       </span>
-      <span className="flex items-center gap-4 tabular-nums">
+      <span className="flex shrink-0 items-center gap-4 tabular-nums">
         <span data-testid="status-feed-latency" className={feedColor}>
           {feedLabel}
         </span>
         <span data-testid="status-clock" className="text-terminal-muted">
-          {new Date(now).toLocaleTimeString('en-US', { hour12: false })}
+          {new Date(now).toLocaleTimeString(profile.locale, { hour12: false })}
         </span>
       </span>
     </footer>

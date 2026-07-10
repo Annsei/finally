@@ -2,13 +2,12 @@
  * TradesBlotter.tsx — backtest trade-by-trade table (P2 §8, extracted verbatim
  * from BacktestPanel as a pure refactor: DOM and testids unchanged). The
  * caller decides whether trades exist before mounting. Money/date display is
- * the caller's: `currencySymbol`/`locale` default to the panel's frozen '$' /
- * 'en-US' rendering; market-aware pages pass useMarketProfile()'s values.
+ * the caller's: every consumer must pass active market profile values.
  */
 import type { TFunction } from '@/lib/i18n';
 import type { BacktestTrade, BacktestTradeReason } from '@/types/market';
-import { formatQuantity } from '@/lib/format';
-import { signed, pnlClass } from '@/components/backtest/StatCard';
+import { formatShares } from '@/lib/format';
+import { pnlClass } from '@/components/backtest/StatCard';
 
 const REASON_KEY: Record<BacktestTradeReason, string> = {
   trigger: 'backtest.reason.trigger',
@@ -20,13 +19,15 @@ const REASON_KEY: Record<BacktestTradeReason, string> = {
 export default function TradesBlotter({
   trades,
   t,
-  currencySymbol = '$',
-  locale = 'en-US',
+  currencySymbol,
+  locale,
+  lotSize,
 }: {
   trades: BacktestTrade[];
   t: TFunction;
-  currencySymbol?: string;
-  locale?: string;
+  currencySymbol: string;
+  locale: string;
+  lotSize: number;
 }) {
   return (
     <div className="mt-2 max-h-40 overflow-y-auto">
@@ -55,9 +56,15 @@ export default function TradesBlotter({
                   tr.side === 'buy' ? 'text-terminal-up' : 'text-terminal-down'
                 }`}
               >
-                {tr.side}
+                {locale.toLowerCase().startsWith('zh')
+                  ? tr.side === 'buy'
+                    ? t('analytics.buy')
+                    : t('analytics.sell')
+                  : tr.side}
               </td>
-              <td className="text-right py-1 tabular-nums">{formatQuantity(tr.quantity)}</td>
+              <td className="text-right py-1 tabular-nums">
+                {formatShares(tr.quantity, { lot_size: lotSize })}
+              </td>
               <td className="text-right py-1 tabular-nums">{`${currencySymbol}${tr.price.toFixed(2)}`}</td>
               <td className="py-1 pl-3 text-terminal-muted">{t(REASON_KEY[tr.reason])}</td>
               <td
@@ -65,7 +72,9 @@ export default function TradesBlotter({
                   tr.pnl != null ? pnlClass(tr.pnl) : 'text-terminal-muted'
                 }`}
               >
-                {tr.pnl != null ? `${signed(tr.pnl)}` : '—'}
+                {tr.pnl != null
+                  ? `${tr.pnl >= 0 ? '+' : '-'}${currencySymbol}${Math.abs(tr.pnl).toFixed(2)}`
+                  : '—'}
               </td>
             </tr>
           ))}

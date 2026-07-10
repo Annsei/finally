@@ -158,7 +158,16 @@ export default function RunsPage() {
                     key={run.id}
                     data-testid={`run-row-${run.id}`}
                     onClick={() => openRun(run.id)}
-                    className="cursor-pointer border-b border-terminal-border/60 hover:bg-terminal-surface/50"
+                    onKeyDown={(event) => {
+                      if (event.target !== event.currentTarget) return;
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault();
+                        openRun(run.id);
+                      }
+                    }}
+                    tabIndex={0}
+                    aria-label={`${run.ticker} ${run.label ?? ''}`.trim()}
+                    className="cursor-pointer border-b border-terminal-border/60 hover:bg-terminal-surface/50 focus:outline focus:outline-1 focus:outline-terminal-accent"
                   >
                     <td className="py-1 pl-1 tabular-nums text-terminal-muted">
                       {new Date(run.created_at).toLocaleString(profile.locale, { hour12: false })}

@@ -86,7 +86,10 @@ export default function WatchlistPanel({ selectedTicker, onSelectTicker }: Props
   };
 
   return (
-    <div className="w-64 shrink-0 flex flex-col">
+    <div
+      data-testid="watchlist-panel"
+      className="w-full max-h-64 shrink-0 flex flex-col md:w-56 md:max-h-none xl:w-52 2xl:w-64"
+    >
       {/* Add-ticker form — compact, dense terminal style */}
       <div className="flex gap-1 pb-2">
         <input

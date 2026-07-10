@@ -4,9 +4,9 @@
  *
  * Header + NewsTicker on top, the page's main content in the middle, the
  * SAME ChatPanel component docked on the right (open/collapse state lives in
- * uiStore so it survives navigation), StatusBar at the bottom. The root uses
- * the trade desk's viewport-lock pattern: the page itself never scrolls —
- * panels scroll internally.
+ * uiStore so it survives navigation), StatusBar at the bottom. Desktop uses
+ * viewport-locked internal panels; narrow screens return to natural document
+ * scrolling and present chat as a closeable drawer.
  *
  * The trade desk (/) does NOT use AppShell — index.tsx keeps its own JSX
  * (index.test.tsx contract: Dashboard renders its chrome itself).
@@ -16,7 +16,7 @@ import { useSWRConfig, mutate as swrGlobalMutate } from 'swr';
 import Header from '@/components/Header';
 import NewsTicker from '@/components/NewsTicker';
 import StatusBar from '@/components/StatusBar';
-import ChatPanel from '@/components/ChatPanel';
+import ResponsiveChatDock from '@/components/ResponsiveChatDock';
 import { useUiStore } from '@/stores/uiStore';
 
 // Same key set as index.tsx's refreshAfterTrade + mutateWatchlist — AI actions
@@ -51,27 +51,29 @@ export default function AppShell({ children }: { children: ReactNode }) {
   };
 
   return (
-    <div className="h-screen overflow-hidden flex flex-col bg-terminal-bg text-terminal-text font-mono">
+    <div
+      data-testid="app-shell-root"
+      className="min-h-screen md:h-screen md:overflow-hidden flex flex-col bg-terminal-bg text-terminal-text font-mono"
+    >
       <Header />
       <NewsTicker />
-      <div className="flex gap-4 p-4 flex-1 min-h-0 overflow-hidden">
+      <div
+        data-testid="app-shell-layout"
+        className="relative flex flex-col md:flex-row gap-2 lg:gap-4 p-2 lg:p-4 flex-1 min-h-0 md:overflow-hidden"
+      >
         {/* Main content — the page decides its own internal layout/scrolling.
             A <div>, not <main>: _app.tsx already wraps every page in the
             single top-level <main>, and landmarks must not nest. */}
-        <div className="flex-1 min-h-0 min-w-0 overflow-auto">{children}</div>
-
-        {/* Chat dock — fixed width, collapsible, same component as the desk */}
-        <div
-          className={`shrink-0 overflow-hidden transition-all duration-300 border-l border-terminal-border ${
-            chatOpen ? 'w-80' : 'w-8'
-          }`}
-        >
-          <ChatPanel
-            open={chatOpen}
-            onToggle={() => setChatOpen(!chatOpen)}
-            onNewTrade={refreshAfterTrade}
-          />
+        <div className="w-full flex-1 min-h-0 min-w-0 overflow-x-auto md:overflow-auto">
+          {children}
         </div>
+
+        {/* At xl this is a normal dock; below xl it becomes a closeable drawer. */}
+        <ResponsiveChatDock
+          open={chatOpen}
+          onToggle={() => setChatOpen(!chatOpen)}
+          onNewTrade={refreshAfterTrade}
+        />
       </div>
       <StatusBar />
     </div>

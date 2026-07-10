@@ -130,6 +130,13 @@ const en: Dict = {
 
   // NewsTicker
   'news.empty': 'Market events appear here — watching for unusual moves…',
+  'news.pause': 'Pause market ticker',
+  'news.resume': 'Resume market ticker',
+
+  // App-wide REST status
+  'api.errorTitle': 'Data request failed.',
+  'api.retry': 'Retry',
+  'api.dismiss': 'Dismiss error',
 
   // PnL chart
   'pnl.title': 'Portfolio P&L',
@@ -163,6 +170,15 @@ const en: Dict = {
   'orders.colKind': 'Kind',
   'orders.colLimit': 'Limit',
   'orders.colStop': 'Stop',
+  'orders.cancelColumn': 'Cancel column',
+  'orders.kind.limit': 'lmt',
+  'orders.kind.stop': 'stp',
+  'orders.kind.stop_limit': 'stp-lmt',
+  'orders.day': 'day',
+  'orders.triggered': 'trig',
+  'orders.triggeredTitle': 'Stop triggered — resting as a limit order',
+  'orders.cancelAria': 'Cancel {side} order for {ticker}',
+  'orders.cancelTitle': 'Cancel order',
   'orders.empty':
     'No open orders. Place a limit order from the trade bar — it rests here until the price crosses your limit.',
 
@@ -172,6 +188,22 @@ const en: Dict = {
   'rules.colAction': 'Action',
   'rules.colStatus': 'Status',
   'rules.colFired': 'Fired',
+  'rules.controls': 'Controls column',
+  'rules.priceAbove': 'price ≥ {value}',
+  'rules.priceBelow': 'price ≤ {value}',
+  'rules.dayAbove': 'day ≥ {value}',
+  'rules.dayBelow': 'day ≤ {value}',
+  'rules.status.active': 'active',
+  'rules.status.paused': 'paused',
+  'rules.status.fired': 'fired',
+  'rules.test': 'test',
+  'rules.testTitle': 'Backtest this rule on simulated history',
+  'rules.pause': 'pause',
+  'rules.pauseTitle': 'Pause rule',
+  'rules.arm': 'arm',
+  'rules.armTitle': 'Arm rule',
+  'rules.deleteAria': 'Delete rule for {ticker}',
+  'rules.deleteTitle': 'Delete rule',
   'rules.empty':
     'No standing rules. Ask FinAlly to create one — e.g. “buy 5 NVDA if it drops 3% today.”',
 
@@ -222,10 +254,13 @@ const en: Dict = {
   'backtest.errThresholdPrice': 'Price threshold must be greater than 0.',
   'backtest.errThreshold': 'Enter a valid threshold.',
   'backtest.errQty': 'Quantity must be greater than 0.',
+  'backtest.errWholeLot': 'Quantity must be a whole multiple of {lot}.',
   'backtest.errDays': 'Days must be an integer between 5 and 120.',
   'backtest.errTp': 'Take profit % must be greater than 0 (or empty).',
   'backtest.errSl': 'Stop loss % must be greater than 0 (or empty).',
   'backtest.errFailed': 'Backtest failed',
+  'backtest.commissionPaid': 'Commission paid: {amount}',
+  'backtest.insufficientCash': '{n} entries skipped — insufficient cash',
   'backtest.statReturn': 'Return',
   'backtest.statBuyHold': 'Buy & Hold',
   'backtest.statMaxDd': 'Max DD',
@@ -249,7 +284,7 @@ const en: Dict = {
   'backtest.trigPriceBelow': 'Price ≤ {sym}',
   'backtest.trigPriceAbove': 'Price ≥ {sym}',
   'backtest.helper':
-    "Simulated history (GBM, the ticker's own volatility) — the trigger re-arms daily, entries exit via TP/SL or at horizon end. Dashed line = buy & hold the same $10k.",
+    "Simulated history (GBM, the ticker's own volatility) — the trigger re-arms daily, entries exit via TP/SL or at horizon end. Dashed line = buy & hold the same starting capital.",
   'backtest.empty':
     'Validate a strategy before arming it live — or click “test” on a rule in the Rules tab.',
 
@@ -390,6 +425,7 @@ const en: Dict = {
   'strategy.errExits':
     'Exit values must be greater than 0; max days must be a whole number between 1 and 120.',
   'strategy.errSizing': 'Enter a valid size: quantity > 0, or 1–100% of cash.',
+  'strategy.errWholeLot': 'Fixed quantity must be a whole multiple of {lot}.',
   'strategy.listTitle': 'My Strategies',
   'strategy.listEmpty': 'No strategies yet. Start from a template above or build one from scratch.',
   'strategy.colName': 'Name',
@@ -757,6 +793,13 @@ const zh: Dict = {
 
   // NewsTicker
   'news.empty': '市场异动将显示在此 — 正在监测异常波动…',
+  'news.pause': '暂停行情滚动',
+  'news.resume': '继续行情滚动',
+
+  // 全局 REST 状态
+  'api.errorTitle': '数据请求失败。',
+  'api.retry': '重试',
+  'api.dismiss': '关闭错误提示',
 
   // PnL chart
   'pnl.title': '组合盈亏',
@@ -790,6 +833,15 @@ const zh: Dict = {
   'orders.colKind': '类型',
   'orders.colLimit': '限价',
   'orders.colStop': '止损',
+  'orders.cancelColumn': '撤单操作',
+  'orders.kind.limit': '限价',
+  'orders.kind.stop': '止损',
+  'orders.kind.stop_limit': '止损限价',
+  'orders.day': '当日',
+  'orders.triggered': '已触发',
+  'orders.triggeredTitle': '止损已触发，当前作为限价单等待成交',
+  'orders.cancelAria': '撤销 {ticker} 的{side}委托',
+  'orders.cancelTitle': '撤销委托',
   'orders.empty': '暂无未成交委托。在下单栏挂出限价单 — 价格触及前将挂在此处。',
 
   // Rules
@@ -798,6 +850,22 @@ const zh: Dict = {
   'rules.colAction': '操作',
   'rules.colStatus': '状态',
   'rules.colFired': '触发',
+  'rules.controls': '规则操作',
+  'rules.priceAbove': '价格 ≥ {value}',
+  'rules.priceBelow': '价格 ≤ {value}',
+  'rules.dayAbove': '当日涨跌 ≥ {value}',
+  'rules.dayBelow': '当日涨跌 ≤ {value}',
+  'rules.status.active': '启用',
+  'rules.status.paused': '暂停',
+  'rules.status.fired': '已触发',
+  'rules.test': '回测',
+  'rules.testTitle': '使用模拟历史回测此规则',
+  'rules.pause': '暂停',
+  'rules.pauseTitle': '暂停规则',
+  'rules.arm': '启用',
+  'rules.armTitle': '启用规则',
+  'rules.deleteAria': '删除 {ticker} 的规则',
+  'rules.deleteTitle': '删除规则',
   'rules.empty': '暂无规则。可让 FinAlly 创建一条 — 例如「NVDA 今日跌 3% 就买入 5 股」。',
 
   // Portfolio tabs
@@ -847,10 +915,13 @@ const zh: Dict = {
   'backtest.errThresholdPrice': '价格阈值必须大于 0。',
   'backtest.errThreshold': '请输入有效阈值。',
   'backtest.errQty': '数量必须大于 0。',
+  'backtest.errWholeLot': '数量必须是 {lot} 的整数倍。',
   'backtest.errDays': '天数须为 5 到 120 之间的整数。',
   'backtest.errTp': '止盈% 必须大于 0（或留空）。',
   'backtest.errSl': '止损% 必须大于 0（或留空）。',
   'backtest.errFailed': '回测失败',
+  'backtest.commissionPaid': '已付手续费：{amount}',
+  'backtest.insufficientCash': '因现金不足跳过 {n} 次入场',
   'backtest.statReturn': '收益',
   'backtest.statBuyHold': '买入持有',
   'backtest.statMaxDd': '最大回撤',
@@ -874,7 +945,7 @@ const zh: Dict = {
   'backtest.trigPriceBelow': '价格 ≤ {sym}',
   'backtest.trigPriceAbove': '价格 ≥ {sym}',
   'backtest.helper':
-    '模拟历史行情（GBM，采用该标的自身波动率）— 触发条件每日重置，持仓通过止盈/止损或到期平仓。虚线 = 同额 $10k 买入并持有。',
+    '模拟历史行情（GBM，采用该标的自身波动率）— 触发条件每日重置，持仓通过止盈/止损或到期平仓。虚线 = 使用相同初始资金买入并持有。',
   'backtest.empty': '在实盘启用前先验证策略 — 或在规则页点击某条规则的「测试」。',
 
   // --- CN-4a additions -------------------------------------------------------
@@ -1005,6 +1076,7 @@ const zh: Dict = {
   'strategy.errFastSlow': '快线周期必须小于慢线周期。',
   'strategy.errExits': '退出参数必须大于 0；最长持有天数须为 1–120 的整数。',
   'strategy.errSizing': '请输入有效仓位：数量 > 0，或资金占比 1–100%。',
+  'strategy.errWholeLot': '固定数量必须是 {lot} 的整数倍。',
   'strategy.listTitle': '我的策略',
   'strategy.listEmpty': '暂无策略。可从上方模板开始，或从零构建一条。',
   'strategy.colName': '名称',

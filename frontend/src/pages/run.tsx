@@ -110,6 +110,7 @@ function RunDetail({ id }: { id: string }) {
           equity={run.equity_curve}
           baseline={run.baseline_curve}
           colors={chartColors}
+          baseValue={profile.seed_cash}
         />
       </div>
 
@@ -120,6 +121,7 @@ function RunDetail({ id }: { id: string }) {
           t={t}
           currencySymbol={profile.currency_symbol}
           locale={profile.locale}
+          lotSize={profile.lot_size}
         />
       )}
     </div>

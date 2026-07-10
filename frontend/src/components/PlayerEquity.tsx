@@ -75,7 +75,6 @@ export default function PlayerEquity({ curve }: { curve: PlayerEquityPoint[] }) 
       layout: {
         background: { color: 'transparent' },
         textColor: '#8b949e',
-        attributionLogo: false,
       },
       grid: {
         vertLines: { color: '#30363d' },

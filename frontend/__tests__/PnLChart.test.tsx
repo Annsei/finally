@@ -141,4 +141,29 @@ describe('PnLChart', () => {
       { time: t('2026-06-07T11:30:00Z'), value: 10250 },
     ]);
   });
+
+  it('CN profile anchors the baseline at ¥100k seed cash', () => {
+    mockUseSWR.mockImplementation(((key: string) => {
+      if (key === '/api/market/profile') {
+        return {
+          data: {
+            market: 'cn',
+            currency_symbol: '¥',
+            locale: 'zh-CN',
+            lot_size: 100,
+            up_is_red: true,
+            seed_cash: 100000,
+          },
+        };
+      }
+      return { data: undefined };
+    }) as never);
+
+    render(<PnLChart />);
+    const chart = jest.mocked(createChart).mock.results[0].value as { addSeries: jest.Mock };
+    expect(chart.addSeries).toHaveBeenCalledWith(
+      BaselineSeries,
+      expect.objectContaining({ baseValue: { type: 'price', price: 100000 } })
+    );
+  });
 });

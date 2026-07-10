@@ -47,7 +47,7 @@ export default function PortfolioHeatmap() {
             className="p-2 text-terminal-text rounded text-xs"
           >
             <div className="font-semibold">{pos.ticker}</div>
-            <div className="tabular-nums">${posValue.toFixed(0)}</div>
+            <div className="tabular-nums">{profile.currency_symbol}{posValue.toFixed(0)}</div>
             <div
               className={`tabular-nums ${
                 pos.pnl_pct > 0

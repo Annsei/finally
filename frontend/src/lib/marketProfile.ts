@@ -85,9 +85,10 @@ export function useMarketProfile(): MarketProfile {
  * colour flip (globals.css) engages. `us` is the CSS default, so setting it is
  * a harmless no-op visually.
  */
-export function applyMarketAttr(market: string): void {
+export function applyMarketAttr(market: string, locale = US_PROFILE.locale): void {
   if (typeof document !== 'undefined' && document.documentElement) {
     document.documentElement.setAttribute('data-market', market);
+    document.documentElement.lang = locale.toLowerCase().startsWith('zh') ? 'zh-CN' : 'en';
   }
 }
 

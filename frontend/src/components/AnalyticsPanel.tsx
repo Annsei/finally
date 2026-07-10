@@ -9,7 +9,8 @@
  */
 import useSWR from 'swr';
 import { fetcher } from '@/lib/fetcher';
-import { formatQuantity } from '@/lib/format';
+import { formatMoney, formatShares } from '@/lib/format';
+import { useMarketProfile, type MarketProfile } from '@/lib/marketProfile';
 import type { AnalyticsResponse, AnalyticsTradeRef } from '@/types/market';
 import { useT, type TFunction } from '@/lib/i18n';
 
@@ -46,13 +47,15 @@ function StatTile({
   );
 }
 
-function tradeLine(t: TFunction, trade: AnalyticsTradeRef): string {
+function tradeLine(t: TFunction, trade: AnalyticsTradeRef, profile: MarketProfile): string {
   const verb = trade.side === 'buy' ? t('analytics.buy') : t('analytics.sell');
-  return `${verb} ${formatQuantity(trade.quantity)} ${trade.ticker} @ $${trade.price.toFixed(2)}`;
+  return `${verb} ${formatShares(trade.quantity, profile)} ${trade.ticker} @ ${formatMoney(trade.price, profile)}`;
 }
 
 export default function AnalyticsPanel() {
   const t = useT();
+  const profile = useMarketProfile();
+  const money = { currency_symbol: profile.currency_symbol, locale: profile.locale };
   const { data } = useSWR<AnalyticsResponse>('/api/portfolio/analytics', fetcher, {
     refreshInterval: 10_000,
   });
@@ -76,7 +79,7 @@ export default function AnalyticsPanel() {
         />
         <StatTile
           label={t('analytics.realizedPnl')}
-          value={`${data.realized_pnl > 0 ? '+' : data.realized_pnl < 0 ? '-' : ''}$${Math.abs(data.realized_pnl).toFixed(2)}`}
+          value={`${data.realized_pnl > 0 ? '+' : data.realized_pnl < 0 ? '-' : ''}${formatMoney(Math.abs(data.realized_pnl), money)}`}
           tone={pnlTone}
           testid="stat-realized"
         />
@@ -104,7 +107,7 @@ export default function AnalyticsPanel() {
               <span className="flex-1 h-2 rounded-sm bg-terminal-border/30 overflow-hidden">
                 <span
                   className="block h-full rounded-sm"
-                  title={`$${s.value.toFixed(2)}`}
+                  title={formatMoney(s.value, money)}
                   style={{
                     width: `${Math.max(1, (s.weight / maxWeight) * 100)}%`,
                     backgroundColor: SECTOR_COLORS[s.sector] ?? SECTOR_COLORS.other,
@@ -128,9 +131,9 @@ export default function AnalyticsPanel() {
                 {t('analytics.bestTrade')}
               </span>
               <span data-testid="best-trade" className="text-terminal-text">
-                {tradeLine(t, data.best_trade)}{' '}
+                {tradeLine(t, data.best_trade, profile)}{' '}
                 <span className="text-terminal-up tabular-nums">
-                  +${data.best_trade.realized_pnl.toFixed(2)}
+                  +{formatMoney(data.best_trade.realized_pnl, money)}
                 </span>
               </span>
             </div>
@@ -141,12 +144,12 @@ export default function AnalyticsPanel() {
                 {t('analytics.worstTrade')}
               </span>
               <span data-testid="worst-trade" className="text-terminal-text">
-                {tradeLine(t, data.worst_trade)}{' '}
+                {tradeLine(t, data.worst_trade, profile)}{' '}
                 <span
                   className={`tabular-nums ${data.worst_trade.realized_pnl < 0 ? 'text-terminal-down' : 'text-terminal-up'}`}
                 >
-                  {data.worst_trade.realized_pnl < 0 ? '-' : '+'}$
-                  {Math.abs(data.worst_trade.realized_pnl).toFixed(2)}
+                  {data.worst_trade.realized_pnl < 0 ? '-' : '+'}
+                  {formatMoney(Math.abs(data.worst_trade.realized_pnl), money)}
                 </span>
               </span>
             </div>

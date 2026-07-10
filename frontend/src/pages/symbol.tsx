@@ -122,7 +122,7 @@ function SymbolDetail({ code }: { code: string }) {
     return () => {
       if (flashTimeoutRef.current) clearTimeout(flashTimeoutRef.current);
     };
-  }, [live?.direction, live?.timestamp]);
+  }, [live]);
 
   const dayPct = q?.day_change_percent ?? null;
   const dayColor =

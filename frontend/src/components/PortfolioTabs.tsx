@@ -43,7 +43,7 @@ export default function PortfolioTabs() {
 
   return (
     <div>
-      <div className="flex border-b border-terminal-border">
+      <div className="flex overflow-x-auto whitespace-nowrap border-b border-terminal-border">
         {TABS.map((tab_) => (
           <button
             key={tab_.key}
@@ -60,7 +60,7 @@ export default function PortfolioTabs() {
       {tab === 'orders' && <OpenOrdersTable />}
       {tab === 'fills' && <OrdersTable />}
       {tab === 'rules' && <RulesTable />}
-      {tab === 'backtest' && <BacktestPanel profile={profile} />}
+      {tab === 'backtest' && <BacktestPanel key={profile.market} profile={profile} />}
       {tab === 'analytics' && <AnalyticsPanel />}
       {tab === 'board' && <Leaderboard />}
     </div>

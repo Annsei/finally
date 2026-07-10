@@ -1,5 +1,80 @@
 import { useEffect } from 'react';
 import { usePriceStore } from '@/stores/priceStore';
+import type { PriceMap, PriceUpdate } from '@/types/market';
+
+const DIRECTIONS = new Set<PriceUpdate['direction']>(['up', 'down', 'flat']);
+const ASSET_CLASSES = new Set<NonNullable<PriceUpdate['asset_class']>>(['equity', 'crypto']);
+const TICKER_RE = /^[A-Z0-9.:-]{1,20}$/;
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value);
+}
+
+function isOptionalFiniteNumber(value: unknown): value is number | undefined {
+  return value === undefined || isFiniteNumber(value);
+}
+
+function isOptionalNullableFiniteNumber(value: unknown): value is number | null | undefined {
+  return value == null || isFiniteNumber(value);
+}
+
+/** Runtime guard for the untrusted JSON boundary of the public SSE stream. */
+export function isPriceUpdate(value: unknown, tickerKey: string): value is PriceUpdate {
+  if (value == null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const update = value as Record<string, unknown>;
+  if (update.ticker !== tickerKey || !TICKER_RE.test(tickerKey)) return false;
+  if (!isFiniteNumber(update.price) || update.price <= 0) return false;
+  if (!isFiniteNumber(update.previous_price) || update.previous_price <= 0) return false;
+  if (!isFiniteNumber(update.timestamp) || update.timestamp <= 0) return false;
+  if (!isFiniteNumber(update.change) || !isFiniteNumber(update.change_percent)) return false;
+  if (!DIRECTIONS.has(update.direction as PriceUpdate['direction'])) return false;
+
+  for (const field of [
+    'prev_close',
+    'day_change',
+    'day_change_percent',
+    'day_high',
+    'day_low',
+    'bid',
+    'ask',
+    'volume',
+  ] as const) {
+    if (!isOptionalFiniteNumber(update[field])) return false;
+  }
+  if (
+    !isOptionalNullableFiniteNumber(update.limit_up) ||
+    !isOptionalNullableFiniteNumber(update.limit_down)
+  ) {
+    return false;
+  }
+  if (
+    update.asset_class != null &&
+    !ASSET_CLASSES.has(update.asset_class as NonNullable<PriceUpdate['asset_class']>)
+  ) {
+    return false;
+  }
+  return true;
+}
+
+/** Parse and sanitize a complete price snapshot; null means reject the frame. */
+export function parsePricePayload(raw: string): PriceMap | null {
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (value == null || typeof value !== 'object' || Array.isArray(value)) return null;
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (entries.length === 0) return null;
+
+  const prices: PriceMap = {};
+  for (const [ticker, update] of entries) {
+    if (!isPriceUpdate(update, ticker)) return null;
+    prices[ticker] = update;
+  }
+  return prices;
+}
 
 /**
  * usePriceStream — opens a single EventSource connection to /api/stream/prices
@@ -31,16 +106,19 @@ export function usePriceStream() {
         setConnectionStatus('connected');
       };
 
+      // A named heartbeat is emitted even when a market is legitimately quiet
+      // (closed session / CN midday break). It proves transport liveness without
+      // pretending that a new price tick occurred.
+      es.addEventListener('heartbeat', () => {
+        lastEventAt = Date.now();
+      });
+
       es.onmessage = (event) => {
         lastEventAt = Date.now();
-        try {
-          const data = JSON.parse(event.data);
-          // data is PriceMap: { AAPL: PriceUpdate, GOOGL: PriceUpdate, ... }
-          setPrices(data);
-        } catch {
-          // Silently ignore malformed events — T-03-PP mitigation.
-          // Do NOT rethrow; a bad SSE frame must never crash the UI.
-        }
+        const data = parsePricePayload(event.data);
+        // Reject syntactically valid but structurally unsafe frames as well as
+        // malformed JSON. The last valid snapshot remains visible.
+        if (data) setPrices(data);
       };
 
       es.onerror = () => {
@@ -79,5 +157,5 @@ export function usePriceStream() {
       es.close();
       setConnectionStatus('disconnected');
     };
-  }, []); // Empty deps — one connection for the entire page lifetime.
+  }, [setConnectionStatus, setPrices]);
 }

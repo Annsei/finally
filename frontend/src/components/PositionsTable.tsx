@@ -3,12 +3,13 @@ import useSWR from 'swr';
 import type { PortfolioResponse, Position } from '@/types/market';
 import { fetcher } from '@/lib/fetcher';
 import { useTicker } from '@/stores/priceStore';
-import { formatQuantity } from '@/lib/format';
+import { formatMoney, formatShares } from '@/lib/format';
+import { useMarketProfile, type MarketProfile } from '@/lib/marketProfile';
 import SymbolLink from '@/components/SymbolLink';
 import { useT } from '@/lib/i18n';
 
 // Inner component: one row per position with live price + flash animation
-function PositionsRow({ pos }: { pos: Position }) {
+function PositionsRow({ pos, profile }: { pos: Position; profile: MarketProfile }) {
   const priceUpdate = useTicker(pos.ticker);
   const priceRef = useRef<HTMLTableCellElement>(null);
   const flashTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -33,7 +34,7 @@ function PositionsRow({ pos }: { pos: Position }) {
     return () => {
       if (flashTimeoutRef.current) clearTimeout(flashTimeoutRef.current);
     };
-  }, [priceUpdate?.direction, priceUpdate?.timestamp]);
+  }, [priceUpdate]);
 
   // Live values: use Zustand price if available, fall back to SWR portfolio data
   const currentPrice = priceUpdate?.price ?? pos.current_price;
@@ -54,6 +55,7 @@ function PositionsRow({ pos }: { pos: Position }) {
       : livePnlPct < 0
         ? 'text-terminal-down'
         : 'text-terminal-muted';
+  const money = { currency_symbol: profile.currency_symbol, locale: profile.locale };
 
   return (
     <tr
@@ -63,17 +65,22 @@ function PositionsRow({ pos }: { pos: Position }) {
       <td className="py-1 pl-1 font-semibold text-terminal-text tabular-nums">
         <SymbolLink code={pos.ticker} />
       </td>
-      <td className="text-right py-1 tabular-nums text-terminal-text">{formatQuantity(pos.quantity)}</td>
-      <td className="text-right py-1 tabular-nums text-terminal-text">${pos.avg_cost.toFixed(2)}</td>
+      <td className="text-right py-1 tabular-nums text-terminal-text">
+        {formatShares(pos.quantity, profile)}
+      </td>
+      <td className="text-right py-1 tabular-nums text-terminal-text">
+        {formatMoney(pos.avg_cost, money)}
+      </td>
       <td
         ref={priceRef}
         data-price-cell={pos.ticker}
         className="text-right py-1 tabular-nums text-terminal-text"
       >
-        ${currentPrice.toFixed(2)}
+        {formatMoney(currentPrice, money)}
       </td>
       <td className={`text-right py-1 tabular-nums ${pnlColor}`}>
-        {liveUnrealizedPnl >= 0 ? '+' : ''}${liveUnrealizedPnl.toFixed(2)}
+        {liveUnrealizedPnl >= 0 ? '+' : '-'}
+        {formatMoney(Math.abs(liveUnrealizedPnl), money)}
       </td>
       <td className={`text-right py-1 pr-1 tabular-nums ${pctColor}`}>
         {livePnlPct >= 0 ? '+' : ''}
@@ -85,6 +92,7 @@ function PositionsRow({ pos }: { pos: Position }) {
 
 export default function PositionsTable() {
   const t = useT();
+  const profile = useMarketProfile();
   const { data } = useSWR<PortfolioResponse>('/api/portfolio/', fetcher);
   const positions = data?.positions;
 
@@ -110,7 +118,7 @@ export default function PositionsTable() {
       </thead>
       <tbody>
         {positions.map((pos) => (
-          <PositionsRow key={pos.ticker} pos={pos} />
+          <PositionsRow key={pos.ticker} pos={pos} profile={profile} />
         ))}
       </tbody>
     </table>

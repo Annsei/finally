@@ -8,10 +8,11 @@
 import { useState } from 'react';
 import useSWR from 'swr';
 import { fetcher } from '@/lib/fetcher';
-import { formatQuantity } from '@/lib/format';
+import { formatMoney, formatShares } from '@/lib/format';
+import { useMarketProfile, type MarketProfile } from '@/lib/marketProfile';
 import SymbolLink from '@/components/SymbolLink';
 import { useUiStore } from '@/stores/uiStore';
-import { useT } from '@/lib/i18n';
+import { useT, type TFunction } from '@/lib/i18n';
 import type { RulesResponse, TradingRule, RuleStatus } from '@/types/market';
 
 const STATUS_STYLE: Record<RuleStatus, string> = {
@@ -20,21 +21,22 @@ const STATUS_STYLE: Record<RuleStatus, string> = {
   fired: 'text-terminal-blue border-terminal-blue/60',
 };
 
-function conditionText(r: TradingRule): string {
+function conditionText(r: TradingRule, t: TFunction, profile: MarketProfile): string {
   switch (r.trigger_type) {
     case 'price_above':
-      return `price ≥ $${r.threshold.toFixed(2)}`;
+      return t('rules.priceAbove', { value: formatMoney(r.threshold, profile) });
     case 'price_below':
-      return `price ≤ $${r.threshold.toFixed(2)}`;
+      return t('rules.priceBelow', { value: formatMoney(r.threshold, profile) });
     case 'day_change_pct_above':
-      return `day ≥ ${r.threshold > 0 ? '+' : ''}${r.threshold}%`;
+      return t('rules.dayAbove', { value: `${r.threshold > 0 ? '+' : ''}${r.threshold}%` });
     case 'day_change_pct_below':
-      return `day ≤ ${r.threshold > 0 ? '+' : ''}${r.threshold}%`;
+      return t('rules.dayBelow', { value: `${r.threshold > 0 ? '+' : ''}${r.threshold}%` });
   }
 }
 
 export default function RulesTable() {
   const t = useT();
+  const profile = useMarketProfile();
   const { data, mutate } = useSWR<RulesResponse>('/api/rules', fetcher, {
     refreshInterval: 5000,
   });
@@ -116,7 +118,7 @@ export default function RulesTable() {
             <th className="text-left py-1 font-semibold">{t('rules.colAction')}</th>
             <th className="text-left py-1 font-semibold">{t('rules.colStatus')}</th>
             <th className="text-right py-1 font-semibold">{t('rules.colFired')}</th>
-            <th className="text-right py-1 pr-1 font-semibold" aria-label="Controls column" />
+            <th className="text-right py-1 pr-1 font-semibold" aria-label={t('rules.controls')} />
           </tr>
         </thead>
         <tbody>
@@ -131,21 +133,22 @@ export default function RulesTable() {
               </td>
               <td className="py-1 tabular-nums text-terminal-muted">
                 <SymbolLink code={r.ticker} className="font-semibold text-terminal-text" />{' '}
-                {conditionText(r)}
+                {conditionText(r, t, profile)}
               </td>
               <td
                 className={`py-1 tabular-nums font-semibold uppercase ${
                   r.side === 'buy' ? 'text-terminal-up' : 'text-terminal-down'
                 }`}
               >
-                {r.side} {formatQuantity(r.quantity)}
+                {r.side === 'buy' ? t('analytics.buy') : t('analytics.sell')}{' '}
+                {formatShares(r.quantity, profile)}
               </td>
               <td className="py-1">
                 <span
                   data-testid={`rule-status-${r.id}`}
                   className={`px-1.5 py-0.5 rounded border text-[10px] font-semibold uppercase ${STATUS_STYLE[r.status]}`}
                 >
-                  {r.status}
+                  {t(`rules.status.${r.status}`)}
                 </span>
               </td>
               <td className="text-right py-1 tabular-nums text-terminal-muted">{r.fire_count}</td>
@@ -154,27 +157,27 @@ export default function RulesTable() {
                   <button
                     type="button"
                     data-testid={`rule-backtest-${r.id}`}
-                    title="Backtest this rule on simulated history"
+                    title={t('rules.testTitle')}
                     onClick={() => backtest(r)}
                     className="text-terminal-muted hover:text-terminal-accent text-[10px] font-semibold uppercase px-1"
                   >
-                    test
+                    {t('rules.test')}
                   </button>
                 )}
                 <button
                   type="button"
                   data-testid={`rule-toggle-${r.id}`}
-                  title={r.status === 'active' ? 'Pause rule' : 'Arm rule'}
+                  title={r.status === 'active' ? t('rules.pauseTitle') : t('rules.armTitle')}
                   onClick={() => void patchStatus(r)}
                   className="text-terminal-muted hover:text-terminal-blue text-[10px] font-semibold uppercase px-1"
                 >
-                  {r.status === 'active' ? 'pause' : 'arm'}
+                  {r.status === 'active' ? t('rules.pause') : t('rules.arm')}
                 </button>
                 <button
                   type="button"
                   data-testid={`rule-delete-${r.id}`}
-                  aria-label={`Delete rule for ${r.ticker}`}
-                  title="Delete rule"
+                  aria-label={t('rules.deleteAria', { ticker: r.ticker })}
+                  title={t('rules.deleteTitle')}
                   onClick={() => void remove(r)}
                   className="text-terminal-muted hover:text-terminal-down text-sm leading-none px-1"
                 >

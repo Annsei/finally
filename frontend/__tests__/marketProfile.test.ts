@@ -4,7 +4,7 @@
  * The runtime profile must default to US whenever the endpoint hasn't resolved
  * (or returns something unexpected), so every US-market behaviour is preserved.
  */
-import { resolveProfile, directionColors, US_PROFILE } from '@/lib/marketProfile';
+import { applyMarketAttr, resolveProfile, directionColors, US_PROFILE } from '@/lib/marketProfile';
 import { langFromLocale } from '@/lib/i18n';
 
 describe('resolveProfile', () => {
@@ -70,5 +70,16 @@ describe('langFromLocale', () => {
     expect(langFromLocale('en-US')).toBe('en');
     expect(langFromLocale(undefined)).toBe('en');
     expect(langFromLocale(resolveProfile(undefined).locale)).toBe('en');
+  });
+});
+
+describe('applyMarketAttr', () => {
+  it('stamps both the market theme and the document language', () => {
+    applyMarketAttr('cn', 'zh-CN');
+    expect(document.documentElement.getAttribute('data-market')).toBe('cn');
+    expect(document.documentElement.lang).toBe('zh-CN');
+
+    applyMarketAttr('us', 'en-US');
+    expect(document.documentElement.lang).toBe('en');
   });
 });

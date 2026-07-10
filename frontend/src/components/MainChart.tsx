@@ -82,7 +82,10 @@ export default function MainChart({ ticker }: Props) {
   const displayBarsRef = useRef<Bar[]>([]);
 
   const [timeframe, setTimeframe] = useState<number>(1);
-  const [hover, setHover] = useState<HoverBar | null>(null);
+  const [hoverState, setHoverState] = useState<{ ticker: string; value: HoverBar | null } | null>(
+    null
+  );
+  const hover = hoverState?.ticker === ticker ? hoverState.value : null;
 
   const priceUpdate = useTicker(ticker);
 
@@ -110,8 +113,6 @@ export default function MainChart({ ticker }: Props) {
       layout: {
         background: { color: 'transparent' },
         textColor: '#8b949e',
-        // Attribution lives in the README — the logo ghosts over dark charts
-        attributionLogo: false,
       },
       grid: {
         vertLines: { color: '#30363d' },
@@ -156,16 +157,19 @@ export default function MainChart({ ticker }: Props) {
       chart.subscribeCrosshairMove((param: MouseEventParams) => {
         const c = param.seriesData?.get(candles) as CandlestickData<UTCTimestamp> | undefined;
         if (!param.time || !c) {
-          setHover(null);
+          setHoverState({ ticker, value: null });
           return;
         }
         const v = param.seriesData?.get(volume) as HistogramData<UTCTimestamp> | undefined;
-        setHover({
-          open: c.open,
-          high: c.high,
-          low: c.low,
-          close: c.close,
-          volume: v?.value ?? null,
+        setHoverState({
+          ticker,
+          value: {
+            open: c.open,
+            high: c.high,
+            low: c.low,
+            close: c.close,
+            volume: v?.value ?? null,
+          },
         });
       });
     }
@@ -184,7 +188,6 @@ export default function MainChart({ ticker }: Props) {
     displayBarsRef.current = [];
     candleSeriesRef.current?.setData([]);
     volumeSeriesRef.current?.setData([]);
-    setHover(null);
   }, [ticker]);
 
   // Recolor candles when the market's direction colours resolve/change (the

@@ -8,18 +8,21 @@
 import { useState } from 'react';
 import useSWR from 'swr';
 import { fetcher } from '@/lib/fetcher';
-import { formatQuantity } from '@/lib/format';
+import { formatShares } from '@/lib/format';
+import { useMarketProfile } from '@/lib/marketProfile';
 import SymbolLink from '@/components/SymbolLink';
 import type { OrdersResponse } from '@/types/market';
 import { useT } from '@/lib/i18n';
 
-function formatTime(iso: string): string {
+function formatTime(iso: string, locale: string): string {
   const d = new Date(iso);
-  return isNaN(d.getTime()) ? iso : d.toLocaleTimeString('en-US', { hour12: false });
+  return isNaN(d.getTime()) ? iso : d.toLocaleTimeString(locale, { hour12: false });
 }
 
 export default function OpenOrdersTable() {
   const t = useT();
+  const profile = useMarketProfile();
+  const sym = profile.currency_symbol;
   const { data, mutate } = useSWR<OrdersResponse>('/api/portfolio/orders?status=open', fetcher, {
     refreshInterval: 3000,
   });
@@ -68,7 +71,7 @@ export default function OpenOrdersTable() {
             <th className="text-left py-1 pl-2 font-semibold">{t('orders.colKind')}</th>
             <th className="text-right py-1 font-semibold">{t('orders.colLimit')}</th>
             <th className="text-right py-1 font-semibold">{t('orders.colStop')}</th>
-            <th className="text-right py-1 pr-1 font-semibold" aria-label="Cancel column" />
+            <th className="text-right py-1 pr-1 font-semibold" aria-label={t('orders.cancelColumn')} />
           </tr>
         </thead>
         <tbody>
@@ -79,40 +82,47 @@ export default function OpenOrdersTable() {
               className="border-b border-terminal-border hover:bg-terminal-surface/50"
             >
               <td className="py-1 pl-1 tabular-nums text-terminal-muted">
-                {formatTime(o.created_at)}
+                {formatTime(o.created_at, profile.locale)}
               </td>
               <td
                 className={`py-1 font-semibold uppercase ${
                   o.side === 'buy' ? 'text-terminal-up' : 'text-terminal-down'
                 }`}
               >
-                {o.side}
+                {profile.locale.toLowerCase().startsWith('zh')
+                  ? o.side === 'buy'
+                    ? t('analytics.buy')
+                    : t('analytics.sell')
+                  : o.side}
               </td>
               <td className="py-1 font-semibold text-terminal-text">
                 <SymbolLink code={o.ticker} />
               </td>
               <td className="text-right py-1 tabular-nums text-terminal-text">
-                {formatQuantity(o.quantity)}
+                {formatShares(o.quantity, profile)}
               </td>
               <td className="py-1 pl-2 text-terminal-muted uppercase">
-                {(o.kind ?? 'limit').replace('stop_limit', 'stp-lmt').replace('stop', 'stp').replace('limit', 'lmt')}
-                {o.time_in_force === 'day' && <span className="ml-1 text-terminal-amber">day</span>}
-                {o.triggered_at && <span className="ml-1 text-terminal-blue" title="Stop triggered — resting as a limit order">trig</span>}
+                {t(`orders.kind.${o.kind ?? 'limit'}`)}
+                {o.time_in_force === 'day' && <span className="ml-1 text-terminal-amber">{t('orders.day')}</span>}
+                {o.triggered_at && <span className="ml-1 text-terminal-blue" title={t('orders.triggeredTitle')}>{t('orders.triggered')}</span>}
               </td>
               <td className="text-right py-1 tabular-nums text-terminal-text">
                 {o.limit_price != null
-                  ? `${o.side === 'buy' ? '≤' : '≥'}$${o.limit_price.toFixed(2)}`
+                  ? `${o.side === 'buy' ? '≤' : '≥'}${sym}${o.limit_price.toFixed(2)}`
                   : '—'}
               </td>
               <td className="text-right py-1 tabular-nums text-terminal-text">
-                {o.stop_price != null ? `@$${o.stop_price.toFixed(2)}` : '—'}
+                {o.stop_price != null ? `@${sym}${o.stop_price.toFixed(2)}` : '—'}
               </td>
               <td className="text-right py-1 pr-1">
                 <button
                   type="button"
                   data-testid={`cancel-order-${o.id}`}
-                  aria-label={`Cancel ${o.side} order for ${o.ticker}`}
-                  title="Cancel order"
+                  aria-label={t('orders.cancelAria', {
+                    side: o.side === 'buy' ? t('analytics.buy') : t('analytics.sell'),
+                    ticker: o.ticker,
+                  })}
+                  title={t('orders.cancelTitle')}
                   onClick={() => void handleCancel(o.id)}
                   className="text-terminal-muted hover:text-terminal-down text-sm leading-none px-1"
                 >

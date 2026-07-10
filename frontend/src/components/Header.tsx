@@ -178,7 +178,11 @@ function HeaderNav() {
   const current = normalizePath(router?.pathname ?? '/');
 
   return (
-    <nav className="flex items-center gap-4" aria-label="Primary">
+    <nav
+      data-testid="primary-nav"
+      className="order-2 flex w-full min-w-0 items-center gap-3 overflow-x-auto whitespace-nowrap py-1 xl:order-none xl:w-auto xl:gap-4 xl:py-0"
+      aria-label="Primary"
+    >
       {NAV_ITEMS.map((item) => {
         const active = current === normalizePath(item.href);
         return (
@@ -243,9 +247,12 @@ export default function Header() {
         : 'text-terminal-down';
 
   return (
-    <header className="flex items-center justify-between px-4 py-2 border-b border-terminal-border bg-terminal-surface">
+    <header
+      data-testid="responsive-header"
+      className="flex flex-wrap items-center gap-x-4 gap-y-1 px-2 sm:px-4 py-2 border-b border-terminal-border bg-terminal-surface xl:flex-nowrap xl:justify-between"
+    >
       {/* Brand + identity */}
-      <span className="flex items-center gap-4">
+      <span className="order-1 flex shrink-0 items-center gap-2 sm:gap-4 xl:order-none">
         <span className="text-terminal-accent font-semibold text-lg tracking-wide">
           FinAlly
         </span>
@@ -256,9 +263,12 @@ export default function Header() {
       <HeaderNav />
 
       {/* Right cluster: Cash · Portfolio · Connection dot */}
-      <div className="flex items-center gap-6">
+      <div
+        data-testid="header-metrics"
+        className="order-3 flex w-full min-w-0 items-center gap-4 overflow-x-auto whitespace-nowrap pt-1 xl:order-none xl:w-auto xl:gap-6 xl:overflow-visible xl:pt-0"
+      >
         {/* Cash balance */}
-        <div className="flex flex-col items-end">
+        <div className="flex shrink-0 flex-col items-end">
           <span className="text-xs font-semibold text-terminal-muted uppercase tracking-wider">
             {t('header.cash')}
           </span>
@@ -268,7 +278,7 @@ export default function Header() {
         </div>
 
         {/* Realized P&L — lifetime, from closed trades (M1.4) */}
-        <div className="flex flex-col items-end">
+        <div className="flex shrink-0 flex-col items-end">
           <span className="text-xs font-semibold text-terminal-muted uppercase tracking-wider">
             {t('header.realized')}
           </span>
@@ -287,7 +297,7 @@ export default function Header() {
         </div>
 
         {/* Day P&L — positions only, vs previous close */}
-        <div className="flex flex-col items-end">
+        <div className="flex shrink-0 flex-col items-end">
           <span className="text-xs font-semibold text-terminal-muted uppercase tracking-wider">
             {t('header.dayPnl')}
           </span>
@@ -300,7 +310,7 @@ export default function Header() {
         </div>
 
         {/* Portfolio total value — display size (largest live number) */}
-        <div className="flex flex-col items-end">
+        <div className="flex shrink-0 flex-col items-end">
           <span className="text-xs font-semibold text-terminal-muted uppercase tracking-wider">
             {t('header.portfolio')}
           </span>
@@ -314,7 +324,7 @@ export default function Header() {
         <div
           data-testid="connection-status"
           data-state={connectionStatus}
-          className={`w-2 h-2 rounded-full ${DOT_COLORS[connectionStatus]}`}
+          className={`w-2 h-2 shrink-0 rounded-full ${DOT_COLORS[connectionStatus]}`}
           title={connectionStatus}
         />
       </div>

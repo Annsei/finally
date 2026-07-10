@@ -235,7 +235,8 @@ export function validateStrategyForm(
   ticker: string,
   rows: ConditionRowState[],
   exits?: ExitsFormState,
-  sizing?: SizingFormState
+  sizing?: SizingFormState,
+  lotSize = 1
 ): string | null {
   const trimmedName = name.trim();
   if (trimmedName.length < 1 || trimmedName.length > 40) return 'strategy.errName';
@@ -291,6 +292,9 @@ export function validateStrategyForm(
       const text = sizing.qty.trim();
       const qty = Number(text);
       if (text === '' || !Number.isFinite(qty) || qty <= 0) return 'strategy.errSizing';
+      if (lotSize > 1 && (!Number.isInteger(qty) || qty % lotSize !== 0)) {
+        return 'strategy.errWholeLot';
+      }
     } else {
       const text = sizing.pct.trim();
       const pct = Number(text);
@@ -356,7 +360,8 @@ export default function StrategiesPage() {
 
   // --- form state ---------------------------------------------------------
   const [name, setName] = useState('');
-  const [ticker, setTicker] = useState('');
+  const [tickerInput, setTicker] = useState<string | null>(null);
+  const ticker = tickerInput ?? Object.keys(profile.names)[0] ?? '';
   const [template, setTemplate] = useState<string>('');
   const [mode, setMode] = useState<'all' | 'any'>('all');
   const [rows, setRows] = useState<ConditionRowState[]>([defaultRow()]);
@@ -365,7 +370,9 @@ export default function StrategiesPage() {
   const [trailing, setTrailing] = useState('');
   const [maxDays, setMaxDays] = useState('');
   const [sizingMode, setSizingMode] = useState<'fixed_qty' | 'cash_pct'>('fixed_qty');
-  const [sizingQty, setSizingQty] = useState('1');
+  // null means "use the active market's board-lot default". Unlike a plain
+  // '1' initializer this updates correctly when the CN profile resolves.
+  const [sizingQty, setSizingQty] = useState<string | null>(null);
   const [sizingPct, setSizingPct] = useState('20');
   const [creating, setCreating] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
@@ -411,12 +418,14 @@ export default function StrategiesPage() {
   };
 
   const submit = async () => {
+    const effectiveSizingQty = sizingQty ?? String(profile.lot_size);
     const errKey = validateStrategyForm(
       name,
       ticker,
       rows,
       { takeProfit, stopLoss, trailing, maxDays },
-      { mode: sizingMode, qty: sizingQty, pct: sizingPct }
+      { mode: sizingMode, qty: effectiveSizingQty, pct: sizingPct },
+      profile.lot_size
     );
     if (errKey) {
       setFormError(t(errKey));
@@ -431,7 +440,7 @@ export default function StrategiesPage() {
     const sizing: StrategySizing =
       sizingMode === 'cash_pct'
         ? { mode: 'cash_pct', pct: Number(sizingPct) }
-        : { mode: 'fixed_qty', qty: Number(sizingQty) };
+        : { mode: 'fixed_qty', qty: Number(effectiveSizingQty) };
 
     setCreating(true);
     setFormError(null);
@@ -770,7 +779,7 @@ export default function StrategiesPage() {
                     step="any"
                     data-testid="sizing-qty"
                     aria-label={t('strategy.sizingFixed')}
-                    value={sizingQty}
+                    value={sizingQty ?? String(profile.lot_size)}
                     onChange={(e) => setSizingQty(e.target.value)}
                     disabled={creating}
                     className={`w-20 ${inputClass}`}

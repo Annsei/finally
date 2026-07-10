@@ -471,7 +471,7 @@ export interface ApiAuditEntry {
   id: string;
   method: string;
   endpoint: string;
-  payload_digest: string | null; // compact-JSON body, truncated to 200 chars
+  payload_digest: string | null; // SHA-256 hex digest of the request body (64 chars; raw payload not stored, for privacy)
   result: ApiAuditResult;
   status_code: number | null;
   created_at: string; // ISO timestamp string (also the `before` cursor)

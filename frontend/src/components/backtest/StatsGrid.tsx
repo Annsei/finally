@@ -4,8 +4,7 @@
  *
  * Reused by the /run and /strategy pages, so it takes the caller's bound `t`
  * rather than resolving the profile itself. Money display is likewise the
- * caller's: `currencySymbol`/`locale` default to the panel's frozen '$' /
- * 'en-US' rendering; market-aware pages pass useMarketProfile()'s values.
+ * caller's: every consumer must pass the active market profile values.
  */
 import type { TFunction } from '@/lib/i18n';
 import type { BacktestStats } from '@/types/market';
@@ -14,13 +13,13 @@ import StatCard, { signed, pnlClass } from '@/components/backtest/StatCard';
 export default function StatsGrid({
   stats,
   t,
-  currencySymbol = '$',
-  locale = 'en-US',
+  currencySymbol,
+  locale,
 }: {
   stats: BacktestStats;
   t: TFunction;
-  currencySymbol?: string;
-  locale?: string;
+  currencySymbol: string;
+  locale: string;
 }) {
   return (
     <div className="grid grid-cols-4 lg:grid-cols-8 gap-1.5">

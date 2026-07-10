@@ -44,19 +44,18 @@ export function equityColors(upIsRed: boolean): DirColors {
 // Equity vs buy-and-hold chart — mounted only when a result exists, so the
 // chart is created fresh per mount (same lifecycle discipline as PnLChart).
 //
-// `baseValue` defaults to the $10k backtest seed (BacktestPanel / run pages);
-// the strategy performance page passes 0 for its 0-baseline realized-P&L
-// curve (P2 §6/§8). An empty `baseline` array simply renders no dashed line.
+// Callers must provide `baseValue`: backtests use the active market profile's
+// seed cash, while strategy performance passes 0 for realized P&L.
 export default function EquityChart({
   equity,
   baseline,
   colors,
-  baseValue = 10000,
+  baseValue,
 }: {
   equity: BacktestPoint[];
   baseline: BacktestPoint[];
   colors: DirColors;
-  baseValue?: number;
+  baseValue: number;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -72,8 +71,6 @@ export default function EquityChart({
       layout: {
         background: { color: 'transparent' },
         textColor: '#8b949e',
-        // Attribution lives in the README — the logo ghosts over dark charts
-        attributionLogo: false,
       },
       grid: {
         vertLines: { color: '#30363d' },
@@ -83,7 +80,7 @@ export default function EquityChart({
       timeScale: { borderColor: '#30363d', timeVisible: false },
     });
 
-    // Strategy equity: profit-tint above the base value (the $10k seed, or 0
+    // Strategy equity: profit-tint above the caller's base value (market seed, or 0
     // for the strategy-performance P&L curve), loss-tint below. Colours come
     // from the market profile (swapped on A-shares), same as PnLChart.
     const equitySeries = chart.addSeries(BaselineSeries, {
@@ -126,8 +123,9 @@ export default function EquityChart({
       bottomLineColor: downHex,
       bottomFillColor1: downFill1,
       bottomFillColor2: downFill2,
+      baseValue: { type: 'price', price: baseValue },
     });
-  }, [upHex, downHex, upFill1, upFill2, downFill1, downFill2]);
+  }, [upHex, downHex, upFill1, upFill2, downFill1, downFill2, baseValue]);
 
   useEffect(() => {
     if (!equityRef.current || !baselineRef.current) return;

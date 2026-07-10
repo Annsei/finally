@@ -48,7 +48,11 @@ const ORDER_TYPES: { key: OrderType; label: string; testid: string }[] = [
   { key: 'stop_limit', label: 'StpLmt', testid: 'order-type-stop-limit' },
 ];
 
-export default function TradeBar({ selectedTicker, onTradeComplete }: TradeBarProps) {
+export default function TradeBar(props: TradeBarProps) {
+  return <TradeBarForm {...props} />;
+}
+
+function TradeBarForm({ selectedTicker, onTradeComplete }: TradeBarProps) {
   const t = useT();
   const profile = useMarketProfile();
   const sym = profile.currency_symbol;
@@ -59,7 +63,19 @@ export default function TradeBar({ selectedTicker, onTradeComplete }: TradeBarPr
   const lotSize = profile.lot_size;
   const isLot = lotSize > 1;
   const [orderType, setOrderType] = useState<OrderType>('market');
-  const [ticker, setTicker] = useState('');
+  // Manual ticker edits live in a draft that is only valid for the CURRENT
+  // selection. Any selection change invalidates the draft during render
+  // (React's "adjusting state when a prop changes" pattern), so a stale draft
+  // can never resurface after selecting away and back — while the input node
+  // (and focus) is preserved without a prop-to-state synchronization effect.
+  const [tickerDraft, setTickerDraft] = useState<string | null>(null);
+  const [prevSelection, setPrevSelection] = useState<string | null>(selectedTicker);
+  if (selectedTicker !== prevSelection) {
+    setPrevSelection(selectedTicker);
+    setTickerDraft(null);
+  }
+  const ticker = tickerDraft ?? selectedTicker ?? '';
+  const setTicker = (value: string) => setTickerDraft(value);
   const [qty, setQty] = useState('');
   const [limitPrice, setLimitPrice] = useState('');
   const [stopPrice, setStopPrice] = useState('');
@@ -71,11 +87,6 @@ export default function TradeBar({ selectedTicker, onTradeComplete }: TradeBarPr
 
   // Shared SWR key with Header.tsx — trade revalidates header too
   const { data: portfolio, mutate } = useSWR<PortfolioResponse>('/api/portfolio/', fetcher);
-
-  // Auto-fill ticker from parent selection (D-12)
-  useEffect(() => {
-    if (selectedTicker) setTicker(selectedTicker);
-  }, [selectedTicker]);
 
   // Auto-dismiss the fill toast
   useEffect(() => {

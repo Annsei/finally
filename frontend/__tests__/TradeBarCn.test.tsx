@@ -33,7 +33,6 @@ const mockPortfolio = {
   ],
 };
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 const mockMutate = jest.fn().mockImplementation(async (fn: any) => {
   if (typeof fn === 'function') await fn(mockPortfolio);
 });

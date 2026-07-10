@@ -301,6 +301,10 @@ describe('strategies page helpers (P2 §8)', () => {
     expect(validateStrategyForm('ok', 'NVDA', rows, noExits, fixed('0'))).toBe('strategy.errSizing');
     expect(validateStrategyForm('ok', 'NVDA', rows, noExits, fixed('-1'))).toBe('strategy.errSizing');
     expect(validateStrategyForm('ok', 'NVDA', rows, noExits, fixed('0.5'))).toBeNull();
+    expect(validateStrategyForm('ok', '600519', rows, noExits, fixed('50'), 100)).toBe(
+      'strategy.errWholeLot'
+    );
+    expect(validateStrategyForm('ok', '600519', rows, noExits, fixed('100'), 100)).toBeNull();
     expect(validateStrategyForm('ok', 'NVDA', rows, noExits, pct(''))).toBe('strategy.errSizing');
     expect(validateStrategyForm('ok', 'NVDA', rows, noExits, pct('0'))).toBe('strategy.errSizing');
     expect(validateStrategyForm('ok', 'NVDA', rows, noExits, pct('101'))).toBe('strategy.errSizing');
@@ -552,5 +556,7 @@ describe('StrategiesPage (P2 §8)', () => {
     expect(row.textContent).toContain('+¥1,234.50');
     expect(screen.getByTestId('strategy-status-s1').textContent).toBe('草稿');
     expect(screen.getByTestId('template-card-dip_buyer').textContent).toContain('抄底');
+    expect((screen.getByLabelText('代码') as HTMLInputElement).value).toBe('600519');
+    expect((screen.getByTestId('sizing-qty') as HTMLInputElement).value).toBe('100');
   });
 });

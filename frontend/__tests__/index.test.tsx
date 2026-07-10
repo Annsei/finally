@@ -9,7 +9,7 @@
  * Test 9 (D-01): Three distinct layout columns are present.
  */
 import React from 'react';
-import { render, act } from '@testing-library/react';
+import { render, act, screen } from '@testing-library/react';
 
 jest.mock('@/hooks/usePriceStream', () => ({
   usePriceStream: jest.fn(),
@@ -58,7 +58,7 @@ jest.mock('@/components/TradeBar', () => ({
 
 jest.mock('@/components/ChatPanel', () => ({
   __esModule: true,
-  default: ({ open, onToggle, onNewTrade }: { open: boolean; onToggle: () => void; onNewTrade?: () => void }) => (
+  default: ({ open, onNewTrade }: { open: boolean; onToggle: () => void; onNewTrade?: () => void }) => (
     <div
       data-testid="chat-panel"
       data-open={String(open)}
@@ -84,14 +84,41 @@ describe('Dashboard index page', () => {
     expect(root.className).toContain('bg-terminal-bg');
   });
 
-  it('Test 5b (M5.1): layout locks to the viewport — page never scrolls, panels do', () => {
-    // min-h-screen let long chat history stretch the whole page, defeating
-    // ChatPanel's internal overflow-y-auto (user report: 聊天框大小需固定).
+  it('Test 5b (FE-06): narrow viewport scrolls naturally; md+ locks internal panels', () => {
     const { container } = render(<Dashboard />);
     const root = container.firstChild as HTMLElement;
-    expect(root.className).toContain('h-screen');
-    expect(root.className).toContain('overflow-hidden');
-    expect(root.className).not.toContain('min-h-screen');
+    expect(root.className).toContain('min-h-screen');
+    expect(root.className).toContain('md:h-screen');
+    expect(root.className).toContain('md:overflow-hidden');
+    expect(root.classList.contains('h-screen')).toBe(false);
+    expect(root.classList.contains('overflow-hidden')).toBe(false);
+
+    const layout = screen.getByTestId('dashboard-layout');
+    expect(layout.className).toContain('flex-col');
+    expect(layout.className).toContain('md:flex-row');
+    expect(layout.className).toContain('gap-2');
+    expect(layout.className).toContain('lg:gap-4');
+  });
+
+  it('Test 5c (FE-06): 768/1280/1600 breakpoint classes keep all regions reachable', () => {
+    const { getByTestId } = render(<Dashboard />);
+    const watchlist = getByTestId('watchlist-panel');
+    expect(watchlist.className).toContain('w-full');
+    expect(watchlist.className).toContain('md:w-56');
+    expect(watchlist.className).toContain('xl:w-52');
+    expect(watchlist.className).toContain('2xl:w-64');
+
+    const main = getByTestId('dashboard-main');
+    expect(main.className).toContain('w-full');
+    expect(main.className).toContain('min-w-0');
+    expect(main.className).toContain('md:overflow-auto');
+
+    const chat = getByTestId('responsive-chat-dock');
+    expect(chat.className).toContain('fixed');
+    expect(chat.className).toContain('md:w-96');
+    expect(chat.className).toContain('xl:static');
+    expect(chat.className).toContain('xl:w-72');
+    expect(chat.className).toContain('2xl:w-80');
   });
 
   it('Test 6: all 6 Phase 4 panels mount once a ticker is auto-selected', () => {

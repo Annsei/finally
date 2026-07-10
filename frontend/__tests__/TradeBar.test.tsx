@@ -40,7 +40,6 @@ const mockPortfolio = {
 // mockMutate: invokes the async mutator and re-throws errors so the caller's
 // catch block fires. SWR v2 applies rollback internally AND re-throws — our mock
 // matches that behavior so TradeBar.handleTrade can setError on failure.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 const mockMutate = jest.fn().mockImplementation(async (fn: any) => {
   if (typeof fn === 'function') {
     await fn(mockPortfolio); // let any throw propagate to the caller
@@ -248,6 +247,36 @@ describe('TradeBar', () => {
     expect(tickerInput.value).toBe('AAPL');
 
     rerender(<TradeBar selectedTicker="MSFT" />);
+    expect(tickerInput.value).toBe('MSFT');
+  });
+
+  it('Test T-4-stale: re-selecting a ticker discards a stale manual draft from an earlier selection', () => {
+    // Select AAPL → manually type MSFT → select GOOGL → select AAPL again:
+    // the MSFT draft belongs to the first AAPL selection and must NOT revive.
+    const { getByLabelText, rerender } = render(<TradeBar selectedTicker="AAPL" />);
+    const tickerInput = getByLabelText('Ticker') as HTMLInputElement;
+    expect(tickerInput.value).toBe('AAPL');
+
+    fireEvent.change(tickerInput, { target: { value: 'MSFT' } });
+    expect(tickerInput.value).toBe('MSFT');
+
+    rerender(<TradeBar selectedTicker="GOOGL" />);
+    expect(tickerInput.value).toBe('GOOGL');
+
+    rerender(<TradeBar selectedTicker="AAPL" />);
+    expect(tickerInput.value).toBe('AAPL');
+  });
+
+  it('Test T-4-draft: manual ticker edits still apply within the current selection', () => {
+    const { getByLabelText, rerender } = render(<TradeBar selectedTicker="AAPL" />);
+    const tickerInput = getByLabelText('Ticker') as HTMLInputElement;
+
+    fireEvent.change(tickerInput, { target: { value: 'MSFT' } });
+    expect(tickerInput.value).toBe('MSFT');
+
+    // Re-render with the SAME selection (e.g. unrelated parent state change):
+    // the in-selection draft survives.
+    rerender(<TradeBar selectedTicker="AAPL" />);
     expect(tickerInput.value).toBe('MSFT');
   });
 

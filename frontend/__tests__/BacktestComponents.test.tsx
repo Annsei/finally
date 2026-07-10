@@ -86,7 +86,7 @@ describe('signed / pnlClass helpers (single home in StatCard)', () => {
 
 describe('StatsGrid', () => {
   it('renders all eight stat cards with the panel formatting', () => {
-    render(<StatsGrid stats={stats} t={t} />);
+    render(<StatsGrid stats={stats} t={t} currencySymbol="$" locale="en-US" />);
     expect(screen.getByTestId('backtest-return').textContent).toBe('+4.31%');
     expect(screen.getByTestId('backtest-return').className).toContain('text-terminal-up');
     // Buy & hold is negative → down colour
@@ -103,7 +103,12 @@ describe('StatsGrid', () => {
 
   it('renders em-dashes for null win rate and profit factor', () => {
     render(
-      <StatsGrid stats={{ ...stats, win_rate: null, profit_factor: null, round_trips: 0 }} t={t} />
+      <StatsGrid
+        stats={{ ...stats, win_rate: null, profit_factor: null, round_trips: 0 }}
+        t={t}
+        currencySymbol="$"
+        locale="en-US"
+      />
     );
     expect(screen.getAllByText('—')).toHaveLength(2);
   });
@@ -151,13 +156,15 @@ describe('TradesBlotter', () => {
   ];
 
   it('renders one row per trade with reasons, P&L, and direction colours', () => {
-    render(<TradesBlotter trades={trades} t={t} />);
+    render(
+      <TradesBlotter trades={trades} t={t} currencySymbol="$" locale="en-US" lotSize={1} />
+    );
     const table = screen.getByTestId('backtest-trades');
     expect(table.querySelectorAll('tbody tr')).toHaveLength(2);
     expect(table.textContent).toContain('entry');
     expect(table.textContent).toContain('take profit');
     expect(table.textContent).toContain('$186.10');
-    expect(table.textContent).toContain('+46.50');
+    expect(table.textContent).toContain('+$46.50');
     const buyCell = screen.getByText('buy');
     expect(buyCell.className).toContain('text-terminal-up');
     const sellCell = screen.getByText('sell');
@@ -165,14 +172,31 @@ describe('TradesBlotter', () => {
   });
 
   it('renders — for buy rows without P&L', () => {
-    render(<TradesBlotter trades={[trades[0]]} t={t} />);
+    render(
+      <TradesBlotter
+        trades={[trades[0]]}
+        t={t}
+        currencySymbol="$"
+        locale="en-US"
+        lotSize={1}
+      />
+    );
     expect(screen.getByText('—').className).toContain('text-terminal-muted');
   });
 
   it('cn prop path: currencySymbol/locale render ¥ prices and localized dates', () => {
-    render(<TradesBlotter trades={trades} t={makeT('zh')} currencySymbol="¥" locale="zh-CN" />);
+    render(
+      <TradesBlotter
+        trades={trades}
+        t={makeT('zh')}
+        currencySymbol="¥"
+        locale="zh-CN"
+        lotSize={100}
+      />
+    );
     const table = screen.getByTestId('backtest-trades');
     expect(table.textContent).toContain('¥186.10');
+    expect(table.textContent).toContain('+¥46.50');
     expect(table.textContent).not.toContain('$');
     expect(table.textContent).toContain(
       new Date(trades[0].time * 1000).toLocaleDateString('zh-CN', {
@@ -196,7 +220,9 @@ describe('EquityChart', () => {
   ];
 
   it('mounts a chart with the $10k BaselineSeries and dashed buy&hold line, then sets both datasets', () => {
-    render(<EquityChart equity={equity} baseline={baseline} colors={equityColors(false)} />);
+    render(
+      <EquityChart equity={equity} baseline={baseline} colors={equityColors(false)} baseValue={10000} />
+    );
     expect(screen.getByTestId('backtest-chart')).toBeInTheDocument();
 
     const mc = jest.mocked(createChart);

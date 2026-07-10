@@ -3,8 +3,7 @@
  *
  * Test 1: chrome is complete — Header, NewsTicker, main children, ChatPanel
  *         dock, StatusBar
- * Test 2: root uses the viewport-lock pattern (h-screen overflow-hidden
- *         flex flex-col bg-terminal-bg text-terminal-text, no min-h-screen)
+ * Test 2: narrow screens scroll naturally; md+ uses the viewport-lock pattern
  * Test 3: chat dock width follows uiStore.chatOpen (w-80 ↔ w-8) and
  *         onToggle writes back to the store
  * Test 4: onNewTrade revalidates the same key set as the desk's
@@ -78,17 +77,24 @@ describe('AppShell (P1)', () => {
     expect(screen.getByTestId('page-content').closest('main')).toBeNull();
   });
 
-  it('Test 2: root locks to the viewport — page never scrolls, panels do', () => {
+  it('Test 2: viewport contract scrolls on narrow screens and locks panels at md+', () => {
     const { container } = render(
       <AppShell>
         <div />
       </AppShell>
     );
     const root = container.firstChild as HTMLElement;
-    for (const cls of ['h-screen', 'overflow-hidden', 'flex', 'flex-col', 'bg-terminal-bg', 'text-terminal-text']) {
+    for (const cls of ['min-h-screen', 'md:h-screen', 'md:overflow-hidden', 'flex', 'flex-col', 'bg-terminal-bg', 'text-terminal-text']) {
       expect(root.className).toContain(cls);
     }
-    expect(root.className).not.toContain('min-h-screen');
+    expect(root.classList.contains('h-screen')).toBe(false);
+    expect(root.classList.contains('overflow-hidden')).toBe(false);
+
+    const layout = screen.getByTestId('app-shell-layout');
+    expect(layout.className).toContain('flex-col');
+    expect(layout.className).toContain('md:flex-row');
+    expect(layout.className).toContain('p-2');
+    expect(layout.className).toContain('lg:p-4');
   });
 
   it('Test 3: chat dock reads uiStore.chatOpen (w-80/w-8) and onToggle writes it back', () => {
@@ -99,8 +105,15 @@ describe('AppShell (P1)', () => {
     );
 
     const dock = screen.getByTestId('chat-panel').parentElement as HTMLElement;
+    expect(dock.tagName).toBe('ASIDE');
+    expect(dock.getAttribute('aria-label')).toBe('FinAlly AI chat');
     expect(screen.getByTestId('chat-panel').getAttribute('data-open')).toBe('true');
     expect(dock.className).toContain('w-80');
+    expect(dock.className).toContain('fixed');
+    expect(dock.className).toContain('md:w-96');
+    expect(dock.className).toContain('xl:static');
+    expect(dock.className).toContain('xl:w-72');
+    expect(dock.className).toContain('2xl:w-80');
 
     act(() => {
       screen.getByTestId('stub-toggle').click();
@@ -108,6 +121,8 @@ describe('AppShell (P1)', () => {
     expect(useUiStore.getState().chatOpen).toBe(false);
     expect(screen.getByTestId('chat-panel').getAttribute('data-open')).toBe('false');
     expect(dock.className).toContain('w-8');
+    expect(dock.className).toContain('w-10');
+    expect(dock.className).toContain('xl:w-8');
     expect(dock.className).not.toContain('w-80');
   });
 

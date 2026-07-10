@@ -32,13 +32,25 @@ function formatEventTime(ts: number, locale: string): string {
   return isNaN(d.getTime()) ? '' : d.toLocaleString(locale, { hour12: false });
 }
 
-export default function EventArchive({ prefix, ticker, emptyKey, pageSize = 50 }: Props) {
+export default function EventArchive(props: Props) {
+  const pageSize = props.pageSize ?? 50;
+  const requestKey = `/api/market/events/archive?limit=${pageSize}${
+    props.ticker ? `&ticker=${encodeURIComponent(props.ticker)}` : ''
+  }`;
+
+  // A key change remounts the stateful pager. This is important on
+  // /symbol?c=A -> /symbol?c=B, where Next reuses the same page component.
+  return <EventArchivePage key={requestKey} {...props} pageSize={pageSize} requestKey={requestKey} />;
+}
+
+function EventArchivePage({
+  prefix,
+  emptyKey,
+  requestKey,
+}: Props & { pageSize: number; requestKey: string }) {
   const t = useT();
   const profile = useMarketProfile();
-  const key = `/api/market/events/archive?limit=${pageSize}${
-    ticker ? `&ticker=${encodeURIComponent(ticker)}` : ''
-  }`;
-  const { data } = useSWR<MarketEventsArchiveResponse>(key, fetcher);
+  const { data } = useSWR<MarketEventsArchiveResponse>(requestKey, fetcher);
 
   // Older pages accumulate locally; the SWR first page stays authoritative for
   // the newest window. Dedupe by id in case a revalidated first page slides.
@@ -83,7 +95,7 @@ export default function EventArchive({ prefix, ticker, emptyKey, pageSize = 50 }
       // Cursor = oldest timestamp across the merged list, so paging continues
       // past everything already shown even after first-page/older merges.
       const before = Math.min(...events.map((e) => e.timestamp));
-      const page: MarketEventsArchiveResponse = await fetcher(`${key}&before=${before}`);
+      const page: MarketEventsArchiveResponse = await fetcher(`${requestKey}&before=${before}`);
       setOlder((prev) => [...prev, ...page.events]);
       setOlderHasMore(page.has_more);
     } catch {

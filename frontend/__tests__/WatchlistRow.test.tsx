@@ -7,6 +7,7 @@
  * Test 5: After 500ms (fake timers), flash class is removed from price cell
  * Test 6: isSelected=true → row has border-l-2, border-terminal-accent, bg-terminal-surface
  * Test 7: Clicking the row calls onSelect exactly once
+ * Test 8: Enter/Space activate the focused row
  */
 import React from 'react';
 import { render, act, fireEvent } from '@testing-library/react';
@@ -61,6 +62,15 @@ describe('WatchlistRow', () => {
 
   afterEach(() => {
     jest.useRealTimers();
+  });
+
+  it('Test 8: focused row supports Enter and Space selection', () => {
+    const onSelect = jest.fn();
+    const { row } = renderRow({ onSelect });
+    row.focus();
+    fireEvent.keyDown(row, { key: 'Enter' });
+    fireEvent.keyDown(row, { key: ' ' });
+    expect(onSelect).toHaveBeenCalledTimes(2);
   });
 
   it('Test 1: direction up → price cell gains class animate-flash-up', () => {

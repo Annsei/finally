@@ -214,6 +214,15 @@ describe('MarketPage (P1 §4)', () => {
     expect(push).toHaveBeenCalledWith({ pathname: '/symbol', query: { c: 'AAPL' } });
   });
 
+  it('row Enter key navigates to the symbol detail', () => {
+    mockData({ quotes: [quote('AAPL')] });
+    render(<MarketPage />);
+    const row = screen.getByTestId('market-row-AAPL');
+    row.focus();
+    fireEvent.keyDown(row, { key: 'Enter' });
+    expect(push).toHaveBeenCalledWith({ pathname: '/symbol', query: { c: 'AAPL' } });
+  });
+
   it('heatmap tiles carry direction classes, clamped data-heat, and sector groups', () => {
     mockData({
       quotes: [

@@ -93,6 +93,24 @@ describe('Header component', () => {
     expect(dashes.length).toBeGreaterThanOrEqual(2);
   });
 
+  it('Test 5b (FE-06): header navigation and metrics stay reachable on narrow viewports', () => {
+    render(<Header />);
+    const header = screen.getByTestId('responsive-header');
+    expect(header.className).toContain('flex-wrap');
+    expect(header.className).toContain('xl:flex-nowrap');
+
+    const nav = screen.getByTestId('primary-nav');
+    expect(nav.className).toContain('w-full');
+    expect(nav.className).toContain('overflow-x-auto');
+    expect(nav.className).toContain('xl:w-auto');
+    expect(screen.getByTestId('nav-developers')).toBeInTheDocument();
+
+    const metrics = screen.getByTestId('header-metrics');
+    expect(metrics.className).toContain('w-full');
+    expect(metrics.className).toContain('overflow-x-auto');
+    expect(metrics.className).toContain('xl:overflow-visible');
+  });
+
   // ---------------------------------------------------------------------------
   // Batch-2 realism: Day P&L = Σ qty × (price − prev_close) over positions
   // ---------------------------------------------------------------------------

@@ -52,7 +52,12 @@ export default function Leaderboard() {
     try {
       const res = await fetch('/api/season/reset', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          // Dedupes double-submits server-side. Event handler only, so
+          // crypto.randomUUID() needs no SSR guard.
+          'Idempotency-Key': crypto.randomUUID(),
+        },
         body: JSON.stringify({ confirm: true }),
       });
       if (!res.ok) {

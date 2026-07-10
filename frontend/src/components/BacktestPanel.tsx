@@ -18,6 +18,7 @@ import Link from 'next/link';
 import { useUiStore } from '@/stores/uiStore';
 import { US_PROFILE, type MarketProfile } from '@/lib/marketProfile';
 import { makeT, langFromLocale, type TFunction } from '@/lib/i18n';
+import { formatMoney } from '@/lib/format';
 import EquityChart, { equityColors } from '@/components/backtest/EquityChart';
 import StatsGrid from '@/components/backtest/StatsGrid';
 import RunsSummaryStrip from '@/components/backtest/RunsSummaryStrip';
@@ -41,10 +42,19 @@ export default function BacktestPanel({ profile = US_PROFILE }: { profile?: Mark
   const t: TFunction = makeT(langFromLocale(profile.locale));
   const sym = profile.currency_symbol;
   const chartColors = equityColors(profile.up_is_red);
-  const [ticker, setTicker] = useState('AAPL');
-  const [triggerType, setTriggerType] = useState<RuleTriggerType>('day_change_pct_below');
-  const [threshold, setThreshold] = useState('-2');
-  const [qty, setQty] = useState('5');
+  // RulesTable activates this tab after writing a one-shot prefill. Capture the
+  // handoff in the state initializers so the form mounts ready to use without a
+  // second, effect-driven render.
+  const [initialPrefill] = useState(() => useUiStore.getState().backtestPrefill);
+  const defaultTicker = Object.keys(profile.names)[0] ?? 'AAPL';
+  const [ticker, setTicker] = useState(initialPrefill?.ticker ?? defaultTicker);
+  const [triggerType, setTriggerType] = useState<RuleTriggerType>(
+    initialPrefill?.trigger_type ?? 'day_change_pct_below'
+  );
+  const [threshold, setThreshold] = useState(String(initialPrefill?.threshold ?? -2));
+  const [qty, setQty] = useState(
+    String(initialPrefill?.quantity ?? (profile.lot_size > 1 ? profile.lot_size : 5))
+  );
   const [takeProfit, setTakeProfit] = useState('5');
   const [stopLoss, setStopLoss] = useState('3');
   const [days, setDays] = useState('30');
@@ -60,20 +70,14 @@ export default function BacktestPanel({ profile = US_PROFILE }: { profile?: Mark
   const [saved, setSaved] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
-  const backtestPrefill = useUiStore((s) => s.backtestPrefill);
   const setBacktestPrefill = useUiStore((s) => s.setBacktestPrefill);
 
-  // One-shot handoff from RulesTable's "test" button: apply, then clear.
+  // The handoff is consumed by the initializers above; only the external store
+  // cleanup belongs in an effect.
   useEffect(() => {
-    if (!backtestPrefill) return;
-    setTicker(backtestPrefill.ticker);
-    setTriggerType(backtestPrefill.trigger_type);
-    setThreshold(String(backtestPrefill.threshold));
-    setQty(String(backtestPrefill.quantity));
-    setResult(null);
-    setError(null);
+    if (!initialPrefill) return;
     setBacktestPrefill(null);
-  }, [backtestPrefill, setBacktestPrefill]);
+  }, [initialPrefill, setBacktestPrefill]);
 
   const isPriceTrigger = triggerType === 'price_above' || triggerType === 'price_below';
 
@@ -86,7 +90,11 @@ export default function BacktestPanel({ profile = US_PROFILE }: { profile?: Mark
     const slNum = stopLoss.trim() === '' ? null : Number(stopLoss);
 
     setError(null);
-    if (!normalizedTicker || !/^[A-Z]+$/.test(normalizedTicker)) {
+    const validTicker =
+      profile.market === 'cn'
+        ? /^\d{6}$/.test(normalizedTicker)
+        : /^[A-Z]{1,10}$/.test(normalizedTicker);
+    if (!validTicker) {
       setError(t('backtest.errTicker'));
       return;
     }
@@ -96,6 +104,13 @@ export default function BacktestPanel({ profile = US_PROFILE }: { profile?: Mark
     }
     if (!isFinite(qtyNum) || qtyNum <= 0) {
       setError(t('backtest.errQty'));
+      return;
+    }
+    if (
+      profile.lot_size > 1 &&
+      (!Number.isInteger(qtyNum) || qtyNum % profile.lot_size !== 0)
+    ) {
+      setError(t('backtest.errWholeLot', { lot: profile.lot_size }));
       return;
     }
     if (!Number.isInteger(daysNum) || daysNum < 5 || daysNum > 120) {
@@ -362,18 +377,29 @@ export default function BacktestPanel({ profile = US_PROFILE }: { profile?: Mark
       {result && stats && (
         <div data-testid="backtest-stats" className="mt-3">
           {/* Stat cards */}
-          <StatsGrid stats={stats} t={t} />
+          <StatsGrid
+            stats={stats}
+            t={t}
+            currencySymbol={profile.currency_symbol}
+            locale={profile.locale}
+          />
 
           {(stats.rejections.insufficient_cash > 0 || stats.commission_paid > 0) && (
             <p className="mt-1.5 text-[10px] text-terminal-muted">
               {stats.rejections.insufficient_cash > 0 && (
                 <span data-testid="backtest-rejections" className="text-terminal-amber mr-3">
-                  ⚠ {stats.rejections.insufficient_cash} entr
-                  {stats.rejections.insufficient_cash === 1 ? 'y' : 'ies'} skipped — insufficient cash
+                  ⚠ {t('backtest.insufficientCash', { n: stats.rejections.insufficient_cash })}
                 </span>
               )}
               {stats.commission_paid > 0 && (
-                <span>Commission paid: ${stats.commission_paid.toFixed(2)}</span>
+                <span>
+                  {t('backtest.commissionPaid', {
+                    amount: formatMoney(stats.commission_paid, {
+                      currency_symbol: profile.currency_symbol,
+                      locale: profile.locale,
+                    }),
+                  })}
+                </span>
               )}
             </p>
           )}
@@ -387,11 +413,20 @@ export default function BacktestPanel({ profile = US_PROFILE }: { profile?: Mark
               equity={result.equity_curve}
               baseline={result.baseline_curve}
               colors={chartColors}
+              baseValue={profile.seed_cash}
             />
           </div>
 
           {/* Trades blotter */}
-          {result.trades.length > 0 && <TradesBlotter trades={result.trades} t={t} />}
+          {result.trades.length > 0 && (
+            <TradesBlotter
+              trades={result.trades}
+              t={t}
+              currencySymbol={profile.currency_symbol}
+              locale={profile.locale}
+              lotSize={profile.lot_size}
+            />
+          )}
 
           {/* Save to Run Library (P2 §8) — appended below the existing result
               DOM so the panel's original markup stays untouched. */}

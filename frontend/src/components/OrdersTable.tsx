@@ -6,18 +6,21 @@
  */
 import useSWR from 'swr';
 import { fetcher } from '@/lib/fetcher';
-import { formatQuantity } from '@/lib/format';
+import { formatShares } from '@/lib/format';
+import { useMarketProfile } from '@/lib/marketProfile';
 import SymbolLink from '@/components/SymbolLink';
 import type { TradesResponse } from '@/types/market';
 import { useT } from '@/lib/i18n';
 
-function formatTime(iso: string): string {
+function formatTime(iso: string, locale: string): string {
   const d = new Date(iso);
-  return isNaN(d.getTime()) ? iso : d.toLocaleTimeString('en-US', { hour12: false });
+  return isNaN(d.getTime()) ? iso : d.toLocaleTimeString(locale, { hour12: false });
 }
 
 export default function OrdersTable() {
   const t = useT();
+  const profile = useMarketProfile();
+  const sym = profile.currency_symbol;
   // 10s polling — background limit-order fills appear without user action
   const { data } = useSWR<TradesResponse>('/api/portfolio/trades', fetcher, {
     refreshInterval: 10_000,
@@ -47,48 +50,52 @@ export default function OrdersTable() {
         </tr>
       </thead>
       <tbody>
-        {trades.map((t) => (
+        {trades.map((trade) => (
           <tr
-            key={t.id}
-            data-testid={`order-row-${t.id}`}
+            key={trade.id}
+            data-testid={`order-row-${trade.id}`}
             className="border-b border-terminal-border hover:bg-terminal-surface/50"
           >
             <td className="py-1 pl-1 tabular-nums text-terminal-muted">
-              {formatTime(t.executed_at)}
+              {formatTime(trade.executed_at, profile.locale)}
             </td>
             <td
               className={`py-1 font-semibold uppercase ${
-                t.side === 'buy' ? 'text-terminal-up' : 'text-terminal-down'
+                trade.side === 'buy' ? 'text-terminal-up' : 'text-terminal-down'
               }`}
             >
-              {t.side}
+              {profile.locale.toLowerCase().startsWith('zh')
+                ? trade.side === 'buy'
+                  ? t('analytics.buy')
+                  : t('analytics.sell')
+                : trade.side}
             </td>
             <td className="py-1 font-semibold text-terminal-text">
-              <SymbolLink code={t.ticker} />
+              <SymbolLink code={trade.ticker} />
             </td>
             <td className="text-right py-1 tabular-nums text-terminal-text">
-              {formatQuantity(t.quantity)}
+              {formatShares(trade.quantity, profile)}
             </td>
             <td className="text-right py-1 tabular-nums text-terminal-text">
-              ${t.price.toFixed(2)}
+              {sym}{trade.price.toFixed(2)}
             </td>
             <td className="text-right py-1 tabular-nums text-terminal-text">
-              ${(t.quantity * t.price).toFixed(2)}
+              {sym}{(trade.quantity * trade.price).toFixed(2)}
             </td>
             <td className="text-right py-1 tabular-nums text-terminal-muted">
-              {t.commission ? `$${t.commission.toFixed(2)}` : '—'}
+              {trade.commission ? `${sym}${trade.commission.toFixed(2)}` : '—'}
             </td>
             <td
               className={`text-right py-1 pr-1 tabular-nums ${
-                t.realized_pnl == null
+                trade.realized_pnl == null
                   ? 'text-terminal-muted'
-                  : t.realized_pnl >= 0
+                  : trade.realized_pnl >= 0
                     ? 'text-terminal-up'
                     : 'text-terminal-down'
               }`}
             >
-              {t.realized_pnl != null
-                ? `${t.realized_pnl >= 0 ? '+' : '-'}$${Math.abs(t.realized_pnl).toFixed(2)}`
+              {trade.realized_pnl != null
+                ? `${trade.realized_pnl >= 0 ? '+' : '-'}${sym}${Math.abs(trade.realized_pnl).toFixed(2)}`
                 : '—'}
             </td>
           </tr>

@@ -73,12 +73,12 @@ export default function WatchlistRow({
     return () => {
       if (flashTimeoutRef.current) clearTimeout(flashTimeoutRef.current);
     };
-  }, [priceUpdate?.direction, priceUpdate?.timestamp]);
+  }, [priceUpdate]);
 
   // `group` enables the hover-reveal remove control in the trailing cell
   const rowClass = isSelected
-    ? 'group border-l-2 border-terminal-accent bg-terminal-surface cursor-pointer'
-    : 'group border-l-2 border-transparent cursor-pointer hover:bg-terminal-surface/50';
+    ? 'group border-l-2 border-terminal-accent bg-terminal-surface cursor-pointer focus:outline focus:outline-1 focus:outline-terminal-accent'
+    : 'group border-l-2 border-transparent cursor-pointer hover:bg-terminal-surface/50 focus:outline focus:outline-1 focus:outline-terminal-accent';
 
   // Day change vs previous close — what real platforms color quotes by.
   // Flash animation stays tick-driven; steady-state color is day-driven.
@@ -92,7 +92,20 @@ export default function WatchlistRow({
   const arrow = dayPct == null || dayPct === 0 ? '' : dayPct > 0 ? '▲' : '▼';
 
   return (
-    <tr className={rowClass} onClick={onSelect}>
+    <tr
+      className={rowClass}
+      onClick={onSelect}
+      onKeyDown={(event) => {
+        if (event.target !== event.currentTarget) return;
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          onSelect();
+        }
+      }}
+      tabIndex={0}
+      aria-selected={isSelected}
+      aria-label={`${ticker}${name ? ` ${name}` : ''}`}
+    >
       <td className="py-1 pl-1 font-semibold text-terminal-text">
         <span className="flex items-center gap-1">
           <span>{ticker}</span>

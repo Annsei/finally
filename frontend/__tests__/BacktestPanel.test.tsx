@@ -31,6 +31,20 @@ import { createChart, BaselineSeries, LineSeries } from 'lightweight-charts';
 import BacktestPanel from '@/components/BacktestPanel';
 import { useUiStore } from '@/stores/uiStore';
 import type { BacktestResponse } from '@/types/market';
+import type { MarketProfile } from '@/lib/marketProfile';
+
+const CN_PROFILE: MarketProfile = {
+  market: 'cn',
+  currency_symbol: '¥',
+  locale: 'zh-CN',
+  lot_size: 100,
+  t_plus: 1,
+  up_is_red: true,
+  seed_cash: 100000,
+  midday_break: true,
+  names: { '600519': '贵州茅台' },
+  price_limit_pct: { '600519': 10 },
+};
 
 const fixture: BacktestResponse = {
   config: {
@@ -150,7 +164,7 @@ describe('BacktestPanel', () => {
     // Trades blotter
     const trades = screen.getByTestId('backtest-trades');
     expect(trades.textContent).toContain('take profit');
-    expect(trades.textContent).toContain('+46.50');
+    expect(trades.textContent).toContain('+$46.50');
     // Single run → no Monte Carlo strip
     expect(screen.queryByTestId('backtest-runs-summary')).not.toBeInTheDocument();
   });
@@ -232,5 +246,29 @@ describe('BacktestPanel', () => {
     // The POST body carries runs: 30
     const body = JSON.parse((global.fetch as jest.Mock).mock.calls[0][1].body as string);
     expect(body.runs).toBe(30);
+  });
+
+  it('CN defaults to a configured ticker and whole-lot quantity', () => {
+    render(<BacktestPanel profile={CN_PROFILE} />);
+    expect((screen.getByLabelText('回测代码') as HTMLInputElement).value).toBe('600519');
+    expect((screen.getByLabelText('回测数量') as HTMLInputElement).value).toBe('100');
+
+    fireEvent.change(screen.getByLabelText('回测数量'), { target: { value: '50' } });
+    runBacktest();
+    expect(screen.getByTestId('backtest-error').textContent).toContain('100');
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  it('CN equity chart anchors at the profile seed cash', async () => {
+    (global.fetch as jest.Mock).mockResolvedValueOnce({ ok: true, json: async () => fixture });
+    render(<BacktestPanel profile={CN_PROFILE} />);
+    await act(async () => runBacktest());
+    await waitFor(() => expect(screen.getByTestId('backtest-stats')).toBeInTheDocument());
+
+    const chart = jest.mocked(createChart).mock.results[0].value as { addSeries: jest.Mock };
+    expect(chart.addSeries).toHaveBeenCalledWith(
+      BaselineSeries,
+      expect.objectContaining({ baseValue: { type: 'price', price: 100000 } })
+    );
   });
 });

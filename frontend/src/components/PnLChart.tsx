@@ -1,8 +1,8 @@
 /**
  * PnLChart.tsx — portfolio value over time (FRONTEND_REALISM.md §2.4)
  *
- * BaselineSeries anchored at the $10,000 seed cash: green above the baseline,
- * red below — profit/loss is visible at a glance. Range selector filters the
+ * BaselineSeries anchored at the active market's seed cash: green above the
+ * baseline, red below — profit/loss is visible at a glance. Range selector filters the
  * snapshots client-side, using the LAST snapshot as the "now" reference so
  * rendering is deterministic (no wall-clock dependency).
  */
@@ -15,7 +15,7 @@ import type { PortfolioHistoryResponse } from '@/types/market';
 import { useMarketProfile, directionColors } from '@/lib/marketProfile';
 import { useT } from '@/lib/i18n';
 
-// Portfolio baseline — the seed cash every session starts from (PLAN.md §7)
+// US fallback baseline. Runtime charts use profile.seed_cash (CN = 100,000).
 export const PNL_BASELINE = 10000;
 
 type Range = '1H' | 'TODAY' | 'ALL';
@@ -73,8 +73,6 @@ export default function PnLChart() {
       layout: {
         background: { color: 'transparent' },
         textColor: '#8b949e',
-        // Attribution lives in the README — the logo ghosts over dark charts
-        attributionLogo: false,
       },
       grid: {
         vertLines: { color: '#30363d' },
@@ -91,9 +89,9 @@ export default function PnLChart() {
       },
     });
 
-    // v5 API: addSeries(BaselineSeries, options) — green above $10k, red below
+    // v5 API: addSeries(BaselineSeries, options) — market seed is the baseline
     const series = chart.addSeries(BaselineSeries, {
-      baseValue: { type: 'price', price: PNL_BASELINE },
+      baseValue: { type: 'price', price: profile.seed_cash },
       topLineColor: upHex,
       topFillColor1: upFill1,
       topFillColor2: upFill2,
@@ -116,6 +114,7 @@ export default function PnLChart() {
   // Recolor when the market's direction colours resolve/change after mount.
   useEffect(() => {
     seriesRef.current?.applyOptions({
+      baseValue: { type: 'price', price: profile.seed_cash },
       topLineColor: upHex,
       topFillColor1: upFill1,
       topFillColor2: upFill2,
@@ -123,7 +122,7 @@ export default function PnLChart() {
       bottomFillColor1: downFill1,
       bottomFillColor2: downFill2,
     });
-  }, [upHex, downHex, upFill1, upFill2, downFill1, downFill2]);
+  }, [profile.seed_cash, upHex, downHex, upFill1, upFill2, downFill1, downFill2]);
 
   // Data: update chart when SWR data arrives/refreshes or the range changes.
   // Real recorded_at timestamps; snapshots are taken every 30s plus after

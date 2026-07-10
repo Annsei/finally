@@ -186,6 +186,15 @@ describe('RunsPage (P2 §8)', () => {
     expect(push).toHaveBeenCalledWith({ pathname: '/run', query: { id: 'r1' } });
   });
 
+  it('row Enter key routes to /run?id=…', () => {
+    mockData({ runs: [run('r1')] });
+    render(<RunsPage />);
+    const row = screen.getByTestId('run-row-r1');
+    row.focus();
+    fireEvent.keyDown(row, { key: 'Enter' });
+    expect(push).toHaveBeenCalledWith({ pathname: '/run', query: { id: 'r1' } });
+  });
+
   it('delete is a two-click confirm: arm, then DELETE + revalidate', async () => {
     mockData({ runs: [run('r1')] });
     render(<RunsPage />);

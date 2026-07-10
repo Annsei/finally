@@ -5,7 +5,7 @@
  * Test 3: empty state renders the placeholder line
  */
 import React from 'react';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import useSWR from 'swr';
 
 jest.mock('swr', () => ({
@@ -91,5 +91,18 @@ describe('NewsTicker', () => {
 
     expect(screen.getByText(/Market events appear here/i)).toBeInTheDocument();
     expect(document.querySelector('.news-ticker-track')).toBeNull();
+  });
+
+  it('exposes a keyboard-operable pause/resume control', () => {
+    mockUseSWR.mockReturnValue({ data: mockEvents } as any);
+    render(<NewsTicker />);
+
+    const pause = screen.getByRole('button', { name: 'Pause market ticker' });
+    expect(pause).toHaveAttribute('aria-pressed', 'false');
+    fireEvent.click(pause);
+    expect(screen.getByRole('button', { name: 'Resume market ticker' })).toHaveAttribute(
+      'aria-pressed',
+      'true'
+    );
   });
 });

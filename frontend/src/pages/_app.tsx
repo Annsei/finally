@@ -3,6 +3,7 @@ import type { AppProps } from 'next/app';
 import '@/styles/globals.css';
 import { useMarketProfile, applyMarketAttr } from '@/lib/marketProfile';
 import { usePriceStream } from '@/hooks/usePriceStream';
+import ApiStatusProvider from '@/components/ApiStatusProvider';
 
 // Font note: we intentionally do NOT use next/font/google — it downloads the
 // font at build time, which makes builds fail on flaky networks (observed in
@@ -15,8 +16,8 @@ import { usePriceStream } from '@/hooks/usePriceStream';
 function MarketProfileEffect() {
   const profile = useMarketProfile();
   useEffect(() => {
-    applyMarketAttr(profile.market);
-  }, [profile.market]);
+    applyMarketAttr(profile.market, profile.locale);
+  }, [profile.market, profile.locale]);
   return null;
 }
 
@@ -30,10 +31,12 @@ function PriceStreamEffect() {
 
 export default function App({ Component, pageProps }: AppProps) {
   return (
-    <main className="font-mono">
-      <MarketProfileEffect />
-      <PriceStreamEffect />
-      <Component {...pageProps} />
-    </main>
+    <ApiStatusProvider>
+      <main className="font-mono">
+        <MarketProfileEffect />
+        <PriceStreamEffect />
+        <Component {...pageProps} />
+      </main>
+    </ApiStatusProvider>
   );
 }

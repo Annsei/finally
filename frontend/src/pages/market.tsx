@@ -115,7 +115,16 @@ function MarketRow({
     <tr
       data-testid={`market-row-${quote.ticker}`}
       onClick={() => onOpen(quote.ticker)}
-      className="cursor-pointer border-b border-terminal-border/60 hover:bg-terminal-surface/50"
+      onKeyDown={(event) => {
+        if (event.target !== event.currentTarget) return;
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          onOpen(quote.ticker);
+        }
+      }}
+      tabIndex={0}
+      aria-label={`${quote.ticker}${name ? ` ${name}` : ''}`}
+      className="cursor-pointer border-b border-terminal-border/60 hover:bg-terminal-surface/50 focus:outline focus:outline-1 focus:outline-terminal-accent"
     >
       <td className="py-1 pl-1 font-semibold text-terminal-text">
         <span className="flex items-center gap-1">
