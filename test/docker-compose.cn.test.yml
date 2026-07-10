@@ -13,6 +13,10 @@ services:
   app:
     build:
       context: ..
+    networks:
+      default:
+        aliases:
+          - finally-cn-app
     environment:
       # Activate the A-share profile: ¥ / lot_size 100 / T+1 / 红涨绿跌 / 600519…
       FINALLY_MARKET: "cn"
@@ -26,7 +30,7 @@ services:
           "CMD",
           "python",
           "-c",
-          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=2).read()",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/ready', timeout=2).read()",
         ]
       interval: 2s
       timeout: 3s
@@ -36,19 +40,24 @@ services:
   playwright:
     # Image tag MUST match the @playwright/test version pinned in package.json
     # (convention: mcr.microsoft.com/playwright:v<version>-<ubuntu codename>).
-    image: mcr.microsoft.com/playwright:v1.44.0-jammy
+    image: mcr.microsoft.com/playwright:v1.61.1-noble
     depends_on:
       app:
         condition: service_healthy
     working_dir: /tests
     volumes:
       - ./:/tests
+      - playwright-node-modules-cn:/tests/node_modules
     environment:
-      BASE_URL: http://app:8000
+      BASE_URL: http://finally-cn-app:8000
       CI: "true"
       # Swaps playwright.config.ts to the dependency-free `cn` project so the CN
       # spec runs without the fresh-start US-seed assertions.
       CN_E2E: "1"
+      E2E_SPECS: "${E2E_SPECS:-}"
     # Recommended for Chromium stability in containers.
     ipc: host
-    command: sh -c "npm ci && npx playwright test specs/cn.spec.ts specs/pages-cn.spec.ts specs/strategies-cn.spec.ts specs/developers-cn.spec.ts specs/p4-cn.spec.ts"
+    command: sh -c "npm ci && npx playwright test $${E2E_SPECS}"
+
+volumes:
+  playwright-node-modules-cn:

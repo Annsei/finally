@@ -40,7 +40,8 @@ if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
 }
 
 if (Test-DockerResource -Kind 'container' -Name $ContainerName) {
-    docker rm -f $ContainerName | Out-Null
+    docker stop --time 10 $ContainerName | Out-Null
+    docker rm $ContainerName | Out-Null
     Write-Host "Stopped and removed container: $ContainerName"
 }
 else {

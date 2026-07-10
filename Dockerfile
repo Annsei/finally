@@ -53,8 +53,13 @@ USER app
 
 EXPOSE 8000
 
-# curl is not installed in python:slim — probe /api/health with stdlib urllib.
-HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=2).read()" || exit 1
+# docker stop / Compose stop_grace_period give uvicorn and SQLite background
+# loops a chance to finish before the container is removed.
+STOPSIGNAL SIGTERM
+
+# curl is not installed in python:slim. Readiness verifies that the application
+# initialized its DB/market dependencies, while /api/health remains liveness.
+HEALTHCHECK --interval=30s --timeout=3s --start-period=15s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/ready', timeout=2).read()" || exit 1
 
 CMD ["/app/backend/.venv/bin/uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

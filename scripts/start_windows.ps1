@@ -4,13 +4,13 @@
 
 .DESCRIPTION
     PowerShell equivalent of scripts/start_mac.sh.
-    Builds the Docker image if it does not exist (or when -Build is passed),
+    Rebuilds the Docker image using Docker's layer cache,
     replaces any existing container, mounts the named data volume, passes the
     project .env file when present, waits for the health check, and prints the
     URL. Idempotent — safe to run multiple times.
 
 .PARAMETER Build
-    Force rebuild the Docker image before starting.
+    Accepted for backwards compatibility. Images are always rebuilt safely.
 
 .PARAMETER Open
     Open http://localhost:<port> in the default browser after the container starts.
@@ -18,11 +18,15 @@
 .PARAMETER Port
     Host port to bind to container port 8000. Default: 8000 (or $env:PORT).
 
+.PARAMETER BindHost
+    Host interface to bind. Default: 127.0.0.1 (or $env:FINALLY_BIND_HOST).
+
 .NOTES
     Environment overrides:
       FINALLY_IMAGE_NAME       Docker image name. Default: finally
       FINALLY_CONTAINER_NAME   Docker container name. Default: finally-app
       FINALLY_VOLUME_NAME      Docker volume name. Default: finally-data
+      FINALLY_BIND_HOST        Host bind address. Default: 127.0.0.1
       PORT                     Host port. Default: 8000
 
 .EXAMPLE
@@ -32,7 +36,8 @@
 param(
     [switch]$Build,
     [switch]$Open,
-    [int]$Port = $(if ($env:PORT) { [int]$env:PORT } else { 8000 })
+    [int]$Port = $(if ($env:PORT) { [int]$env:PORT } else { 8000 }),
+    [string]$BindHost = $(if ($env:FINALLY_BIND_HOST) { $env:FINALLY_BIND_HOST } else { '127.0.0.1' })
 )
 
 $ErrorActionPreference = 'Stop'
@@ -65,21 +70,17 @@ if (-not (Test-Path (Join-Path $RootDir 'Dockerfile'))) {
 
 Set-Location $RootDir
 
-if ($Build -or -not (Test-DockerResource -Kind 'image' -Name $ImageName)) {
-    Write-Host "Building Docker image: $ImageName"
-    docker build -t $ImageName .
-    if ($LASTEXITCODE -ne 0) {
-        Write-Error 'docker build failed.'
-        exit 1
-    }
-}
-else {
-    Write-Host "Using existing Docker image: $ImageName"
+Write-Host "Building Docker image: $ImageName"
+docker build -t $ImageName .
+if ($LASTEXITCODE -ne 0) {
+    Write-Error 'docker build failed.'
+    exit 1
 }
 
 if (Test-DockerResource -Kind 'container' -Name $ContainerName) {
-    Write-Host "Removing existing container: $ContainerName"
-    docker rm -f $ContainerName | Out-Null
+    Write-Host "Stopping existing container gracefully: $ContainerName"
+    docker stop --time 10 $ContainerName | Out-Null
+    docker rm $ContainerName | Out-Null
 }
 
 docker volume create $VolumeName | Out-Null
@@ -97,7 +98,8 @@ $envArgs += @('-e', 'DB_PATH=/app/db/finally.db')
 Write-Host "Starting container: $ContainerName"
 docker run -d `
     --name $ContainerName `
-    -p "${Port}:8000" `
+    --restart unless-stopped `
+    -p "${BindHost}:${Port}:8000" `
     -v "${VolumeName}:/app/db" `
     @envArgs `
     $ImageName | Out-Null
@@ -110,19 +112,26 @@ $Url = "http://localhost:$Port"
 Write-Host "Container started. URL: $Url"
 
 Write-Host 'Waiting for health check...'
-for ($i = 0; $i -lt 30; $i++) {
-    try {
-        $response = Invoke-WebRequest -Uri "$Url/api/health" -UseBasicParsing -TimeoutSec 2
-        if ($response.StatusCode -eq 200) {
-            Write-Host "Health check passed: $Url/api/health"
-            break
-        }
+$Healthy = $false
+for ($i = 0; $i -lt 60; $i++) {
+    $Status = (& docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' $ContainerName 2>$null)
+    if ($Status -eq 'healthy') {
+        $Healthy = $true
+        break
     }
-    catch {
-        # Not ready yet — keep waiting.
+    if ($Status -in @('exited', 'dead', 'unhealthy')) {
+        break
     }
     Start-Sleep -Seconds 1
 }
+if (-not $Healthy) {
+    [Console]::Error.WriteLine('Container failed to become healthy. Recent logs follow.')
+    docker logs --tail 80 $ContainerName
+    docker stop --time 10 $ContainerName 2>$null | Out-Null
+    docker rm $ContainerName 2>$null | Out-Null
+    exit 1
+}
+Write-Host "Readiness check passed: $Url/api/ready"
 
 if ($Open) {
     Start-Process $Url

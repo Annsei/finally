@@ -10,7 +10,8 @@ if ! command -v docker >/dev/null 2>&1; then
 fi
 
 if docker container inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
-  docker rm -f "$CONTAINER_NAME" >/dev/null
+  docker stop --time 10 "$CONTAINER_NAME" >/dev/null || true
+  docker rm "$CONTAINER_NAME" >/dev/null
   echo "Stopped and removed container: $CONTAINER_NAME"
 else
   echo "No container found: $CONTAINER_NAME"

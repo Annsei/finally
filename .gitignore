@@ -218,3 +218,7 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 .playwright-mcp/
+
+# Codex's generated per-machine hooks contain absolute local paths. Project
+# instructions live in AGENTS.md and reusable project skills in .agents/.
+.codex/

@@ -1,8 +1,13 @@
 .git
 .github
 .claude
+.agents
+.codex
 .planning
 planning
+.playwright-mcp
+AGENTS.md
+CLAUDE.md
 
 .env
 .envrc

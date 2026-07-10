@@ -5,7 +5,6 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-  # E2E runs on demand and nightly (see e2e job below)
   workflow_dispatch:
   schedule:
     - cron: "0 3 * * *"
@@ -15,7 +14,7 @@ permissions:
 
 jobs:
   backend:
-    name: Backend (pytest)
+    name: Backend (lint, pytest, coverage)
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -32,11 +31,27 @@ jobs:
       - name: Sync dependencies
         run: uv sync --frozen --extra dev
 
-      - name: Run pytest
-        run: uv run pytest
+      - name: Ruff
+        run: uv run ruff check app tests
+
+      - name: Pytest with coverage gate
+        run: uv run pytest --cov=app --cov-report=term --cov-report=xml --cov-fail-under=90
+
+      - name: Export OpenAPI contract
+        run: uv run python ../scripts/export_openapi.py --output openapi.json
+
+      - name: Upload backend coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-coverage
+          path: |
+            backend/coverage.xml
+            backend/openapi.json
+          if-no-files-found: ignore
 
   frontend:
-    name: Frontend (Jest + build)
+    name: Frontend (lint, types, Jest, build)
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -54,27 +69,155 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Run Jest
-        run: npm test -- --watchAll=false
+      - name: ESLint production gate
+        # Plain `npm run lint` so CI and local runs agree byte-for-byte. Rule
+        # exemptions (e.g. the React 19 advisory react-hooks rules) live in
+        # frontend/eslint.config.mjs, never in CI-only flags — extra arguments
+        # after `npm run lint` would need a `--` separator and were previously
+        # parsed as file patterns, failing every run with eslint exit 2.
+        run: npm run lint
+
+      - name: TypeScript
+        run: npx tsc --noEmit
+
+      - name: Jest with coverage gate
+        run: >-
+          npm test -- --watchAll=false --coverage --coverageReporters=text
+          --coverageReporters=lcov
+          --coverageThreshold='{"global":{"lines":90}}'
 
       - name: Build static export
         run: npm run build
 
-  # E2E (Playwright) is too slow to gate every push, so it runs nightly and on
-  # manual dispatch only. Run locally with:
-  #   cd test && docker compose -f docker-compose.test.yml up --build --abort-on-container-exit --exit-code-from playwright
-  e2e:
-    name: E2E (Playwright via docker compose)
+      - name: Upload frontend coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-coverage
+          path: frontend/coverage/lcov.info
+          if-no-files-found: ignore
+
+  security:
+    name: Secret and dependency audit
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v4
 
-      - name: Run E2E suite
+      - name: Reject committed credential-shaped values
+        shell: bash
+        run: |
+          pattern='(sk-or-v1-|sk-|ghp_|github_pat_)[A-Za-z0-9_-]{20,}'
+          if git grep -nE "$pattern" -- . ':!*.lock' ':!.env.example'; then
+            echo "Potential credential material found in the tracked tree." >&2
+            exit 1
+          fi
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Audit Python runtime dependencies
+        working-directory: backend
+        run: |
+          uv export --quiet --frozen --no-dev --no-hashes --no-emit-project --format requirements-txt --output-file /tmp/finally-requirements.txt
+          uvx pip-audit --requirement /tmp/finally-requirements.txt
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Audit frontend runtime dependencies
+        working-directory: frontend
+        run: npm audit --omit=dev --audit-level=high
+
+  smoke:
+    name: E2E smoke (${{ matrix.market }})
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - market: us
+            compose_file: docker-compose.test.yml
+            specs: specs/fresh-start.spec.ts specs/sse-resilience.spec.ts specs/trade.spec.ts
+          - market: cn
+            compose_file: docker-compose.cn.test.yml
+            specs: specs/cn.spec.ts
+    env:
+      E2E_SPECS: ${{ matrix.specs }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run smoke suite
         working-directory: test
-        run: docker compose -f docker-compose.test.yml up --build --abort-on-container-exit --exit-code-from playwright
+        run: >-
+          docker compose -f ${{ matrix.compose_file }} up --build
+          --abort-on-container-exit --exit-code-from playwright
+
+      - name: Capture Compose logs
+        if: always()
+        working-directory: test
+        run: docker compose -f ${{ matrix.compose_file }} logs --no-color > compose-${{ matrix.market }}.log
+
+      - name: Upload Playwright diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-smoke-${{ matrix.market }}
+          path: |
+            test/playwright-report/
+            test/test-results/
+            test/compose-${{ matrix.market }}.log
+          if-no-files-found: ignore
 
       - name: Tear down
         if: always()
         working-directory: test
-        run: docker compose -f docker-compose.test.yml down -v
+        run: docker compose -f ${{ matrix.compose_file }} down -v
+
+  e2e:
+    name: Full E2E (${{ matrix.market }})
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - market: us
+            compose_file: docker-compose.test.yml
+          - market: cn
+            compose_file: docker-compose.cn.test.yml
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run full suite
+        working-directory: test
+        run: >-
+          docker compose -f ${{ matrix.compose_file }} up --build
+          --abort-on-container-exit --exit-code-from playwright
+
+      - name: Capture Compose logs
+        if: always()
+        working-directory: test
+        run: docker compose -f ${{ matrix.compose_file }} logs --no-color > compose-${{ matrix.market }}.log
+
+      - name: Upload Playwright diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-full-${{ matrix.market }}
+          path: |
+            test/playwright-report/
+            test/test-results/
+            test/compose-${{ matrix.market }}.log
+          if-no-files-found: ignore
+
+      - name: Tear down
+        if: always()
+        working-directory: test
+        run: docker compose -f ${{ matrix.compose_file }} down -v

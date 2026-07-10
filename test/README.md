@@ -1,44 +1,91 @@
-# FinAlly E2E Tests
+# FinAlly Playwright E2E
 
-Playwright end-to-end tests covering the PLAN.md §12 scenarios: fresh start,
-watchlist add/remove, buy/sell trades, portfolio visualizations, AI chat
-(mocked), and SSE reconnection.
+The browser suites validate the cross-layer contracts that unit tests cannot:
+static deep links, SSE recovery, US/CN profile behavior, trading, chat,
+strategies, run library, arena and developer API keys.
 
-## Run with Docker Compose (recommended)
-
-Builds the app image, starts it with `LLM_MOCK=true` and a fresh database,
-then runs the suite in the official Playwright container:
+## Full US suite
 
 ```bash
 cd test
-docker compose -f docker-compose.test.yml up --build --abort-on-container-exit --exit-code-from playwright
-docker compose -f docker-compose.test.yml down
+docker compose -f docker-compose.test.yml up --build \
+  --abort-on-container-exit --exit-code-from playwright
+docker compose -f docker-compose.test.yml down -v
 ```
 
-## Run locally against a running app
-
-Point the suite at any running instance (default `http://localhost:8000`):
+## Full CN suite
 
 ```bash
-# Start the app first, with mock LLM for deterministic chat tests, e.g.:
-#   docker run --rm -p 8000:8000 -e LLM_MOCK=true -e OPENROUTER_API_KEY=x finally
+cd test
+docker compose -f docker-compose.cn.test.yml up --build \
+  --abort-on-container-exit --exit-code-from playwright
+docker compose -f docker-compose.cn.test.yml down -v
+```
 
+Both harnesses use `LLM_MOCK=true`, an ephemeral application database and an
+official Playwright image matching `test/package.json`. Container dependencies
+live in a named `/tests/node_modules` volume, so Docker never replaces the
+host's macOS/Windows dependencies with Linux files.
+
+## PR smoke subsets
+
+CI runs fast representative subsets for both profiles. Run the same gates
+locally:
+
+```bash
+cd test
+E2E_SPECS="specs/fresh-start.spec.ts specs/sse-resilience.spec.ts specs/trade.spec.ts" \
+  docker compose -f docker-compose.test.yml up --build \
+  --abort-on-container-exit --exit-code-from playwright
+
+E2E_SPECS="specs/cn.spec.ts" \
+  docker compose -f docker-compose.cn.test.yml up --build \
+  --abort-on-container-exit --exit-code-from playwright
+```
+
+Always tear down with the matching `down -v` after a local smoke run.
+
+## Run against an existing local app
+
+```bash
 cd test
 npm ci
-npx playwright install chromium     # first time only
-BASE_URL=http://localhost:8000 npx playwright test
-npx playwright show-report
+npx playwright install chromium
+BASE_URL=http://127.0.0.1:8000 npx playwright test
 ```
 
-## Notes
+The `fresh-start` project requires a pristine DB. Against a long-lived local
+instance, select the `e2e` project and disable dependencies:
 
-- `fresh-start.spec.ts` asserts the pristine seeded state ($10,000 cash,
-  default 10-ticker watchlist), so it must run against a fresh database (the
-  compose harness uses no volume — every run is fresh). Against a long-lived
-  local instance, skip it with: `npx playwright test --project=e2e --no-deps`.
-- Specs run serially (`workers: 1`) because all tests share one SQLite
-  database; each spec cleans up the positions/watchlist entries it creates.
-- The `@playwright/test` version in `package.json` is pinned to match the
-  `mcr.microsoft.com/playwright:v1.44.0-jammy` image tag in
-  `docker-compose.test.yml` — keep both in sync when upgrading.
-- Chat tests require the app to run with `LLM_MOCK=true`.
+```bash
+BASE_URL=http://127.0.0.1:8000 npx playwright test --project=e2e --no-deps
+```
+
+For a CN instance, set `CN_E2E=1` and point `BASE_URL` to its port.
+
+## State and timing
+
+- Specs use one worker because they share one SQLite instance.
+- `fresh-start` is a project dependency and runs before mutating US specs.
+- Specs should clean their own positions, orders, keys and strategies so retries
+  do not depend on prior attempts.
+- The correlation history scenario intentionally waits for completed minute
+  bars and belongs in the full nightly suite, not PR smoke. Future work should
+  replace this wall-clock dependency with an injected/accelerated clock.
+
+## Failure artifacts
+
+Playwright writes:
+
+- `test-results/` — failure screenshots and first-retry traces;
+- `playwright-report/` — HTML report;
+- `compose-<market>.log` — CI-captured app/browser container logs.
+
+CI uploads these paths even when a suite fails. Locally, run
+`npx playwright show-report` after a non-container run.
+
+## Version lockstep
+
+`@playwright/test` in `package.json` must match the
+`mcr.microsoft.com/playwright:v<version>-<distribution>` tag in both Compose
+files. Upgrade them in one change and run US plus CN discovery before merging.

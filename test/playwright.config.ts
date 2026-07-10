@@ -7,7 +7,7 @@ import { defineConfig, devices } from '@playwright/test';
  * serially — trades/watchlist changes in one spec must not race another.
  *
  * BASE_URL:
- *   - docker-compose.test.yml sets BASE_URL=http://app:8000
+ *   - docker-compose.test.yml sets BASE_URL=http://finally-us-app:8000
  *   - locally defaults to http://localhost:8000 (e.g. after scripts/start_mac.sh)
  *
  * A-share spec (cn.spec.ts):
@@ -45,6 +45,12 @@ export default defineConfig({
     ...devices['Desktop Chrome'],
     // Desktop-first, data-dense layout — use a wide viewport.
     viewport: { width: 1600, height: 900 },
+    // The app container intentionally serves plain HTTP on the private
+    // Compose network. New Chromium builds may auto-upgrade non-loopback
+    // names such as `app`; keep this test harness aligned with BASE_URL.
+    launchOptions: {
+      args: ['--disable-features=HttpsFirstBalancedModeAutoEnable,HttpsUpgrades'],
+    },
   },
   projects: CN_E2E
     ? [
