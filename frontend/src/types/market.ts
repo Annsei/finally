@@ -482,6 +482,61 @@ export interface ApiAuditResponse {
   has_more: boolean;
 }
 
+// GET /api/market/sentiment (P4 §1) — cache-wide market temperature. All axes
+// and the composite score are 0..100; label is one of the five band keys the
+// frontend renders via i18n (market.sentimentLabel.*).
+export interface MarketSentimentResponse {
+  score: number;
+  label: string; // frozen | cool | neutral | active | hot
+  axes: { breadth: number; volatility: number; volume: number };
+  sample_size: number;
+}
+
+// GET /api/market/correlation?minutes= (P4 §2) — Pearson correlation of 1m log
+// returns, tickers pre-sorted by sector; matrix[i][j] pairs tickers[i]/[j].
+export interface MarketCorrelationResponse {
+  tickers: string[];
+  sectors: Record<string, string>;
+  matrix: number[][];
+  minutes: number;
+}
+
+// GET /api/players/{user_id} (P4 §4) — public player profile. SUMMARY ONLY:
+// equity curve + position weight %, never quantities/costs/cash. When the
+// profile is private (and the viewer isn't the owner) only {user, public:false}
+// comes back, so every detail field is optional.
+export interface PlayerEquityPoint {
+  time: number | string; // Unix seconds or ISO timestamp — both accepted
+  value: number;
+}
+
+export interface PlayerPositionWeight {
+  ticker: string;
+  weight_pct: number; // 1dp share of total portfolio value
+}
+
+export interface PlayerProfileResponse {
+  user: { id: string; name: string; created_at?: string };
+  /**
+   * The ACTUAL stored privacy flag. An owner viewing their own private
+   * profile still gets the full payload — with `public: false` — so the
+   * presence of detail fields, not this flag, decides the private empty state.
+   */
+  public: boolean;
+  /** Duplicate of `public` on the full shape; the privacy toggle prefers it. */
+  profile_public?: boolean;
+  total_value?: number;
+  return_pct?: number;
+  rank?: number | null;
+  equity_curve?: PlayerEquityPoint[];
+  positions_summary?: PlayerPositionWeight[];
+}
+
+// PATCH /api/players/me (P4 §4) — cookie identity only:
+export interface PlayerPrivacyResponse {
+  public: boolean;
+}
+
 // Auth (M4.1) — anonymous requests act as the 'default' Guest user:
 export interface AuthUser {
   id: string;

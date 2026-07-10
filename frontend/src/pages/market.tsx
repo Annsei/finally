@@ -12,12 +12,18 @@
  *   market-grid       sortable quote table, rows market-row-${ticker}
  *   market-heatmap    DOM sector treemap, tiles market-heatmap-tile-${ticker}
  *   market-events     event archive (P1 §3.3) with market-events-more paging
+ *
+ * P4 additive sections (existing blocks above untouched):
+ *   market-sentiment    DOM sentiment gauge (P4 §1), sidebar top
+ *   market-correlation  NxN correlation heatmap (P4 §2), below the grid
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/compat/router';
 import useSWR from 'swr';
 import AppShell from '@/components/AppShell';
 import EventArchive from '@/components/EventArchive';
+import MarketCorrelation from '@/components/MarketCorrelation';
+import MarketSentiment from '@/components/MarketSentiment';
 import SymbolLink from '@/components/SymbolLink';
 import { fetcher } from '@/lib/fetcher';
 import { usePriceStore } from '@/stores/priceStore';
@@ -287,8 +293,9 @@ export default function MarketPage() {
   return (
     <AppShell>
       <div className="flex gap-4 h-full min-h-0">
-        {/* Quote grid */}
-        <section className="flex-[3] min-w-0 flex flex-col min-h-0 border border-terminal-border rounded bg-terminal-surface/30">
+        {/* Left column: quote grid + correlation heatmap (P4 §2) */}
+        <div className="flex-[3] min-w-0 flex flex-col gap-4 min-h-0">
+        <section className="flex-1 min-w-0 flex flex-col min-h-0 border border-terminal-border rounded bg-terminal-surface/30">
           <h2 className="px-2 py-1.5 text-xs font-semibold text-terminal-muted uppercase tracking-wider border-b border-terminal-border shrink-0">
             {t('market.gridTitle')}
           </h2>
@@ -362,8 +369,26 @@ export default function MarketPage() {
           </div>
         </section>
 
-        {/* Heatmap + event archive */}
+        {/* Correlation heatmap (P4 §2) — additive block below the grid */}
+        <section className="shrink-0 max-h-[40%] border border-terminal-border rounded bg-terminal-surface/30 flex flex-col min-h-0">
+          <h2 className="px-2 py-1.5 text-xs font-semibold text-terminal-muted uppercase tracking-wider border-b border-terminal-border shrink-0">
+            {t('market.corrTitle')}
+          </h2>
+          <div className="overflow-auto min-h-0">
+            <MarketCorrelation />
+          </div>
+        </section>
+        </div>
+
+        {/* Sentiment + heatmap + event archive */}
         <div className="flex-[2] min-w-0 flex flex-col gap-4 min-h-0">
+          {/* Market sentiment gauge (P4 §1) — additive block, sidebar top */}
+          <section className="shrink-0 border border-terminal-border rounded bg-terminal-surface/30 flex flex-col">
+            <h2 className="px-2 py-1.5 text-xs font-semibold text-terminal-muted uppercase tracking-wider border-b border-terminal-border shrink-0">
+              {t('market.sentimentTitle')}
+            </h2>
+            <MarketSentiment />
+          </section>
           <section className="border border-terminal-border rounded bg-terminal-surface/30 flex flex-col min-h-0 max-h-[45%]">
             <h2 className="px-2 py-1.5 text-xs font-semibold text-terminal-muted uppercase tracking-wider border-b border-terminal-border shrink-0">
               {t('market.heatmapTitle')}

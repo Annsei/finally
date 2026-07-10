@@ -7,6 +7,7 @@
  * everyone at $10k.
  */
 import { useEffect, useRef, useState } from 'react';
+import Link from 'next/link';
 import useSWR from 'swr';
 import { fetcher } from '@/lib/fetcher';
 import { hardReload } from '@/lib/reload';
@@ -118,7 +119,15 @@ export default function Leaderboard() {
               >
                 <td className="py-1 pl-1 tabular-nums text-terminal-muted">{e.rank}</td>
                 <td className="py-1 font-semibold text-terminal-text">
-                  {e.name}
+                  {/* P4 §4: name links to the public player page. The name
+                      stays the link's own text node (getByText compatible). */}
+                  <Link
+                    href={{ pathname: '/player', query: { u: e.user_id } }}
+                    data-testid={`player-link-${e.user_id}`}
+                    className="hover:underline"
+                  >
+                    {e.name}
+                  </Link>
                   {isMe && <span className="ml-1 text-terminal-accent text-[10px]">{t('board.you')}</span>}
                 </td>
                 <td className="text-right py-1 tabular-nums text-terminal-text">

@@ -8,11 +8,16 @@
  * GET /api/chat/?kind=review&limit=100, plus a "run review" button that POSTs
  * /api/chat/review and revalidates the list (same loading/error pattern as
  * ChatPanel's review button).
+ *
+ * P4 §3 (additive): journal-calendar — monthly realized-P&L calendar above
+ * the review archive, reusing the same fetched trades. Clicking a day that
+ * has trades narrows the by-day section to that day (dayFilter below).
  */
 import { useMemo, useState } from 'react';
 import useSWR from 'swr';
 import AppShell from '@/components/AppShell';
 import { KIND_BORDER } from '@/components/ChatPanel';
+import JournalCalendar from '@/components/JournalCalendar';
 import SymbolLink from '@/components/SymbolLink';
 import { fetcher } from '@/lib/fetcher';
 import { useMarketProfile } from '@/lib/marketProfile';
@@ -129,12 +134,16 @@ export default function JournalPage() {
   // ---- Trades by day (left column) ----
   const { data: tradesData } = useSWR<TradesResponse>(TRADES_KEY, fetcher);
   const [filter, setFilter] = useState('');
+  // P4 §3: day filter set by clicking a traded day in the calendar. null (the
+  // default) leaves the by-day section exactly as before.
+  const [dayFilter, setDayFilter] = useState<string | null>(null);
   const days = useMemo(() => {
     const all = tradesData?.trades ?? [];
     const needle = filter.trim().toUpperCase();
     const filtered = needle === '' ? all : all.filter((tr) => tr.ticker.includes(needle));
-    return groupTradesByDay(filtered);
-  }, [tradesData, filter]);
+    const groups = groupTradesByDay(filtered);
+    return dayFilter === null ? groups : groups.filter((g) => g.day === dayFilter);
+  }, [tradesData, filter, dayFilter]);
 
   const sectionTitleClass =
     'px-2 py-1.5 text-xs font-semibold text-terminal-muted uppercase tracking-wider border-b border-terminal-border shrink-0 flex items-center justify-between gap-2';
@@ -252,8 +261,21 @@ export default function JournalPage() {
           </div>
         </section>
 
+        {/* Right column: P&L calendar (P4 §3, additive) + review archive */}
+        <div className="flex-[2] min-w-0 flex flex-col gap-4 min-h-0">
+        <section className="shrink-0 border border-terminal-border rounded bg-terminal-surface/30 flex flex-col">
+          <h2 className="px-2 py-1.5 text-xs font-semibold text-terminal-muted uppercase tracking-wider border-b border-terminal-border shrink-0">
+            {t('journal.calTitle')}
+          </h2>
+          <JournalCalendar
+            trades={tradesData?.trades ?? []}
+            selectedDay={dayFilter}
+            onSelectDay={setDayFilter}
+          />
+        </section>
+
         {/* Review archive */}
-        <section className="flex-[2] min-w-0 flex flex-col min-h-0 border border-terminal-border rounded bg-terminal-surface/30">
+        <section className="flex-1 min-w-0 flex flex-col min-h-0 border border-terminal-border rounded bg-terminal-surface/30">
           <div className={sectionTitleClass}>
             <h2>{t('journal.reviewsTitle')}</h2>
             <button
@@ -307,6 +329,7 @@ export default function JournalPage() {
             )}
           </div>
         </section>
+        </div>
       </div>
     </AppShell>
   );

@@ -607,6 +607,45 @@ const en: Dict = {
   'dev.swaggerLink': 'Full API reference (Swagger) →',
   'dev.botHint':
     'A complete example trading bot ships with the repo at examples/finally_bot.py — see examples/README.md for the walkthrough.',
+
+  // --- P4 additions (sentiment · correlation · calendar · player) ------------
+  // Market sentiment gauge (P4 §1)
+  'market.sentimentTitle': 'Market Sentiment',
+  'market.sentimentLoading': 'Measuring market temperature…',
+  'market.sentimentLabel.frozen': 'Frozen',
+  'market.sentimentLabel.cool': 'Cool',
+  'market.sentimentLabel.neutral': 'Neutral',
+  'market.sentimentLabel.active': 'Active',
+  'market.sentimentLabel.hot': 'Hot',
+  'market.sentimentBreadth': 'Breadth',
+  'market.sentimentVolatility': 'Volatility',
+  'market.sentimentVolume': 'Volume',
+
+  // Correlation heatmap (P4 §2)
+  'market.corrTitle': 'Correlation Matrix',
+  'market.corrEmpty': 'Not enough bar history yet — the matrix fills in a few minutes after the open.',
+
+  // Journal P&L calendar (P4 §3)
+  'journal.calTitle': 'P&L Calendar',
+  'journal.calPrevAria': 'Previous month',
+  'journal.calNextAria': 'Next month',
+  'journal.calClear': 'Clear day filter',
+
+  // Player public profile (P4 §4)
+  'player.empty': 'No player selected.',
+  'player.loading': 'Loading player…',
+  'player.notFound': 'Player not found.',
+  'player.private': 'This trader keeps their profile private.',
+  'player.since': 'since {date}',
+  'player.rank': 'Rank',
+  'player.totalValue': 'Total Value',
+  'player.return': 'Return',
+  'player.equityTitle': 'Equity Curve',
+  'player.weightsTitle': 'Position Weights',
+  'player.weightsEmpty': 'No open positions.',
+  'player.privacyPublic': 'Public',
+  'player.privacyPrivate': 'Private',
+  'player.privacyFailed': 'Privacy update failed',
 };
 
 // ---------------------------------------------------------------------------
@@ -1175,6 +1214,45 @@ const zh: Dict = {
   'dev.swaggerLink': '完整 API 文档（Swagger）→',
   'dev.botHint':
     '仓库内附完整示例交易机器人 examples/finally_bot.py — 教程见 examples/README.md。',
+
+  // --- P4 additions (sentiment · correlation · calendar · player) ------------
+  // Market sentiment gauge (P4 §1)
+  'market.sentimentTitle': '市场情绪',
+  'market.sentimentLoading': '正在测算市场温度…',
+  'market.sentimentLabel.frozen': '冰点',
+  'market.sentimentLabel.cool': '低迷',
+  'market.sentimentLabel.neutral': '中性',
+  'market.sentimentLabel.active': '活跃',
+  'market.sentimentLabel.hot': '沸腾',
+  'market.sentimentBreadth': '涨跌家数',
+  'market.sentimentVolatility': '波动',
+  'market.sentimentVolume': '量能',
+
+  // Correlation heatmap (P4 §2)
+  'market.corrTitle': '相关性热力图',
+  'market.corrEmpty': '开市初期 K 线不足 — 矩阵将在开盘几分钟后自动填充。',
+
+  // Journal P&L calendar (P4 §3)
+  'journal.calTitle': '盈亏日历',
+  'journal.calPrevAria': '上个月',
+  'journal.calNextAria': '下个月',
+  'journal.calClear': '清除日期过滤',
+
+  // Player public profile (P4 §4)
+  'player.empty': '未选择选手。',
+  'player.loading': '正在加载选手…',
+  'player.notFound': '未找到该选手。',
+  'player.private': '该选手的主页未公开。',
+  'player.since': '始于 {date}',
+  'player.rank': '排名',
+  'player.totalValue': '总资产',
+  'player.return': '收益',
+  'player.equityTitle': '权益曲线',
+  'player.weightsTitle': '持仓权重',
+  'player.weightsEmpty': '暂无持仓。',
+  'player.privacyPublic': '公开',
+  'player.privacyPrivate': '私密',
+  'player.privacyFailed': '隐私设置更新失败',
 };
 
 const DICTS: Record<Lang, Dict> = { en, zh };
