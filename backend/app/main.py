@@ -262,9 +262,12 @@ async def lifespan(app: FastAPI):
     rules_router = create_rules_router(price_cache, db_path, trading_profile)
     app.include_router(rules_router)
 
-    # Backtest router (M5 — stateless strategy backtester, no DB access)
+    # Backtest router (M5 — stateless on the synthetic path; D1 history mode
+    # reads the daily_bars table, hence the injected db_path)
     from app.routes.backtest import create_backtest_router
-    app.include_router(create_backtest_router(price_cache, commission_bps, profile))
+    app.include_router(
+        create_backtest_router(price_cache, commission_bps, profile, db_path=db_path)
+    )
 
     # Run Library router (P2 §5 — persisted backtest runs). Registered right
     # next to the stateless backtest route; its /api/backtest/runs prefix
@@ -299,6 +302,12 @@ async def lifespan(app: FastAPI):
         price_cache, session_clock, db_path=db_path, universe=profile.universe
     )
     app.include_router(market_router)
+
+    # History data router (D1 §2 — daily-bar sync/query; sample source plus
+    # lazily-imported yfinance/akshare, so registration never needs network
+    # or the optional packages and cannot block startup).
+    from app.routes.history import create_history_router
+    app.include_router(create_history_router(db_path, profile=profile))
 
     # Market profile router (CN-1 — the frontend's runtime market config)
     from app.routes.profile import create_profile_router

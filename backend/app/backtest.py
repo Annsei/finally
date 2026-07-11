@@ -69,6 +69,7 @@ import json
 import math
 import random
 import time
+from datetime import datetime, timezone
 
 import numpy as np
 
@@ -80,6 +81,7 @@ from app.indicators import (
     validate_sizing,
 )
 from app.market.cache import PriceCache
+from app.market.history import load_recent_daily_bars
 from app.market.profiles import MarketProfile
 from app.market.seed_prices import DEFAULT_PARAMS, SEED_PRICES, TICKER_PARAMS
 from app.market.simulator import GBMSimulator, spread_bps_for
@@ -98,9 +100,59 @@ MIN_DAYS, MAX_DAYS = 5, 120
 DEFAULT_RUNS = 1
 MIN_RUNS, MAX_RUNS = 1, 50
 
+# History mode (D1 §3): days = TRADING days, clamped (not rejected) into
+# 20..750; a backtest needs at least 20 stored daily bars to run.
+HISTORY_MIN_DAYS, HISTORY_MAX_DAYS = 20, 750
+HISTORY_MIN_BARS = 20
+BACKTEST_SOURCES = ("synthetic", "history")
+
 # One minute as a fraction of a trading year — same convention as the live
 # simulator's 500ms tick dt.
 BAR_DT = BAR_SECONDS / GBMSimulator.TRADING_SECONDS_PER_YEAR
+
+
+def _make_fee_fn(commission_bps: float, profile: MarketProfile | None):
+    """Per-fill fee closure shared by BOTH simulation paths (D1: 不 fork 数学).
+
+    The §1 fee formula WITHOUT compute_fee's cent rounding, so the None/us
+    path stays value-for-value identical to the legacy backtest (which
+    accumulated commission unrounded and rounded only in stats). Extracted
+    verbatim from ``_simulate`` — the golden-sample tests pin the output.
+    """
+    commission_rate = commission_bps / 10_000.0
+    min_commission = profile.min_commission if profile is not None else 0.0
+    stamp_bps = profile.stamp_tax_bps_sell if profile is not None else 0.0
+
+    def _fee(notional: float, trade_side: str) -> float:
+        fee = notional * commission_rate
+        if fee < min_commission:
+            fee = min_commission
+        if trade_side == "sell" and stamp_bps:
+            fee += notional * stamp_bps / 10_000.0
+        return fee
+
+    return _fee
+
+
+def _sized_entry_qty(
+    cash: float,
+    buy_px: float,
+    fixed_qty: float | None,
+    cash_pct: float | None,
+    lot_size: int,
+) -> float:
+    """Entry share count — fixed_qty as-is, cash_pct floored to whole lots.
+
+    Extracted verbatim from ``_simulate`` (P2 §4 sizing) so the history path
+    reuses the identical math: cash_pct buys whole shares of the current
+    cash at the ask, floored to whole board lots on lot-sized profiles (CN).
+    """
+    if cash_pct is not None:
+        entry_qty = float(math.floor(cash * cash_pct / 100.0 / buy_px))
+        if lot_size > 1:
+            entry_qty = float(math.floor(entry_qty / lot_size) * lot_size)
+        return entry_qty
+    return fixed_qty
 
 
 def normalize_backtest_config(
@@ -118,6 +170,7 @@ def normalize_backtest_config(
     seed: int | None = None,
     universe: MarketUniverse | None = None,
     profile: MarketProfile | None = None,
+    source: str | None = None,
 ) -> dict:
     """Validate and normalize raw backtest fields (contract §1).
 
@@ -146,6 +199,11 @@ def normalize_backtest_config(
         profile: Optional market profile (CN-2). Enforces the 整手 buy-lot
             check (buy-entry only, so the same zh message as §3); None/us is a
             no-op. Fee/T+1 semantics ride ``run_backtest``'s ``profile``.
+        source: Optional data source (D1 §3): None/"synthetic" keeps the
+            legacy GBM path BYTE-IDENTICAL (no new config keys); "history"
+            switches days to trading-day semantics (clamped 20..750),
+            forces runs == 1 (>1 fails), ignores the seed (echoed null),
+            and marks the config for :func:`attach_history_bars`.
 
     Returns:
         ``{"status": "ok", "config": {...}}`` with the normalized config
@@ -159,13 +217,23 @@ def normalize_backtest_config(
     def failed(error: str) -> dict:
         return {"status": "failed", "ticker": ticker, "error": error}
 
+    source_mode = (source or "synthetic").strip().lower()
+    if source_mode not in BACKTEST_SOURCES:
+        return failed("source must be 'synthetic' or 'history'")
+    is_history = source_mode == "history"
+
     # Anchor price: live cache quote first, then the market's seed price.
+    # History mode defers the unknown-ticker decision to the daily_bars
+    # lookup (attach_history_bars overwrites the anchor with the last stored
+    # close) — a synced ticker outside the live universe must still backtest.
     seeds = SEED_PRICES if universe is None else universe.seed_prices
     anchor_price = price_cache.get_price(ticker)
     if anchor_price is None:
         anchor_price = seeds.get(ticker)
     if anchor_price is None:
-        return failed("Ticker not found")
+        if not is_history:
+            return failed("Ticker not found")
+        anchor_price = 0.0
     if side != "buy":
         return failed(
             "Backtest supports buy-entry strategies only — model exits with "
@@ -190,16 +258,30 @@ def normalize_backtest_config(
     if stop_loss_pct is not None and stop_loss_pct <= 0:
         return failed("stop_loss_pct must be greater than 0")
 
-    days = DEFAULT_DAYS if days is None else int(days)
-    if not MIN_DAYS <= days <= MAX_DAYS:
-        return failed(f"days must be between {MIN_DAYS} and {MAX_DAYS}")
-    runs = DEFAULT_RUNS if runs is None else int(runs)
-    if not MIN_RUNS <= runs <= MAX_RUNS:
-        return failed(f"runs must be between {MIN_RUNS} and {MAX_RUNS}")
-    # numpy's default_rng requires a non-negative seed.
-    seed = random.randint(0, 2**31 - 1) if seed is None else int(seed)
-    if seed < 0:
-        return failed("seed must be a non-negative integer")
+    if is_history:
+        # D1 §3: days are TRADING days, clamped (夹) into 20..750; the
+        # replay is fully deterministic so runs must be 1 and any seed is
+        # ignored (echoed back as null).
+        days = DEFAULT_DAYS if days is None else int(days)
+        days = max(HISTORY_MIN_DAYS, min(HISTORY_MAX_DAYS, days))
+        runs = DEFAULT_RUNS if runs is None else int(runs)
+        if runs != 1:
+            return failed(
+                "runs must be 1 for history backtests — the daily-bar "
+                "replay is fully deterministic"
+            )
+        seed = None
+    else:
+        days = DEFAULT_DAYS if days is None else int(days)
+        if not MIN_DAYS <= days <= MAX_DAYS:
+            return failed(f"days must be between {MIN_DAYS} and {MAX_DAYS}")
+        runs = DEFAULT_RUNS if runs is None else int(runs)
+        if not MIN_RUNS <= runs <= MAX_RUNS:
+            return failed(f"runs must be between {MIN_RUNS} and {MAX_RUNS}")
+        # numpy's default_rng requires a non-negative seed.
+        seed = random.randint(0, 2**31 - 1) if seed is None else int(seed)
+        if seed < 0:
+            return failed("seed must be a non-negative integer")
 
     config = {
         "ticker": ticker,
@@ -221,6 +303,11 @@ def normalize_backtest_config(
         config["params"] = dict(
             universe.ticker_params.get(ticker, universe.default_params)
         )
+    # D1 §3: mark history-mode configs for attach_history_bars. A separate
+    # key from the "source" config-shape marker (strategy configs) so a
+    # strategy backtest can also run on history data.
+    if is_history:
+        config["data_source"] = "history"
     return {"status": "ok", "config": config}
 
 
@@ -247,6 +334,7 @@ def normalize_strategy_backtest_config(
     seed: int | None = None,
     universe: MarketUniverse | None = None,
     profile: MarketProfile | None = None,
+    source: str | None = None,
 ) -> dict:
     """Validate and normalize a strategy-backtest config (P2 contract §4).
 
@@ -303,13 +391,22 @@ def normalize_strategy_backtest_config(
     def failed(error: str) -> dict:
         return {"status": "failed", "ticker": ticker, "error": error}
 
+    source_mode = (source or "synthetic").strip().lower()
+    if source_mode not in BACKTEST_SOURCES:
+        return failed("source must be 'synthetic' or 'history'")
+    is_history = source_mode == "history"
+
     # Anchor price: live cache quote first, then the market's seed price.
+    # History mode defers unknown tickers to the daily_bars lookup (D1 §3) —
+    # attach_history_bars overwrites the anchor with the last stored close.
     seeds = SEED_PRICES if universe is None else universe.seed_prices
     anchor_price = price_cache.get_price(ticker)
     if anchor_price is None:
         anchor_price = seeds.get(ticker)
     if anchor_price is None:
-        return failed("Ticker not found")
+        if not is_history:
+            return failed("Ticker not found")
+        anchor_price = 0.0
 
     error = validate_condition_group(entry)
     if error is not None:
@@ -329,16 +426,28 @@ def normalize_strategy_backtest_config(
         if lot_error is not None:
             return failed(lot_error)
 
-    days = DEFAULT_DAYS if days is None else int(days)
-    if not MIN_DAYS <= days <= MAX_DAYS:
-        return failed(f"days must be between {MIN_DAYS} and {MAX_DAYS}")
-    runs = DEFAULT_RUNS if runs is None else int(runs)
-    if not MIN_RUNS <= runs <= MAX_RUNS:
-        return failed(f"runs must be between {MIN_RUNS} and {MAX_RUNS}")
-    # numpy's default_rng requires a non-negative seed.
-    seed = random.randint(0, 2**31 - 1) if seed is None else int(seed)
-    if seed < 0:
-        return failed("seed must be a non-negative integer")
+    if is_history:
+        # D1 §3: trading-day clamp, deterministic single run, seed ignored.
+        days = DEFAULT_DAYS if days is None else int(days)
+        days = max(HISTORY_MIN_DAYS, min(HISTORY_MAX_DAYS, days))
+        runs = DEFAULT_RUNS if runs is None else int(runs)
+        if runs != 1:
+            return failed(
+                "runs must be 1 for history backtests — the daily-bar "
+                "replay is fully deterministic"
+            )
+        seed = None
+    else:
+        days = DEFAULT_DAYS if days is None else int(days)
+        if not MIN_DAYS <= days <= MAX_DAYS:
+            return failed(f"days must be between {MIN_DAYS} and {MAX_DAYS}")
+        runs = DEFAULT_RUNS if runs is None else int(runs)
+        if not MIN_RUNS <= runs <= MAX_RUNS:
+            return failed(f"runs must be between {MIN_RUNS} and {MAX_RUNS}")
+        # numpy's default_rng requires a non-negative seed.
+        seed = random.randint(0, 2**31 - 1) if seed is None else int(seed)
+        if seed < 0:
+            return failed("seed must be a non-negative integer")
 
     # Normalized copies: drop unset exit keys (engine reads .get), coerce
     # sizing numbers to float.
@@ -365,7 +474,52 @@ def normalize_strategy_backtest_config(
         config["params"] = dict(
             universe.ticker_params.get(ticker, universe.default_params)
         )
+    # D1 §3: history marker (separate from the "strategy" shape marker).
+    if is_history:
+        config["data_source"] = "history"
     return {"status": "ok", "config": config}
+
+
+def attach_history_bars(config: dict, conn, *, market: str) -> str | None:
+    """Load the daily-bar window for a history-mode config (D1 §3).
+
+    Reads the most recent ``config["days"]`` stored bars for
+    ``(market, ticker)`` from ``daily_bars`` on the caller's open
+    connection. Requires at least ``HISTORY_MIN_BARS`` (20) bars — fewer
+    returns the contract's "Insufficient history" error message (with a
+    coverage hint) for the caller to map to HTTP 400 / a failed outcome.
+
+    On success mutates the config in place:
+    - ``config["history"] = {"bars", "source", "date_range"}`` — bars
+      ascending; ``source`` is the NEWEST bar's source (sample | yfinance |
+      akshare), the value echoed in the response config; ``date_range`` is
+      the evaluated window.
+    - ``config["anchor_price"]`` = the last stored close (the most recent
+      known price — history mode never depends on the live cache).
+
+    Returns None on success, else the error message. Never raises on a
+    missing/short window.
+    """
+    ticker = config["ticker"]
+    bars = load_recent_daily_bars(conn, market, ticker, int(config["days"]))
+    if len(bars) < HISTORY_MIN_BARS:
+        coverage = (
+            f"{len(bars)} daily bars stored for {ticker}"
+            if bars
+            else f"no daily bars stored for {ticker}"
+        )
+        return (
+            "Insufficient history — run a data sync first "
+            f"(coverage: {coverage}; history backtests need at least "
+            f"{HISTORY_MIN_BARS})"
+        )
+    config["history"] = {
+        "bars": bars,
+        "source": bars[-1]["source"],
+        "date_range": {"from": bars[0]["date"], "to": bars[-1]["date"]},
+    }
+    config["anchor_price"] = float(bars[-1]["close"])
+    return None
 
 
 def _generate_bars(
@@ -528,19 +682,9 @@ def _simulate(
     t1_active = profile is not None and profile.t_plus > 0
     # cash_pct sizing floors to whole board lots on lot-sized profiles (CN).
     lot_size = profile.lot_size if profile is not None else 1
-    # Per-fill fee — the §1 formula WITHOUT compute_fee's cent rounding, so the
-    # None/us path stays value-for-value identical to the legacy backtest
-    # (which accumulated commission unrounded and rounded only in stats).
-    min_commission = profile.min_commission if profile is not None else 0.0
-    stamp_bps = profile.stamp_tax_bps_sell if profile is not None else 0.0
-
-    def _fee(notional: float, trade_side: str) -> float:
-        fee = notional * commission_rate
-        if fee < min_commission:
-            fee = min_commission
-        if trade_side == "sell" and stamp_bps:
-            fee += notional * stamp_bps / 10_000.0
-        return fee
+    # Per-fill fee — shared with the history path via _make_fee_fn (the §1
+    # formula WITHOUT compute_fee's cent rounding; golden tests pin it).
+    _fee = _make_fee_fn(commission_bps, profile)
 
     # Pass params only when the config carries them (universe-injected runs,
     # CN-1) — legacy configs keep the exact original _generate_bars call so
@@ -558,7 +702,6 @@ def _simulate(
     first_close = float(closes[0])
 
     half_spread = spread_bps_for(ticker) / 2.0 / 10_000.0
-    commission_rate = commission_bps / 10_000.0
 
     # Indicator series are precomputed ONCE per simulation with the same
     # app.indicators series functions the live engine's point indicators are
@@ -683,16 +826,12 @@ def _simulate(
         ):
             fired_today = True  # Consumed even when the buy is rejected
             buy_px = close * (1.0 + half_spread)
-            if cash_pct is not None:
-                # cash_pct sizing (P2 §4): whole shares of the current cash
-                # at the ask, floored to whole board lots on CN. A zero-
-                # share result consumes the day's fire and counts as an
-                # insufficient-cash rejection (the live engine's skip).
-                entry_qty = float(math.floor(cash * cash_pct / 100.0 / buy_px))
-                if lot_size > 1:
-                    entry_qty = float(math.floor(entry_qty / lot_size) * lot_size)
-            else:
-                entry_qty = fixed_qty
+            # cash_pct sizing (P2 §4): whole shares of the current cash at
+            # the ask, floored to whole board lots on CN — shared with the
+            # history path via _sized_entry_qty. A zero-share result
+            # consumes the day's fire and counts as an insufficient-cash
+            # rejection (the live engine's skip).
+            entry_qty = _sized_entry_qty(cash, buy_px, fixed_qty, cash_pct, lot_size)
             cost = entry_qty * buy_px
             commission = _fee(cost, "buy")
             if entry_qty <= 0 or cash < cost + commission:
@@ -766,6 +905,262 @@ def _simulate(
     }
 
 
+def _date_to_unix(day: str) -> int:
+    """ISO ``YYYY-MM-DD`` -> Unix seconds at UTC midnight (deterministic)."""
+    return int(
+        datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp()
+    )
+
+
+def _simulate_history(
+    config: dict,
+    commission_bps: float,
+    starting_cash: float = STARTING_CASH,
+    profile: MarketProfile | None = None,
+) -> dict:
+    """One deterministic account replay over stored daily bars (D1 §3).
+
+    A NEW evaluation path — the synthetic engine's RNG/bar generation is
+    never touched (the golden samples pin it). Execution/fee/T+1/整手
+    semantics REUSE the same mechanics as ``_simulate``: the shared
+    ``_make_fee_fn`` fee formula, ``_sized_entry_qty`` lot flooring,
+    ``spread_bps_for`` half-spread on both legs, and the profile-driven T+1
+    entry-day exit skip. Zero randomness — same config, same bars, same
+    payload.
+
+    Daily-bar semantics (contract §3):
+    - Entry: the condition group is evaluated at every day's CLOSE (same
+      indicators.py evaluators; "minute" params count daily bars;
+      day_change_pct uses adjacent closes, day 0 -> 0.0). A signal on day T
+      fills at day T+1's OPEN plus half-spread — no look-ahead. A signal on
+      the final bar never fills. Max one evaluation per day (bars ARE days);
+      an insufficient-cash fill attempt consumes the signal and lands in
+      ``rejections.insufficient_cash``.
+    - Exits while holding, each day, priority stop_loss -> trailing_stop ->
+      take_profit (checked against the day's low/high, filled AT the
+      trigger level) -> max_holding_days (closed at that day's close).
+      Under CN T+1 the entry day is skipped (入场次日起可出); the us/None
+      path may exit on the entry day — the whole session follows the open
+      fill. The trailing high-water seeds at the entry fill and rises with
+      each day's high AFTER that day's exit checks (the ``_simulate``
+      convention).
+    - Equity marks at every close; baseline is a frictionless buy & hold of
+      ``starting_cash`` from the FIRST bar's OPEN. An open position closes
+      at the final close ('horizon_end') unless T+1 forbids it.
+    """
+    ticker = config["ticker"]
+    bars = config["history"]["bars"]
+    # Same config-shape branch as _simulate (legacy trigger vs strategy).
+    if config.get("source") == "strategy":
+        exits = config["exits"] or {}
+        sizing = config["sizing"]
+        entry_group = config["entry"]
+        take_profit_pct = exits.get("take_profit_pct")
+        stop_loss_pct = exits.get("stop_loss_pct")
+        trailing_stop_pct = exits.get("trailing_stop_pct")
+        max_holding_days = exits.get("max_holding_days")
+        fixed_qty = float(sizing["qty"]) if sizing["mode"] == "fixed_qty" else None
+        cash_pct = float(sizing["pct"]) if sizing["mode"] == "cash_pct" else None
+    else:
+        entry_group = _legacy_entry_group(config["trigger_type"], config["threshold"])
+        take_profit_pct = config["take_profit_pct"]
+        stop_loss_pct = config["stop_loss_pct"]
+        trailing_stop_pct = None
+        max_holding_days = None
+        fixed_qty = config["quantity"]
+        cash_pct = None
+
+    t1_active = profile is not None and profile.t_plus > 0
+    lot_size = profile.lot_size if profile is not None else 1
+    _fee = _make_fee_fn(commission_bps, profile)
+    half_spread = spread_bps_for(ticker) / 2.0 / 10_000.0
+
+    n = len(bars)
+    times = [_date_to_unix(b["date"]) for b in bars]
+    opens = [float(b["open"]) for b in bars]
+    highs = [float(b["high"]) for b in bars]
+    lows = [float(b["low"]) for b in bars]
+    closes = [float(b["close"]) for b in bars]
+    first_open = opens[0]
+
+    entry_ctx = (
+        build_series_context(
+            entry_group, {"closes": closes, "highs": highs, "lows": lows}
+        )
+        if entry_group is not None
+        else {}
+    )
+
+    cash = starting_cash
+    qty = 0.0
+    entry_cost = 0.0
+    tp_price: float | None = None
+    sl_price: float | None = None
+    high_water = 0.0
+    entry_day = -1
+    pending_entry = False  # Signal fired at yesterday's close -> fill today
+
+    fires = 0
+    insufficient_cash = 0
+    commission_paid = 0.0
+    trades: list[dict] = []
+    round_trip_pnls: list[float] = []
+    equity: list[float] = []
+    baseline: list[float] = []
+
+    def sell(level: float, bar_time: int, reason: str) -> None:
+        """Close the open position at ``level`` — _simulate's sell math."""
+        nonlocal cash, qty, commission_paid
+        sell_px = level * (1.0 - half_spread)
+        proceeds = qty * sell_px
+        commission = _fee(proceeds, "sell")
+        cash += proceeds - commission
+        commission_paid += commission
+        pnl = (proceeds - commission) - entry_cost
+        round_trip_pnls.append(pnl)
+        trades.append(
+            {
+                "time": bar_time,
+                "side": "sell",
+                "price": round(sell_px, 2),
+                "quantity": qty,
+                "reason": reason,
+                "pnl": round(pnl, 2),
+            }
+        )
+        qty = 0.0
+
+    for i in range(n):
+        close = closes[i]
+        bar_time = times[i]
+
+        # 1) T+1 open fill: yesterday's close signal executes at today's
+        # open (contract §3 — eliminates look-ahead bias).
+        if pending_entry:
+            pending_entry = False
+            buy_px = opens[i] * (1.0 + half_spread)
+            entry_qty = _sized_entry_qty(cash, buy_px, fixed_qty, cash_pct, lot_size)
+            cost = entry_qty * buy_px
+            commission = _fee(cost, "buy")
+            if entry_qty <= 0 or cash < cost + commission:
+                insufficient_cash += 1
+            else:
+                cash -= cost + commission
+                commission_paid += commission
+                qty = entry_qty
+                entry_cost = cost + commission
+                entry_day = i
+                tp_price = (
+                    buy_px * (1.0 + take_profit_pct / 100.0) if take_profit_pct else None
+                )
+                sl_price = (
+                    buy_px * (1.0 - stop_loss_pct / 100.0) if stop_loss_pct else None
+                )
+                high_water = buy_px
+                fires += 1
+                trades.append(
+                    {
+                        "time": bar_time,
+                        "side": "buy",
+                        "price": round(buy_px, 2),
+                        "quantity": entry_qty,
+                        "reason": "trigger",
+                        "pnl": None,
+                    }
+                )
+
+        # 2) Daily exits, priority SL -> trailing -> TP -> max_holding_days
+        # against the day's low/high (fill at the trigger level). CN T+1
+        # skips the entry day; us/None checks it (entry was at the open).
+        if qty > 0:
+            if not t1_active or i > entry_day:
+                trail_price = (
+                    high_water * (1.0 - trailing_stop_pct / 100.0)
+                    if trailing_stop_pct
+                    else None
+                )
+                if sl_price is not None and lows[i] <= sl_price:
+                    sell(sl_price, bar_time, "stop_loss")
+                elif trail_price is not None and lows[i] <= trail_price:
+                    sell(trail_price, bar_time, "trailing_stop")
+                elif tp_price is not None and highs[i] >= tp_price:
+                    sell(tp_price, bar_time, "take_profit")
+                elif (
+                    max_holding_days is not None
+                    and i - entry_day >= max_holding_days
+                ):
+                    sell(close, bar_time, "max_holding_days")
+            # High-water rises with the day's high AFTER the exit checks —
+            # the _simulate convention (next day's trail uses it).
+            if qty > 0 and trailing_stop_pct:
+                if highs[i] > high_water:
+                    high_water = highs[i]
+
+        # 3) Flat -> evaluate the entry at today's close; day_change_pct is
+        # vs the ADJACENT close (day 0 -> 0.0). idx = i - 1: completed bars
+        # strictly before today, today's close rides the quote — the same
+        # convention as the synthetic loop and the live engine.
+        if (
+            qty == 0.0
+            and not pending_entry
+            and entry_group is not None
+            and i + 1 < n  # a final-bar signal can never fill
+        ):
+            prev_close = closes[i - 1] if i > 0 else closes[0]
+            if evaluate_group_at(
+                entry_group,
+                entry_ctx,
+                i - 1,
+                {
+                    "price": close,
+                    "day_change_percent": _day_change_pct(close, prev_close),
+                },
+            ):
+                pending_entry = True
+
+        # 4) Mark to market at the close.
+        equity.append(cash + qty * close)
+        baseline.append(starting_cash * close / first_open)
+
+    # Horizon end — the _simulate rule: close at the final close unless the
+    # position was entered on the final day under T+1.
+    if qty > 0 and (not t1_active or (n - 1) > entry_day):
+        sell(closes[-1], times[-1], "horizon_end")
+        equity[-1] = cash
+
+    final_equity = equity[-1]
+    eq = np.asarray(equity)
+    peaks = np.maximum.accumulate(eq)
+    max_drawdown_pct = float(np.max((peaks - eq) / peaks)) * 100.0
+
+    wins = [p for p in round_trip_pnls if p > 0]
+    losses = [p for p in round_trip_pnls if p < 0]
+    round_trips = len(round_trip_pnls)
+    gross_losses = -sum(losses)
+
+    stats = {
+        "total_return_pct": round((final_equity - starting_cash) / starting_cash * 100.0, 2),
+        "buy_hold_return_pct": round((closes[-1] / first_open - 1.0) * 100.0, 2),
+        "max_drawdown_pct": round(max_drawdown_pct, 2),
+        "final_equity": round(final_equity, 2),
+        "fires": fires,
+        "round_trips": round_trips,
+        "win_rate": round(len(wins) / round_trips, 2) if round_trips else None,
+        "avg_win": round(sum(wins) / len(wins), 2) if wins else None,
+        "avg_loss": round(sum(losses) / len(losses), 2) if losses else None,
+        "profit_factor": round(sum(wins) / gross_losses, 2) if gross_losses > 0 else None,
+        "commission_paid": round(commission_paid, 2),
+        "rejections": {"insufficient_cash": insufficient_cash},
+    }
+    return {
+        "stats": stats,
+        "times": times,
+        "equity": equity,
+        "baseline": baseline,
+        "trades": trades,
+    }
+
+
 def _downsample_indices(n: int, max_points: int = MAX_CURVE_POINTS) -> list[int]:
     """Evenly-strided sample of ``range(n)`` capped at ``max_points``.
 
@@ -818,7 +1213,14 @@ def run_backtest(
     runs = config["runs"]
     base_seed = config["seed"]
 
-    if runs == 1:
+    if config.get("data_source") == "history":
+        # D1 §3: deterministic daily-bar replay — no RNG, always one run,
+        # runs_summary always None. attach_history_bars loaded the bars.
+        representative = _simulate_history(
+            config, commission_bps, starting_cash, profile
+        )
+        runs_summary = None
+    elif runs == 1:
         representative = _simulate(
             config, base_seed, commission_bps, end, starting_cash, profile
         )
@@ -888,6 +1290,17 @@ def run_backtest(
             "commission_bps": commission_bps,
             "anchor_price": round(config["anchor_price"], 2),
         }
+    # D1 §3: history responses gain source + date_range (default/synthetic
+    # requests stay byte-identical — no new keys). ``source`` echoes the
+    # DATA source of the evaluated bars (sample | yfinance | akshare — the
+    # §5 badge values; a strategy-shaped echo's "strategy" marker is
+    # overridden, its shape stays identifiable by entry/exits/sizing).
+    # ``entry_fill`` states the teaching point: entries fill at the NEXT
+    # day's open, eliminating look-ahead bias.
+    if config.get("data_source") == "history":
+        config_echo["source"] = config["history"]["source"]
+        config_echo["date_range"] = dict(config["history"]["date_range"])
+        config_echo["entry_fill"] = "next_open"
     return {
         "config": config_echo,
         "stats": representative["stats"],

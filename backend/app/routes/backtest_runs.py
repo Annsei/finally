@@ -42,6 +42,7 @@ from pydantic import BaseModel, FiniteFloat
 from app.auth import get_current_user_id
 from app.backtest import (
     STARTING_CASH,
+    attach_history_bars,
     normalize_backtest_config,
     normalize_strategy_backtest_config,
     run_backtest,
@@ -70,6 +71,7 @@ class SaveRunRequest(BaseModel):
     days: int | None = None
     runs: int | None = None
     seed: int | None = None
+    source: str | None = None  # D1 §3: "synthetic" (default) | "history"
     # Legacy Backtest-tab fields (used when strategy_id is absent):
     ticker: str | None = None
     trigger_type: str | None = None
@@ -153,7 +155,7 @@ def _row_to_full_run(row: sqlite3.Row) -> dict:
 def _row_to_list_item(row: sqlite3.Row) -> dict:
     """List-shape item: identity + config scalars + stats — NO curves (§5)."""
     config = json.loads(row["config"])
-    return {
+    item = {
         "id": row["id"],
         "strategy_id": row["strategy_id"],
         "label": row["label"],
@@ -164,6 +166,14 @@ def _row_to_list_item(row: sqlite3.Row) -> dict:
         "seed": config.get("seed"),
         "stats": json.loads(row["stats"]),
     }
+    # D1 §5: history runs surface their DATA source on the list row (the
+    # Run Library badge). Synthetic runs stay shape-identical — no key for
+    # legacy configs, and the strategy shape's "strategy" marker is not a
+    # data source.
+    source = config.get("source")
+    if source is not None and source != "strategy":
+        item["source"] = source
+    return item
 
 
 def create_backtest_runs_router(
@@ -186,6 +196,7 @@ def create_backtest_runs_router(
     """
     universe = profile.universe if profile is not None else None
     starting_cash = profile.seed_cash if profile is not None else STARTING_CASH
+    market = profile.key if profile is not None else "us"
     router = APIRouter(prefix="/api/backtest/runs", tags=["backtest-runs"])
 
     @router.post("", status_code=201)
@@ -217,6 +228,7 @@ def create_backtest_runs_router(
                 seed=body.seed,
                 universe=universe,
                 profile=profile,
+                source=body.source,
             )
         else:
             missing = [
@@ -251,15 +263,27 @@ def create_backtest_runs_router(
                 seed=body.seed,
                 universe=universe,
                 profile=profile,
+                source=body.source,
             )
 
         if outcome["status"] == "failed":
             return JSONResponse(status_code=400, content={"error": outcome["error"]})
+        config = outcome["config"]
+
+        # D1 §3: history mode loads the stored daily-bar window first.
+        if config.get("data_source") == "history":
+            conn = get_conn(db_path)
+            try:
+                error = attach_history_bars(config, conn, market=market)
+            finally:
+                conn.close()
+            if error is not None:
+                return JSONResponse(status_code=400, content={"error": error})
 
         # Server-side (re-)run — the client never supplies stats (§5).
         result = await asyncio.to_thread(
             run_backtest,
-            outcome["config"],
+            config,
             commission_bps=commission_bps,
             end_time=time.time(),
             starting_cash=starting_cash,

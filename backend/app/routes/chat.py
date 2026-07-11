@@ -36,6 +36,7 @@ from pydantic import BaseModel, FiniteFloat
 from app.auth import get_current_user_id
 from app.backtest import (
     STARTING_CASH,
+    attach_history_bars,
     normalize_backtest_config,
     normalize_strategy_backtest_config,
     run_backtest,
@@ -284,6 +285,7 @@ class BacktestInstruction(BaseModel):
     stop_loss_pct: FiniteFloat | None = None
     days: int | None = None
     runs: int | None = None
+    source: str | None = None  # D1 §3 passthrough: "synthetic" | "history"
 
 
 class StrategyInstruction(BaseModel):
@@ -309,6 +311,7 @@ class StrategyInstruction(BaseModel):
     days: int | None = None
     runs: int | None = None
     seed: int | None = None
+    source: str | None = None  # D1 §3 passthrough: "synthetic" | "history"
 
 
 class ChatResponse(BaseModel):
@@ -608,6 +611,7 @@ def create_chat_router(
     system_prompt = SYSTEM_PROMPT_ZH if is_zh else SYSTEM_PROMPT
     review_system_prompt = REVIEW_SYSTEM_PROMPT_ZH if is_zh else REVIEW_SYSTEM_PROMPT
     universe = profile.universe if profile is not None else None
+    market = profile.key if profile is not None else "us"  # daily_bars partition (D1)
     # Mirror routes/backtest.py: AI-run backtests open the same account the
     # REST route does — the active profile's seed cash (CN=¥100k), else the
     # US $10,000. None/us keeps run_backtest's default value-for-value.
@@ -1005,10 +1009,27 @@ def create_chat_router(
                     runs=b.runs,
                     universe=universe,
                     profile=profile,
+                    source=b.source,
                 )
                 if normalized["status"] == "failed":
                     backtest_outcomes.append(normalized)
                     continue
+                # D1 §3: history mode reads the stored daily-bar window on
+                # the turn's connection (read-only — nothing joins the
+                # transaction); a short window fails just this instruction.
+                if normalized["config"].get("data_source") == "history":
+                    error = attach_history_bars(
+                        normalized["config"], conn, market=market
+                    )
+                    if error is not None:
+                        backtest_outcomes.append(
+                            {
+                                "status": "failed",
+                                "ticker": normalized["config"]["ticker"],
+                                "error": error,
+                            }
+                        )
+                        continue
                 result = await asyncio.to_thread(
                     run_backtest,
                     normalized["config"],
@@ -1141,7 +1162,23 @@ def create_chat_router(
                         seed=s.seed,
                         universe=universe,
                         profile=profile,
+                        source=s.source,
                     )
+                    # D1 §3: history mode loads the stored window (read-only
+                    # on the shared connection) before the engine runs.
+                    if (
+                        normalized["status"] == "ok"
+                        and normalized["config"].get("data_source") == "history"
+                    ):
+                        error = attach_history_bars(
+                            normalized["config"], conn, market=market
+                        )
+                        if error is not None:
+                            normalized = {
+                                "status": "failed",
+                                "ticker": normalized["config"]["ticker"],
+                                "error": error,
+                            }
                     if normalized["status"] == "failed":
                         strategy_outcomes.append(
                             {

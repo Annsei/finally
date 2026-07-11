@@ -258,6 +258,31 @@ CREATE TABLE IF NOT EXISTS market_events (
     timestamp      REAL NOT NULL
 );
 
+-- Daily bars (D1 §1): real-history daily OHLCV store backing the history
+-- backtest mode and the /api/market/history/{sync,daily,coverage} endpoints.
+-- Rows are written ONLY by user-triggered syncs (sample CSVs, yfinance,
+-- akshare) — the live simulator/SSE/trading paths never read or write this
+-- table. Adjustment convention: cn rows store 前复权 (qfq) prices, us rows
+-- store adj-close-scaled OHLC (yfinance auto_adjust). source is one of
+-- 'sample' | 'yfinance' | 'akshare'. Market-level data — no user_id; the
+-- (market, ticker, date) primary key doubles as the query index and makes
+-- INSERT OR REPLACE upserts idempotent. init_db() executes this script on
+-- every startup, so pre-existing database volumes pick this table up
+-- idempotently via IF NOT EXISTS (new table — no column migration).
+CREATE TABLE IF NOT EXISTS daily_bars (
+    market     TEXT NOT NULL,
+    ticker     TEXT NOT NULL,
+    date       TEXT NOT NULL,
+    open       REAL NOT NULL,
+    high       REAL NOT NULL,
+    low        REAL NOT NULL,
+    close      REAL NOT NULL,
+    volume     REAL NOT NULL,
+    source     TEXT NOT NULL,
+    fetched_at TEXT NOT NULL,
+    PRIMARY KEY (market, ticker, date)
+);
+
 -- API keys (P3 §1): programmatic Bearer credentials for the open paper-broker
 -- API. Only the sha256 hex of the full plaintext is stored (key_hash) plus an
 -- 11-char display prefix ("fk_XXXXXXXX") for list identification — the

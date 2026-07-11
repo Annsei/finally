@@ -247,6 +247,78 @@ def rolling_min_series(values: Sequence[float], window: int) -> list[float | Non
     return _rolling_extreme_series(values, window, is_max=False)
 
 
+def rolling_std_series(values: Sequence[float], n: int) -> list[float | None]:
+    """Rolling POPULATION standard deviation (ddof=0) over ``n`` values.
+
+    ``out[i]`` covers ``values[i-n+1 .. i]`` for ``i >= n-1``; ``None`` while
+    warming up. Population std is the Bollinger convention fixed by the D1
+    contract (母体标准差) and matches pandas-ta-classic ``bbands(ddof=0)``.
+    """
+    m = len(values)
+    out: list[float | None] = [None] * m
+    if n <= 0 or m < n:
+        return out
+    for i in range(n - 1, m):
+        window = [float(values[j]) for j in range(i - n + 1, i + 1)]
+        mean = sum(window) / n
+        var = sum((v - mean) ** 2 for v in window) / n
+        out[i] = math.sqrt(var)
+    return out
+
+
+def macd_series(
+    closes: Sequence[float], fast: int = 12, slow: int = 26, signal: int = 9
+) -> tuple[list[float | None], list[float | None], list[float | None]]:
+    """MACD line / signal line / histogram series (D1 contract §4).
+
+    ``macd = ema(fast) - ema(slow)`` (both SMA-seeded, so the line's first
+    value lands at index ``slow - 1``); ``signal`` is the SMA-seeded EMA of
+    the macd line from its first valid index (first value at
+    ``slow + signal - 2``); ``hist = macd - signal``. Golden-vector tests
+    pin the output against pandas-ta-classic ``macd()`` on the same series.
+    """
+    m = len(closes)
+    fast_ema = ema_series(closes, fast)
+    slow_ema = ema_series(closes, slow)
+    macd_line: list[float | None] = [
+        (f - s) if (f is not None and s is not None) else None
+        for f, s in zip(fast_ema, slow_ema)
+    ]
+    signal_line: list[float | None] = [None] * m
+    first = next((i for i, v in enumerate(macd_line) if v is not None), None)
+    if first is not None:
+        tail = ema_series([v for v in macd_line[first:]], signal)
+        for offset, value in enumerate(tail):
+            signal_line[first + offset] = value
+    hist: list[float | None] = [
+        (mv - sv) if (mv is not None and sv is not None) else None
+        for mv, sv in zip(macd_line, signal_line)
+    ]
+    return macd_line, signal_line, hist
+
+
+def bollinger_series(
+    closes: Sequence[float], period: int = 20, k: float = 2.0
+) -> tuple[list[float | None], list[float | None], list[float | None]]:
+    """Bollinger mid/upper/lower band series (D1 contract §4).
+
+    ``mid = sma(period)``; ``upper/lower = mid ± k * population_std(period)``
+    (母体标准差, ddof=0). Golden-vector tests pin the output against
+    pandas-ta-classic ``bbands(ddof=0)`` on the same series.
+    """
+    mid = sma_series(closes, period)
+    std = rolling_std_series(closes, period)
+    upper: list[float | None] = [
+        (m + k * s) if (m is not None and s is not None) else None
+        for m, s in zip(mid, std)
+    ]
+    lower: list[float | None] = [
+        (m - k * s) if (m is not None and s is not None) else None
+        for m, s in zip(mid, std)
+    ]
+    return mid, upper, lower
+
+
 # --------------------------------------------------------------------------
 # Point indicators (the live-engine entry points)
 # --------------------------------------------------------------------------
@@ -282,6 +354,37 @@ def window_low(bars: Sequence[Mapping], minutes: int) -> float | None:
     return series[-1] if series else None
 
 
+def macd(
+    closes: Sequence[float], fast: int = 12, slow: int = 26, signal: int = 9
+) -> tuple[float | None, float | None, float | None]:
+    """``(macd_line, signal_line, hist)`` as of the last close (D1 §4).
+
+    Each element is ``None`` while its series is warming up (macd needs
+    ``slow`` closes; signal/hist need ``slow + signal - 1``). Defined as the
+    last element of :func:`macd_series` — point/series parity by
+    construction, same as the other indicators.
+    """
+    macd_line, signal_line, hist = macd_series(closes, fast, slow, signal)
+    if not macd_line:
+        return None, None, None
+    return macd_line[-1], signal_line[-1], hist[-1]
+
+
+def bollinger(
+    closes: Sequence[float], period: int = 20, k: float = 2.0
+) -> tuple[float | None, float | None, float | None]:
+    """``(mid, upper, lower)`` Bollinger bands as of the last close (D1 §4).
+
+    Population standard deviation (母体标准差, ddof=0); ``None`` triple while
+    fewer than ``period`` closes exist. Defined as the last element of
+    :func:`bollinger_series` — point/series parity by construction.
+    """
+    mid, upper, lower = bollinger_series(closes, period, k)
+    if not mid:
+        return None, None, None
+    return mid[-1], upper[-1], lower[-1]
+
+
 # --------------------------------------------------------------------------
 # Field registry
 # --------------------------------------------------------------------------
@@ -289,11 +392,17 @@ def window_low(bars: Sequence[Mapping], minutes: int) -> float | None:
 
 @dataclass(frozen=True)
 class ParamSpec:
-    """One integer parameter: inclusive bounds; ``default=None`` -> required."""
+    """One condition parameter: inclusive bounds; ``default=None`` -> required.
 
-    lo: int
-    hi: int
-    default: int | None = None
+    ``kind`` is ``"int"`` (the P2 default — validated with ``_is_int_like``
+    and resolved with ``int()``) or ``"float"`` (D1: boll_break's ``k`` —
+    any finite number within bounds, resolved with ``float()``).
+    """
+
+    lo: float
+    hi: float
+    default: float | None = None
+    kind: str = "int"
 
 
 @dataclass(frozen=True)
@@ -415,6 +524,44 @@ def _eval_pullback_from_high_pct(op, value, params, ctx, idx, quote) -> bool:
     return _cmp(op, pullback, value)
 
 
+def _eval_macd_cross(op, value, params, ctx, idx, quote) -> bool:
+    """MACD/signal cross on the completed-bar series (D1 contract §4).
+
+    ``above`` = the MACD line crosses ABOVE the signal line on this bar
+    (previous bar macd <= signal, current macd > signal); ``below`` is the
+    mirrored downward cross. Warm-up (any None leg) evaluates False.
+    """
+    key = (params["fast"], params["slow"], params["signal"])
+    macd_now = _series_at(ctx, ("macdl", *key), idx)
+    sig_now = _series_at(ctx, ("macds", *key), idx)
+    macd_prev = _series_at(ctx, ("macdl", *key), idx - 1)
+    sig_prev = _series_at(ctx, ("macds", *key), idx - 1)
+    if None in (macd_now, sig_now, macd_prev, sig_prev):
+        return False
+    if op == "above":
+        return macd_prev <= sig_prev and macd_now > sig_now
+    return macd_prev >= sig_prev and macd_now < sig_now
+
+
+def _eval_boll_break(op, value, params, ctx, idx, quote) -> bool:
+    """Bollinger band break (D1 contract §4).
+
+    ``above``: price >= upper band (mid + k*std); ``below``: price <= lower
+    band (mid - k*std). Bands are recomposed from the shared ("sma", period)
+    and ("bstd", period) series with the exact :func:`bollinger_series`
+    formula, so evaluation is point-identical to :func:`bollinger`.
+    """
+    price = _quote_num(quote, "price")
+    mid = _series_at(ctx, ("sma", params["period"]), idx)
+    std = _series_at(ctx, ("bstd", params["period"]), idx)
+    if price is None or mid is None or std is None:
+        return False
+    k = params["k"]
+    if op == "above":
+        return price >= mid + k * std
+    return price <= mid - k * std
+
+
 def _check_fast_slow(params: dict) -> str | None:
     if params["fast"] >= params["slow"]:
         return "param 'fast' must be less than 'slow'"
@@ -465,20 +612,61 @@ FIELD_SPECS: dict[str, FieldSpec] = {
     ),
 }
 
+# D1 contract §4 extension fields. Kept in a SEPARATE registry (merged into
+# every lookup below via ALL_FIELD_SPECS) because the P2 test suite pins
+# ``set(FIELD_SPECS)`` to the original nine fields byte-for-byte — extending
+# the lookup keeps that pin green while macd_cross/boll_break validate and
+# evaluate exactly like first-class fields everywhere (strategies, backtests,
+# the live engine).
+D1_FIELD_SPECS: dict[str, FieldSpec] = {
+    "macd_cross": FieldSpec(
+        params={
+            "fast": ParamSpec(2, 120, default=12),
+            "slow": ParamSpec(2, 120, default=26),
+            "signal": ParamSpec(2, 60, default=9),
+        },
+        value_rule="forbidden",
+        evaluator=_eval_macd_cross,
+        extra_check=_check_fast_slow,
+    ),
+    "boll_break": FieldSpec(
+        params={
+            "period": ParamSpec(5, 120, default=20),
+            "k": ParamSpec(0.5, 4.0, default=2.0, kind="float"),
+        },
+        value_rule="forbidden",
+        evaluator=_eval_boll_break,
+    ),
+}
+
+# The full whitelist every validator/evaluator consults.
+ALL_FIELD_SPECS: dict[str, FieldSpec] = {**FIELD_SPECS, **D1_FIELD_SPECS}
+
 
 def max_condition_warmup_bars() -> int:
     """Most completed minute bars any legal condition can require.
 
-    Derived from the FIELD_SPECS parameter upper bounds so it can never
+    Derived from the registered parameter upper bounds so it can never
     drift from validation: window/pullback fields need ``minutes`` bars and
     ``ma`` needs ``period``, while cross fields also read the previous bar
     (``slow + 1``) and RSI's first value needs ``period + 1`` closes.
+    D1 fields: macd_cross's signal line first resolves at
+    ``slow + signal - 2`` and the cross reads the previous bar, so its
+    warm-up is ``slow + signal``; boll_break needs ``period`` bars. Both
+    stay within the P2 maximum (240), so the live ring-buffer capacity is
+    unchanged.
     """
     most = 0
-    for name, spec in FIELD_SPECS.items():
+    for name, spec in ALL_FIELD_SPECS.items():
+        if name == "macd_cross":
+            most = max(most, int(spec.params["slow"].hi + spec.params["signal"].hi))
+            continue
+        if name == "boll_break":
+            most = max(most, int(spec.params["period"].hi))
+            continue
         extra = 1 if name in ("ma_cross", "ema_cross", "rsi") else 0
         for ps in spec.params.values():
-            most = max(most, ps.hi + extra)
+            most = max(most, int(ps.hi) + extra)
     return most
 
 
@@ -510,7 +698,7 @@ def _validate_condition(cond: object) -> str | None:
     if extra:
         return f"unknown condition keys: {sorted(extra)}"
     field_name = cond.get("field")
-    spec = FIELD_SPECS.get(field_name) if isinstance(field_name, str) else None
+    spec = ALL_FIELD_SPECS.get(field_name) if isinstance(field_name, str) else None
     if spec is None:
         return f"unknown field {field_name!r}"
     op = cond.get("op")
@@ -547,10 +735,16 @@ def _validate_condition(cond: object) -> str | None:
                 return f"param '{name}' is required for field '{field_name}'"
             continue
         v = raw_params[name]
-        if not _is_int_like(v):
-            return f"param '{name}' must be an integer"
-        if not ps.lo <= int(v) <= ps.hi:
-            return f"param '{name}' must be between {ps.lo} and {ps.hi}"
+        if ps.kind == "float":
+            if not _is_number(v):
+                return f"param '{name}' must be a number"
+            resolved = float(v)
+        else:
+            if not _is_int_like(v):
+                return f"param '{name}' must be an integer"
+            resolved = int(v)
+        if not ps.lo <= resolved <= ps.hi:
+            return f"param '{name}' must be between {ps.lo:g} and {ps.hi:g}"
     if spec.extra_check is not None:
         return spec.extra_check(_condition_params(cond, spec))
     return None
@@ -659,10 +853,22 @@ def _conditions(entry: Mapping) -> list:
     return []
 
 
-def _condition_params(cond: Mapping, spec: FieldSpec) -> dict[str, int]:
-    """Resolved integer params (defaults applied). Assumes validated input."""
+def _condition_params(cond: Mapping, spec: FieldSpec) -> dict[str, float]:
+    """Resolved params (defaults applied). Assumes validated input.
+
+    ``kind="int"`` params resolve with ``int()`` (they key indicator series
+    in the context); ``kind="float"`` params (D1: boll_break's ``k``) with
+    ``float()``.
+    """
     raw = cond.get("params") or {}
-    return {name: int(raw.get(name, ps.default)) for name, ps in spec.params.items()}
+    return {
+        name: (
+            float(raw.get(name, ps.default))
+            if ps.kind == "float"
+            else int(raw.get(name, ps.default))
+        )
+        for name, ps in spec.params.items()
+    }
 
 
 def _condition_value(cond: Mapping, spec: FieldSpec) -> float | None:
@@ -697,17 +903,18 @@ def _bars_len(bars_1m) -> int:
 def build_series_context(entry: Mapping, bars_1m) -> dict:
     """Precompute every indicator series the entry's conditions read.
 
-    Returns ``{(kind, n): series}`` keyed by indicator kind ('sma' | 'ema' |
-    'rsi' | 'whigh' | 'wlow') and parameter. Entries whose conditions need
-    no series (price/day_change_pct only) return ``{}`` without touching the
-    bars at all. Computed with the same series functions the point
-    indicators are defined by — a context evaluated at its last index is
-    identical to calling the point functions on the same bars.
+    Returns ``{(kind, *params): series}`` keyed by indicator kind ('sma' |
+    'ema' | 'rsi' | 'whigh' | 'wlow' | 'bstd' | 'macdl' | 'macds') and its
+    parameters. Entries whose conditions need no series (price/
+    day_change_pct only) return ``{}`` without touching the bars at all.
+    Computed with the same series functions the point indicators are defined
+    by — a context evaluated at its last index is identical to calling the
+    point functions on the same bars.
     """
-    keys: set[tuple[str, int]] = set()
+    keys: set[tuple] = set()
     for cond in _conditions(entry):
         field_name = cond.get("field") if isinstance(cond, Mapping) else None
-        spec = FIELD_SPECS.get(field_name)
+        spec = ALL_FIELD_SPECS.get(field_name)
         if spec is None or not spec.params:
             continue
         params = _condition_params(cond, spec)
@@ -725,26 +932,41 @@ def build_series_context(entry: Mapping, bars_1m) -> dict:
             keys.add(("whigh", params["minutes"]))
         elif field_name == "window_low":
             keys.add(("wlow", params["minutes"]))
+        elif field_name == "macd_cross":
+            # One computation feeds both stored series (macd line + signal).
+            keys.add(("macd", params["fast"], params["slow"], params["signal"]))
+        elif field_name == "boll_break":
+            # Bands recompose from the shared SMA + population-std series.
+            keys.add(("sma", params["period"]))
+            keys.add(("bstd", params["period"]))
     if not keys:
         return {}
     closes, highs, lows = _extract_columns(bars_1m)
-    ctx: dict[tuple[str, int], list[float | None]] = {}
-    for kind, n in keys:
+    ctx: dict[tuple, list[float | None]] = {}
+    for key in keys:
+        kind, n = key[0], key[1]
         if kind == "sma":
-            ctx[(kind, n)] = sma_series(closes, n)
+            ctx[key] = sma_series(closes, n)
         elif kind == "ema":
-            ctx[(kind, n)] = ema_series(closes, n)
+            ctx[key] = ema_series(closes, n)
         elif kind == "rsi":
-            ctx[(kind, n)] = rsi_series(closes, n)
+            ctx[key] = rsi_series(closes, n)
         elif kind == "whigh":
-            ctx[(kind, n)] = rolling_max_series(highs, n)
+            ctx[key] = rolling_max_series(highs, n)
         elif kind == "wlow":
-            ctx[(kind, n)] = rolling_min_series(lows, n)
+            ctx[key] = rolling_min_series(lows, n)
+        elif kind == "bstd":
+            ctx[key] = rolling_std_series(closes, n)
+        elif kind == "macd":
+            _, fast, slow, signal = key
+            macd_line, signal_line, _hist = macd_series(closes, fast, slow, signal)
+            ctx[("macdl", fast, slow, signal)] = macd_line
+            ctx[("macds", fast, slow, signal)] = signal_line
     return ctx
 
 
 def _evaluate_condition_at(cond: Mapping, ctx: Mapping, idx: int, quote) -> bool:
-    spec = FIELD_SPECS.get(cond.get("field")) if isinstance(cond, Mapping) else None
+    spec = ALL_FIELD_SPECS.get(cond.get("field")) if isinstance(cond, Mapping) else None
     if spec is None:
         return False
     op = cond.get("op")
