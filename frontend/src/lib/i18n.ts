@@ -682,6 +682,36 @@ const en: Dict = {
   'player.privacyPublic': 'Public',
   'player.privacyPrivate': 'Private',
   'player.privacyFailed': 'Privacy update failed',
+
+  // --- D1 additions (real history data layer + history backtests) ------------
+  // Backtest data-source switch (Backtest tab + strategy detail launcher)
+  'backtest.source': 'Source',
+  'backtest.sourceSynthetic': 'Simulated',
+  'backtest.sourceHistory': 'History',
+  'backtest.tradingDays': 'Trading days',
+  'backtest.errDaysHistory': 'Trading days must be an integer between 20 and 750.',
+  'backtest.helperHistory':
+    "Real daily bars from your synced history — signals fill at the next day's open (no look-ahead); exits check stop loss, trailing stop, then take profit each day. Dashed line = buy & hold the same starting capital.",
+
+  // History coverage card + sync (D1 §5, /market page)
+  'history.title': 'Historical Data',
+  'history.sync': 'Sync Data',
+  'history.syncing': 'Syncing…',
+  'history.syncDone': 'Sync complete: {ok} succeeded · {failed} failed',
+  'history.syncFailed': 'Sync failed',
+  'history.loading': 'Loading data coverage…',
+  'history.empty': 'No historical daily bars yet. Sync data to enable history backtests.',
+  'history.colTicker': 'Ticker',
+  'history.colRange': 'Range',
+  'history.colBars': 'Bars',
+  'history.colSource': 'Source',
+
+  // Data-source badge labels (backtest results, Run Library rows, /run detail)
+  'history.source.synthetic': 'Simulated',
+  'history.source.history': 'History',
+  'history.source.sample': 'Sample',
+  'history.source.yfinance': 'yfinance',
+  'history.source.akshare': 'AKShare',
 };
 
 // ---------------------------------------------------------------------------
@@ -1325,6 +1355,36 @@ const zh: Dict = {
   'player.privacyPublic': '公开',
   'player.privacyPrivate': '私密',
   'player.privacyFailed': '隐私设置更新失败',
+
+  // --- D1 additions (real history data layer + history backtests) ------------
+  // Backtest data-source switch (Backtest tab + strategy detail launcher)
+  'backtest.source': '数据源',
+  'backtest.sourceSynthetic': '模拟',
+  'backtest.sourceHistory': '历史',
+  'backtest.tradingDays': '交易日',
+  'backtest.errDaysHistory': '交易日须为 20 到 750 之间的整数。',
+  'backtest.helperHistory':
+    '来自已同步历史的真实日线 — 信号在次日开盘成交（消除前视偏差）；持仓每日依次判定止损、移动止损、止盈。虚线 = 使用相同初始资金买入并持有。',
+
+  // History coverage card + sync (D1 §5, /market page)
+  'history.title': '历史数据',
+  'history.sync': '同步数据',
+  'history.syncing': '同步中…',
+  'history.syncDone': '同步完成：成功 {ok} · 失败 {failed}',
+  'history.syncFailed': '同步失败',
+  'history.loading': '正在加载数据覆盖…',
+  'history.empty': '暂无历史日线。先同步数据以启用历史回测。',
+  'history.colTicker': '代码',
+  'history.colRange': '区间',
+  'history.colBars': '根数',
+  'history.colSource': '来源',
+
+  // Data-source badge labels (backtest results, Run Library rows, /run detail)
+  'history.source.synthetic': '模拟',
+  'history.source.history': '历史',
+  'history.source.sample': '样本',
+  'history.source.yfinance': 'yfinance',
+  'history.source.akshare': 'AKShare',
 };
 
 const DICTS: Record<Lang, Dict> = { en, zh };

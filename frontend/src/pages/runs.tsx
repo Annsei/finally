@@ -7,9 +7,11 @@
  * dropdown (names resolved via GET /api/strategies?status=all so archived
  * strategies still label their historical runs).
  *
- * Rows (`run-row-${id}`): time / SymbolLink / strategy-name link / label /
- * return % / win rate / max DD (direction colours via terminal-up/down) —
- * row click → /run?id=X. Delete (`run-delete-${id}`) is a two-click confirm.
+ * Rows (`run-row-${id}`): time / SymbolLink + data-source badge
+ * (`run-source-${id}`, D1 §5 — pre-D1 rows render as synthetic) /
+ * strategy-name link / label / return % / win rate / max DD (direction
+ * colours via terminal-up/down) — row click → /run?id=X. Delete
+ * (`run-delete-${id}`) is a two-click confirm.
  *
  * Pure helper (exported for jest): filterRuns.
  */
@@ -20,6 +22,7 @@ import useSWR from 'swr';
 import AppShell from '@/components/AppShell';
 import SymbolLink from '@/components/SymbolLink';
 import { signed, pnlClass } from '@/components/backtest/StatCard';
+import SourceBadge, { runSourceKind } from '@/components/backtest/SourceBadge';
 import { fetcher } from '@/lib/fetcher';
 import { useMarketProfile } from '@/lib/marketProfile';
 import { useT } from '@/lib/i18n';
@@ -173,7 +176,15 @@ export default function RunsPage() {
                       {new Date(run.created_at).toLocaleString(profile.locale, { hour12: false })}
                     </td>
                     <td className="py-1 font-semibold" onClick={(e) => e.stopPropagation()}>
-                      <SymbolLink code={run.ticker} />
+                      <span className="flex items-center gap-1">
+                        <SymbolLink code={run.ticker} />
+                        {/* D1 §5 — data-source badge (pre-D1 rows → synthetic) */}
+                        <SourceBadge
+                          testid={`run-source-${run.id}`}
+                          source={runSourceKind(run)}
+                          t={t}
+                        />
+                      </span>
                     </td>
                     <td className="py-1" onClick={(e) => e.stopPropagation()}>
                       {run.strategy_id != null && nameById.has(run.strategy_id) ? (

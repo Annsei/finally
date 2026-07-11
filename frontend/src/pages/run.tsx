@@ -17,6 +17,7 @@ import EquityChart, { equityColors } from '@/components/backtest/EquityChart';
 import StatsGrid from '@/components/backtest/StatsGrid';
 import RunsSummaryStrip from '@/components/backtest/RunsSummaryStrip';
 import TradesBlotter from '@/components/backtest/TradesBlotter';
+import SourceBadge, { runSourceKind, runDateRange } from '@/components/backtest/SourceBadge';
 import { fetcher } from '@/lib/fetcher';
 import { useMarketProfile } from '@/lib/marketProfile';
 import { useT } from '@/lib/i18n';
@@ -65,6 +66,13 @@ function RunDetail({ id }: { id: string }) {
             {run.label}
           </span>
         )}
+        {/* Data-source badge + evaluated date range (D1 §5, additive) */}
+        <SourceBadge
+          testid="run-source-badge"
+          source={runSourceKind(run.config)}
+          dateRange={runDateRange(run.config)}
+          t={t}
+        />
         <span className="text-xs text-terminal-muted tabular-nums">
           {new Date(run.created_at).toLocaleString(profile.locale, { hour12: false })}
         </span>

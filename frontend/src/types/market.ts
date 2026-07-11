@@ -181,6 +181,17 @@ export interface RulesResponse {
   rules: TradingRule[];
 }
 
+// Backtest data source (D1 §3) — 'synthetic' is the legacy GBM path (request
+// field OMITTED for byte-identical behaviour); 'history' evaluates over real
+// daily bars from the user-synced daily_bars store (days = trading days).
+export type BacktestSource = 'synthetic' | 'history';
+
+// D1 §3 — history-mode responses echo the evaluated daily-bar window.
+export interface BacktestDateRange {
+  from: string; // ISO date (YYYY-MM-DD)
+  to: string;
+}
+
 // POST /api/backtest (M5) — stateless strategy backtest over synthetic GBM
 // history. Buy-entry only; exits are modeled with take_profit_pct/stop_loss_pct.
 export interface BacktestRequest {
@@ -191,9 +202,10 @@ export interface BacktestRequest {
   quantity: number;
   take_profit_pct?: number | null;
   stop_loss_pct?: number | null;
-  days?: number; // 5-120, default 30
-  runs?: number; // 1-50, default 1 (Monte Carlo re-runs)
+  days?: number; // 5-120, default 30 (history: trading days, 20-750)
+  runs?: number; // 1-50, default 1 (Monte Carlo re-runs; history requires 1)
   seed?: number; // omitted → backend draws one; echoed in config
+  source?: BacktestSource; // omitted → synthetic (legacy path, D1 §3)
 }
 
 export interface BacktestConfig {
@@ -206,9 +218,12 @@ export interface BacktestConfig {
   stop_loss_pct: number | null;
   days: number;
   runs: number;
-  seed: number;
+  seed: number | null; // history runs echo null (fully deterministic, D1 §3)
   commission_bps: number;
   anchor_price: number;
+  // D1 §3 additions — absent on pre-D1 payloads (treat as synthetic):
+  source?: string;
+  date_range?: BacktestDateRange | null;
 }
 
 export interface BacktestStats {
@@ -393,8 +408,14 @@ export interface BacktestRunListItem {
   ticker: string;
   days: number;
   runs: number;
-  seed: number;
+  // D1 §3 — history runs are deterministic; their stored config echoes seed
+  // as null (synthetic runs keep a numeric seed).
+  seed: number | null;
   stats: BacktestStats;
+  // D1 §5 — data-source marker passed through from the stored config; absent
+  // on pre-D1 rows (rendered as synthetic).
+  source?: string | null;
+  date_range?: BacktestDateRange | null;
 }
 
 export interface BacktestRunsListResponse {
@@ -688,4 +709,31 @@ export interface ChatPostResponse {
   rules?: ChatRuleOutcome[];
   backtests?: ChatBacktestOutcome[];
   strategies?: StrategyOutcome[];
+}
+
+// ---------------------------------------------------------------------------
+// Historical daily-bar data layer (D1 §2) — coverage + user-triggered sync.
+// ---------------------------------------------------------------------------
+// GET /api/market/history/coverage — one row per ticker with stored bars:
+export interface HistoryCoverageRow {
+  ticker: string;
+  from: string; // ISO date of the earliest stored bar
+  to: string; // ISO date of the latest stored bar
+  count: number;
+  source: string; // sample | yfinance | akshare
+}
+
+// POST /api/market/history/sync {source?, tickers?, years?} — per-ticker
+// outcome. A row succeeded iff `bars` > 0; auto-mode fallback rows persist
+// bars via sample yet still carry the real source's `error` as an annotation.
+export interface HistorySyncResult {
+  ticker: string;
+  source?: string;
+  bars?: number;
+  error?: string;
+}
+
+export interface HistorySyncResponse {
+  results: HistorySyncResult[];
+  total_bars?: number;
 }

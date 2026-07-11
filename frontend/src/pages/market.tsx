@@ -16,12 +16,17 @@
  * P4 additive sections (existing blocks above untouched):
  *   market-sentiment    DOM sentiment gauge (P4 §1), sidebar top
  *   market-correlation  NxN correlation heatmap (P4 §2), below the grid
+ *
+ * D1 additive section (existing blocks untouched):
+ *   history-coverage    per-ticker daily-bar coverage + history-sync-button
+ *                       (HistoryCoverageCard, D1 §5), sidebar bottom
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/compat/router';
 import useSWR from 'swr';
 import AppShell from '@/components/AppShell';
 import EventArchive from '@/components/EventArchive';
+import HistoryCoverageCard from '@/components/HistoryCoverageCard';
 import MarketCorrelation from '@/components/MarketCorrelation';
 import MarketSentiment from '@/components/MarketSentiment';
 import SymbolLink from '@/components/SymbolLink';
@@ -414,6 +419,10 @@ export default function MarketPage() {
               <EventArchive prefix="market" emptyKey="market.eventsEmpty" />
             </div>
           </section>
+
+          {/* Historical-data coverage + sync (D1 §5) — additive section; the
+              blocks above are untouched */}
+          <HistoryCoverageCard />
         </div>
       </div>
     </AppShell>

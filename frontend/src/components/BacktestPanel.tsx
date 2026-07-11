@@ -12,6 +12,12 @@
  * RunsSummaryStrip, TradesBlotter) live in components/backtest/ so the
  * /run and /strategy pages can assemble the same DOM — this panel is now
  * pure composition over those parts (testids and markup unchanged).
+ *
+ * D1 §5 (additive): a `backtest-source` segmented switch selects Simulated
+ * (legacy payload, `source` omitted) vs History (real daily bars — runs pinned
+ * to 1, days = trading days 20..750, `source: "history"` in the payload). The
+ * result block leads with a `backtest-source-badge` chip echoing config.source
+ * and, for history runs, config.date_range.
  */
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
@@ -23,9 +29,12 @@ import EquityChart, { equityColors } from '@/components/backtest/EquityChart';
 import StatsGrid from '@/components/backtest/StatsGrid';
 import RunsSummaryStrip from '@/components/backtest/RunsSummaryStrip';
 import TradesBlotter from '@/components/backtest/TradesBlotter';
+import SourceToggle from '@/components/backtest/SourceToggle';
+import SourceBadge, { runSourceKind, runDateRange } from '@/components/backtest/SourceBadge';
 import type {
   BacktestRequest,
   BacktestResponse,
+  BacktestSource,
   RuleTriggerType,
 } from '@/types/market';
 
@@ -59,6 +68,10 @@ export default function BacktestPanel({ profile = US_PROFILE }: { profile?: Mark
   const [stopLoss, setStopLoss] = useState('3');
   const [days, setDays] = useState('30');
   const [runs, setRuns] = useState<number>(1);
+  // D1 §5 — data-source switch. 'synthetic' keeps the legacy payload
+  // byte-identical (no `source` field); 'history' forces runs to 1 and
+  // reinterprets `days` as trading days (20..750).
+  const [source, setSource] = useState<BacktestSource>('synthetic');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<BacktestResponse | null>(null);
@@ -80,6 +93,14 @@ export default function BacktestPanel({ profile = US_PROFILE }: { profile?: Mark
   }, [initialPrefill, setBacktestPrefill]);
 
   const isPriceTrigger = triggerType === 'price_above' || triggerType === 'price_below';
+  const isHistory = source === 'history';
+
+  // History runs are fully deterministic — no Monte Carlo (contract §3, runs
+  // must be 1), so switching pins the runs selector to 1 and disables it.
+  const selectSource = (next: BacktestSource) => {
+    setSource(next);
+    if (next === 'history') setRuns(1);
+  };
 
   const run = async () => {
     const normalizedTicker = ticker.trim().toUpperCase();
@@ -113,8 +134,11 @@ export default function BacktestPanel({ profile = US_PROFILE }: { profile?: Mark
       setError(t('backtest.errWholeLot', { lot: profile.lot_size }));
       return;
     }
-    if (!Number.isInteger(daysNum) || daysNum < 5 || daysNum > 120) {
-      setError(t('backtest.errDays'));
+    // History mode reads `days` as trading days (contract §3: 20..750).
+    const minDays = isHistory ? 20 : 5;
+    const maxDays = isHistory ? 750 : 120;
+    if (!Number.isInteger(daysNum) || daysNum < minDays || daysNum > maxDays) {
+      setError(t(isHistory ? 'backtest.errDaysHistory' : 'backtest.errDays'));
       return;
     }
     if (tpNum != null && (!isFinite(tpNum) || tpNum <= 0)) {
@@ -126,6 +150,8 @@ export default function BacktestPanel({ profile = US_PROFILE }: { profile?: Mark
       return;
     }
 
+    // `source` is omitted on the synthetic path so the legacy payload stays
+    // byte-identical (contract §3: absent source = current synthetic path).
     const body: BacktestRequest = {
       ticker: normalizedTicker,
       trigger_type: triggerType,
@@ -134,7 +160,8 @@ export default function BacktestPanel({ profile = US_PROFILE }: { profile?: Mark
       take_profit_pct: tpNum,
       stop_loss_pct: slNum,
       days: daysNum,
-      runs,
+      runs: isHistory ? 1 : runs,
+      ...(isHistory ? { source: 'history' as const } : {}),
     };
 
     setLoading(true);
@@ -162,6 +189,8 @@ export default function BacktestPanel({ profile = US_PROFILE }: { profile?: Mark
 
   // Persist the rendered result: legacy fields in full — incl. the seed the
   // server echoed — so the stored run is byte-reproducible (contract §5).
+  // History results re-run against the same daily bars instead (D1 §3:
+  // deterministic, seed echoed as null) — the save passes `source` through.
   const save = async () => {
     if (!result || saving || saved) return;
     const cfg = result.config;
@@ -181,6 +210,7 @@ export default function BacktestPanel({ profile = US_PROFILE }: { profile?: Mark
           days: cfg.days,
           runs: cfg.runs,
           seed: cfg.seed,
+          ...(runSourceKind(cfg) !== 'synthetic' ? { source: 'history' as const } : {}),
           ...(saveLabel.trim() !== '' ? { label: saveLabel.trim() } : {}),
         }),
       });
@@ -315,14 +345,14 @@ export default function BacktestPanel({ profile = US_PROFILE }: { profile?: Mark
 
         <div className="flex flex-col gap-1">
           <label htmlFor="bt-days" className={labelClass}>
-            {t('backtest.days')}
+            {isHistory ? t('backtest.tradingDays') : t('backtest.days')}
           </label>
           <input
             id="bt-days"
             aria-label={t('backtest.ariaDays')}
             type="number"
-            min="5"
-            max="120"
+            min={isHistory ? 20 : 5}
+            max={isHistory ? 750 : 120}
             step="1"
             value={days}
             onChange={(e) => setDays(e.target.value)}
@@ -330,6 +360,15 @@ export default function BacktestPanel({ profile = US_PROFILE }: { profile?: Mark
             className={`w-16 ${inputClass}`}
           />
         </div>
+
+        {/* D1 §5 — data-source switch (additive; the form above is untouched) */}
+        <SourceToggle
+          testid="backtest-source"
+          value={source}
+          onChange={selectSource}
+          disabled={loading}
+          t={t}
+        />
 
         <div className="flex flex-col gap-1 pb-0.5">
           <span className={labelClass}>{t('backtest.runs')}</span>
@@ -340,8 +379,8 @@ export default function BacktestPanel({ profile = US_PROFILE }: { profile?: Mark
                 type="button"
                 data-testid={`backtest-runs-${r}`}
                 onClick={() => setRuns(r)}
-                disabled={loading}
-                className={`px-1.5 py-0.5 rounded text-[10px] font-semibold transition-colors ${
+                disabled={loading || isHistory}
+                className={`px-1.5 py-0.5 rounded text-[10px] font-semibold transition-colors${isHistory ? ' disabled:opacity-50' : ''} ${
                   runs === r
                     ? 'bg-terminal-bg text-terminal-text border border-terminal-blue'
                     : 'text-terminal-muted border border-terminal-border hover:text-terminal-text'
@@ -365,7 +404,9 @@ export default function BacktestPanel({ profile = US_PROFILE }: { profile?: Mark
         </button>
       </div>
 
-      <p className="mt-1.5 text-[10px] text-terminal-muted leading-tight">{t('backtest.helper')}</p>
+      <p className="mt-1.5 text-[10px] text-terminal-muted leading-tight">
+        {isHistory ? t('backtest.helperHistory') : t('backtest.helper')}
+      </p>
 
       {error && (
         <p data-testid="backtest-error" className="mt-1.5 text-xs text-terminal-down leading-tight">
@@ -376,6 +417,16 @@ export default function BacktestPanel({ profile = US_PROFILE }: { profile?: Mark
       {/* Results */}
       {result && stats && (
         <div data-testid="backtest-stats" className="mt-3">
+          {/* Data-source badge + evaluated date range (D1 §5, additive) */}
+          <div className="mb-1.5">
+            <SourceBadge
+              testid="backtest-source-badge"
+              source={runSourceKind(result.config)}
+              dateRange={runDateRange(result.config)}
+              t={t}
+            />
+          </div>
+
           {/* Stat cards */}
           <StatsGrid
             stats={stats}

@@ -18,7 +18,10 @@
  *                        realized-P&L EquityChart (BaselineSeries base 0)
  *   backtests            strategy-run-backtest (days/runs → POST
  *                        /api/backtest/runs {strategy_id}), run-row-${id} list,
- *                        and the two-run side-by-side runs-compare table
+ *                        and the two-run side-by-side runs-compare table.
+ *                        D1 §5: a strategy-bt-source switch mirrors the
+ *                        Backtest tab — history pins runs to 1, relabels days
+ *                        as trading days, and adds source:"history" to the POST
  *
  * Pure helpers (exported for jest): conditionText, exitsText, sizingText,
  * compareRows.
@@ -31,6 +34,7 @@ import AppShell from '@/components/AppShell';
 import SymbolLink from '@/components/SymbolLink';
 import EquityChart, { equityColors } from '@/components/backtest/EquityChart';
 import StatCard, { signed, pnlClass } from '@/components/backtest/StatCard';
+import SourceToggle from '@/components/backtest/SourceToggle';
 import { fetcher } from '@/lib/fetcher';
 import { useMarketProfile, type MarketProfile } from '@/lib/marketProfile';
 import { useT, type TFunction } from '@/lib/i18n';
@@ -38,6 +42,7 @@ import { formatMoney, formatShares } from '@/lib/format';
 import type {
   BacktestRunListItem,
   BacktestRunsListResponse,
+  BacktestSource,
   StrategyCondition,
   StrategyConditionGroup,
   StrategyExits,
@@ -295,6 +300,10 @@ function StrategyDetail({ id }: { id: string }) {
   // Backtest launcher --------------------------------------------------------
   const [days, setDays] = useState('30');
   const [runsInput, setRunsInput] = useState('1');
+  // D1 §5 — same source switch as the Backtest tab (`strategy-bt-source`).
+  // History runs are deterministic: runs pinned to 1, days = trading days.
+  const [btSource, setBtSource] = useState<BacktestSource>('synthetic');
+  const btHistory = btSource === 'history';
   const [running, setRunning] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
 
@@ -302,13 +311,15 @@ function StrategyDetail({ id }: { id: string }) {
     setRunError(null);
     setRunning(true);
     try {
+      // `source` omitted on the synthetic path — legacy payload byte-identical.
       const res = await fetch('/api/backtest/runs', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           strategy_id: id,
           days: Number(days),
-          runs: Number(runsInput),
+          runs: btHistory ? 1 : Number(runsInput),
+          ...(btHistory ? { source: 'history' as const } : {}),
         }),
       });
       if (!res.ok) {
@@ -531,13 +542,13 @@ function StrategyDetail({ id }: { id: string }) {
           <div className="flex items-end gap-2 flex-wrap">
             <div className="flex flex-col gap-1">
               <label htmlFor="st-bt-days" className={labelClass}>
-                {t('backtest.days')}
+                {btHistory ? t('backtest.tradingDays') : t('backtest.days')}
               </label>
               <input
                 id="st-bt-days"
                 type="number"
-                min="5"
-                max="120"
+                min={btHistory ? 20 : 5}
+                max={btHistory ? 750 : 120}
                 step="1"
                 value={days}
                 onChange={(e) => setDays(e.target.value)}
@@ -557,10 +568,18 @@ function StrategyDetail({ id }: { id: string }) {
                 step="1"
                 value={runsInput}
                 onChange={(e) => setRunsInput(e.target.value)}
-                disabled={running}
+                disabled={running || btHistory}
                 className={`w-16 ${inputClass}`}
               />
             </div>
+            {/* D1 §5 — data-source switch (additive; inputs above untouched) */}
+            <SourceToggle
+              testid="strategy-bt-source"
+              value={btSource}
+              onChange={setBtSource}
+              disabled={running}
+              t={t}
+            />
             <button
               type="button"
               data-testid="strategy-run-backtest"
