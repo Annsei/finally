@@ -4,12 +4,15 @@
  *
  * Left: the season leaderboard — the existing <Leaderboard/> component
  * mounted zero-modification (it also stays available in the desk's Board tab).
- * Right: season history (arena-seasons) from GET /api/seasons — period,
+ * Middle: season history (arena-seasons) from GET /api/seasons — period,
  * in-progress marker, and for ended seasons the archived results table
  * (rank/name/final_value/return_pct) with the champion highlighted in accent.
+ * Right (D2 §5, purely additive — leaderboard/seasons DOM and testids
+ * untouched): timed private competitions (<ArenaCompetitions/>).
  */
 import useSWR from 'swr';
 import AppShell from '@/components/AppShell';
+import ArenaCompetitions from '@/components/ArenaCompetitions';
 import Leaderboard from '@/components/Leaderboard';
 import { fetcher } from '@/lib/fetcher';
 import { useMarketProfile } from '@/lib/marketProfile';
@@ -140,6 +143,14 @@ export default function ArenaPage() {
             ) : (
               seasons.map((season) => <SeasonCard key={season.id} season={season} />)
             )}
+          </div>
+        </section>
+
+        {/* Timed private competitions (D2 §5) — additive section */}
+        <section className="flex-[2] min-w-0 flex flex-col min-h-0 border border-terminal-border rounded bg-terminal-surface/30">
+          <h2 className={sectionTitleClass}>{t('arena.compTitle')}</h2>
+          <div className="flex-1 min-h-0 overflow-auto">
+            <ArenaCompetitions />
           </div>
         </section>
       </div>

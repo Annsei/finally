@@ -6,7 +6,15 @@
  * dark surface #0d1117): tech #209dd7 · financials #b8870a · crypto #a875c9;
  * cash/other are neutral remainder categories. Identity is never color-alone —
  * every row carries its label; direction/status coloring is reserved for P&L.
+ *
+ * D2 §4 (additive — existing cards and testids untouched): portfolio risk
+ * cards `analytics-var` (1-day 95% historical VaR, positive loss %) and
+ * `analytics-beta` (vs the equal-weight universe), with a
+ * `risk_window_bars` badge. While the backend reports null (fewer than 20
+ * common daily bars / no positions / zero benchmark variance) both cards show
+ * "—" and `analytics-risk-hint` links to the /market historical-data card.
  */
+import Link from 'next/link';
 import useSWR from 'swr';
 import { fetcher } from '@/lib/fetcher';
 import { formatMoney, formatShares } from '@/lib/format';
@@ -93,6 +101,42 @@ export default function AnalyticsPanel() {
           value={data.sharpe != null ? data.sharpe.toFixed(2) : '—'}
           testid="stat-sharpe"
         />
+      </div>
+
+      {/* Portfolio risk (D2 §4) — VaR/beta over synced daily bars. Neutral
+          tone: these are risk measures, not P&L direction. */}
+      <div>
+        <div className="text-[10px] font-semibold uppercase tracking-wider text-terminal-muted mb-1.5 flex items-center gap-2">
+          <span>{t('analytics.riskTitle')}</span>
+          {data.risk_window_bars != null && data.risk_window_bars > 0 && (
+            <span
+              data-testid="analytics-risk-window"
+              className="text-[9px] font-semibold px-1 rounded border border-terminal-border text-terminal-muted normal-case tracking-normal tabular-nums"
+            >
+              {t('analytics.riskWindow', { n: data.risk_window_bars })}
+            </span>
+          )}
+        </div>
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
+          <StatTile
+            label={t('analytics.var')}
+            value={data.var_95_pct != null ? `${data.var_95_pct.toFixed(2)}%` : '—'}
+            testid="analytics-var"
+          />
+          <StatTile
+            label={t('analytics.beta')}
+            value={data.beta != null ? data.beta.toFixed(2) : '—'}
+            testid="analytics-beta"
+          />
+        </div>
+        {(data.var_95_pct == null || data.beta == null) && (
+          <p data-testid="analytics-risk-hint" className="mt-1.5 text-[10px] text-terminal-muted">
+            {t('analytics.riskHint')}{' '}
+            <Link href="/market" className="underline text-terminal-blue hover:text-terminal-text">
+              {t('history.title')} →
+            </Link>
+          </p>
+        )}
       </div>
 
       {/* Sector allocation — labeled bar list, weights sum to portfolio value */}

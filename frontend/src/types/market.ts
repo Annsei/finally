@@ -603,6 +603,48 @@ export interface SeasonsResponse {
   seasons: Season[];
 }
 
+// ---------------------------------------------------------------------------
+// Timed private competitions (D2 §3) — status is derived server-side from
+// starts_at/ends_at at read time; no background loop.
+// ---------------------------------------------------------------------------
+export type CompetitionStatus = 'upcoming' | 'running' | 'ended';
+
+// GET /api/competitions?scope=mine|all list item. `code` is present only on
+// scope=mine rows the caller created (share-to-join stays creator-controlled).
+export interface CompetitionSummary {
+  id: string;
+  name: string;
+  code?: string | null;
+  status: CompetitionStatus;
+  member_count: number;
+  starts_at: string; // ISO timestamp string
+  ends_at: string;   // ISO timestamp string
+}
+
+export interface CompetitionsListResponse {
+  competitions: CompetitionSummary[];
+}
+
+// POST /api/competitions 201 — the created competition (creator auto-joined):
+export interface CompetitionCreateResponse {
+  competition: CompetitionSummary;
+}
+
+// GET /api/competitions/{id} board row — running: live standings; ended: the
+// member's last portfolio_snapshot before ends_at (baseline fallback → 0%).
+export interface CompetitionBoardRow {
+  user_id: string;
+  name: string;
+  baseline_value: number;
+  value: number;
+  return_pct: number;
+  rank: number;
+}
+
+export interface CompetitionDetailResponse extends CompetitionSummary {
+  board: CompetitionBoardRow[];
+}
+
 // GET /api/portfolio/analytics (M3.4):
 export interface AnalyticsTradeRef {
   ticker: string;
@@ -629,6 +671,13 @@ export interface AnalyticsResponse {
   best_trade: AnalyticsTradeRef | null;
   worst_trade: AnalyticsTradeRef | null;
   sector_allocation: SectorAllocation[];
+  // D2 §4 additive risk keys — optional so pre-D2 payloads stay valid.
+  // var_95_pct: 1-day historical VaR as a POSITIVE loss % (2dp); beta vs the
+  // equal-weight universe benchmark. Both null when <20 common bars / no
+  // positions / zero benchmark variance; risk_window_bars = bars used (0 = none).
+  var_95_pct?: number | null;
+  beta?: number | null;
+  risk_window_bars?: number;
 }
 
 // GET /api/portfolio/trades response (newest first):
