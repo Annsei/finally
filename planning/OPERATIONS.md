@@ -46,6 +46,29 @@ The application refuses unsafe classroom-server settings. It does not support
 multiple replicas, multiple uvicorn workers, ephemeral database storage or a
 network-shared SQLite file.
 
+## Market data sources
+
+`FINALLY_LIVE_SOURCE` selects the price feed: `auto` (default), `simulator`,
+`massive` or `akshare`. `auto` preserves the long-standing selection exactly —
+`MASSIVE_API_KEY` set picks Massive, otherwise the built-in simulator. The
+simulator remains the product default; both real feeds are explicit opt-ins.
+
+- `massive` requires `MASSIVE_API_KEY` (real US market data).
+- `akshare` polls real A-share spot quotes and requires `FINALLY_MARKET=cn`;
+  `FINALLY_AKSHARE_POLL_SECONDS` sets its poll cadence (default 15 seconds,
+  clamped to 5..120).
+- Misconfiguration — an unknown value, `massive` without a key, or `akshare`
+  outside the CN profile — fails startup rather than degrading silently.
+
+Real feeds run a 24/7 session clock, but real quotes freeze once the actual
+exchange closes: the feed keeps serving the closing frame, quotes go stale,
+and the `FINALLY_QUOTE_MAX_AGE_SECONDS` freshness gate blocks trade execution
+until the next real session. This is expected behavior, not an outage —
+schedule classroom use inside real market hours, or keep the simulator, which
+is always live on its accelerated session clock. AKShare data is
+teaching-grade only, not investment-grade, and automated tests and E2E runs
+never enable a real feed.
+
 ## Liveness and readiness
 
 - `GET /api/health` is process liveness.

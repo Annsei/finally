@@ -1,6 +1,6 @@
 # FinAlly current state
 
-Updated: 2026-07-10  
+Updated: 2026-07-12  
 Status: V2 product surface complete; repository-wide hardening is in progress.
 
 This file is the canonical starting point for contributors and coding agents.
@@ -21,6 +21,13 @@ ships as a modular monolith in one container:
 - manual/advanced orders, standing rules, declarative strategies and backtests;
 - LLM chat actions and deterministic `LLM_MOCK` mode;
 - cookie identities for the UI and guarded Bearer keys for external bots.
+
+Real live-quote feeds are explicit opt-ins via `FINALLY_LIVE_SOURCE`
+(`massive` for US, `akshare` for CN; default `auto` keeps the simulator-first
+behavior). They are teaching-grade data only, and real quotes freeze outside
+real exchange hours, so the quote freshness gate blocks trading until the next
+session — expected behavior, documented in [OPERATIONS.md](OPERATIONS.md). The
+simulator remains the product default.
 
 ## Supported runtime boundary
 
