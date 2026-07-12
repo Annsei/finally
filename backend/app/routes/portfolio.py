@@ -6,7 +6,9 @@ Provides:
 - GET /api/portfolio/trades — trade blotter (executed trades, newest first)
 - GET /api/portfolio/history — portfolio value snapshots over time
 - GET /api/portfolio/analytics — trading analytics summary (M3.4): win rate,
-  realized P&L, max drawdown, Sharpe, best/worst trade, sector allocation
+  realized P&L, max drawdown, Sharpe, best/worst trade, sector allocation;
+  plus (D2 §4, additive on profile-configured routers) the daily_bars-backed
+  portfolio risk keys var_95_pct / beta / risk_window_bars
 
 All routes are created via the factory function ``create_portfolio_router`` which
 closes over the shared ``PriceCache`` instance and the database path.
@@ -147,6 +149,150 @@ def _sharpe(values: list[float]) -> float | None:
     if std < 1e-12:
         return None
     return round(mean / std * math.sqrt(len(returns)), 4)
+
+
+# --- Portfolio risk metrics (D2 §4): VaR / beta from daily_bars ---------------
+
+# Risk window: the most recent bars every held ticker covers in common.
+RISK_WINDOW_BARS = 60
+# Below this many common bars the estimates are noise — report null.
+MIN_RISK_BARS = 20
+# Guard against float dust standing in for the contract's "zero variance".
+_RISK_MIN_BENCH_VARIANCE = 1e-12
+
+
+def _percentile(sorted_values: list[float], q: float) -> float:
+    """Linear-interpolation percentile of a pre-sorted ascending list.
+
+    ``q`` is a fraction in [0, 1]. This is numpy's default ("linear")
+    method: position q*(n-1) interpolated between its neighbors — pinned by
+    hand-computed fixtures in the tests.
+    """
+    n = len(sorted_values)
+    if n == 1:
+        return sorted_values[0]
+    pos = q * (n - 1)
+    lo = math.floor(pos)
+    hi = math.ceil(pos)
+    if lo == hi:
+        return sorted_values[lo]
+    frac = pos - lo
+    return sorted_values[lo] * (1.0 - frac) + sorted_values[hi] * frac
+
+
+def _risk_metrics(
+    conn: sqlite3.Connection,
+    price_cache: PriceCache,
+    user_id: str,
+    market: str,
+    benchmark_tickers: list[str],
+) -> tuple[float | None, float | None, int]:
+    """1-day 95% historical VaR and beta of the CURRENT holdings (D2 §4).
+
+    Returns ``(var_95_pct, beta, risk_window_bars)``:
+
+    - Window: the most recent ``RISK_WINDOW_BARS`` (60) daily_bars dates that
+      EVERY held ticker covers in common (source-agnostic — the committed
+      sample bars work out of the box).
+    - Weights ``w_i``: each position's share of the total position market
+      value (live cache price, avg-cost fallback — the snapshot caliber).
+      Portfolio daily return r_p = Σ w_i · r_i over the window.
+    - Benchmark: the equal-weight mean daily return of the market universe
+      tickers (``benchmark_tickers``) restricted to the SAME dates; a
+      universe ticker missing any window date drops out of the benchmark.
+    - ``var_95_pct`` = −(5th percentile of r_p) × 100 — a POSITIVE number is
+      a loss percent (2dp; a portfolio whose worst tail is a gain yields a
+      negative VaR). ``beta`` = cov(r_p, r_mkt) / var(r_mkt), population
+      moments, 2dp.
+
+    Null contract: fewer than ``MIN_RISK_BARS`` (20) common bars, no
+    positions, or (near-)zero benchmark variance — which includes an empty
+    benchmark — makes BOTH metrics null. ``risk_window_bars`` is the bar
+    count that actually produced the metrics; it is 0 whenever they are
+    null (the frontend badge/hint contract, mirrored by the E2E spec).
+    """
+    positions = conn.execute(
+        "SELECT ticker, quantity, avg_cost FROM positions WHERE user_id = ?",
+        (user_id,),
+    ).fetchall()
+    if not positions:
+        return None, None, 0
+
+    values: dict[str, float] = {}
+    for row in positions:
+        ticker: str = row["ticker"]
+        price = price_cache.get_price(ticker) or row["avg_cost"]
+        values[ticker] = values.get(ticker, 0.0) + row["quantity"] * price
+    total = sum(values.values())
+    if total <= 0:
+        return None, None, 0
+    weights = {ticker: value / total for ticker, value in values.items()}
+
+    def _closes(ticker: str) -> dict[str, float]:
+        """date → close for one ticker (non-positive closes are unusable)."""
+        rows = conn.execute(
+            "SELECT date, close FROM daily_bars "
+            "WHERE market = ? AND ticker = ? AND close > 0",
+            (market, ticker),
+        ).fetchall()
+        return {bar["date"]: bar["close"] for bar in rows}
+
+    held_closes = {ticker: _closes(ticker) for ticker in weights}
+    common = set.intersection(*(set(closes) for closes in held_closes.values()))
+    if len(common) < MIN_RISK_BARS:
+        return None, None, 0
+    window = sorted(common)[-RISK_WINDOW_BARS:]
+
+    portfolio_returns = [
+        sum(
+            weight * (held_closes[ticker][curr] / held_closes[ticker][prev] - 1.0)
+            for ticker, weight in weights.items()
+        )
+        for prev, curr in zip(window, window[1:])
+    ]
+
+    # Benchmark constituents: universe tickers covering EVERY window date.
+    window_set = set(window)
+    bench_series: list[list[float]] = []
+    seen: set[str] = set()
+    for raw in benchmark_tickers:
+        ticker = raw.strip().upper()
+        if not ticker or ticker in seen:
+            continue
+        seen.add(ticker)
+        closes = held_closes.get(ticker)
+        if closes is None:
+            closes = _closes(ticker)
+        if not window_set.issubset(closes):
+            continue
+        bench_series.append(
+            [closes[curr] / closes[prev] - 1.0 for prev, curr in zip(window, window[1:])]
+        )
+    if not bench_series:
+        return None, None, 0
+    n_returns = len(window) - 1
+    market_returns = [
+        sum(series[i] for series in bench_series) / len(bench_series)
+        for i in range(n_returns)
+    ]
+
+    mean_m = sum(market_returns) / n_returns
+    var_m = sum((r - mean_m) ** 2 for r in market_returns) / n_returns
+    if var_m <= _RISK_MIN_BENCH_VARIANCE:
+        return None, None, 0
+
+    mean_p = sum(portfolio_returns) / n_returns
+    cov = (
+        sum(
+            (p - mean_p) * (m - mean_m)
+            for p, m in zip(portfolio_returns, market_returns)
+        )
+        / n_returns
+    )
+
+    var_95_pct = round(-_percentile(sorted(portfolio_returns), 0.05) * 100.0, 2)
+    beta = round(cov / var_m, 2)
+    return var_95_pct, beta, len(window)
 
 
 def execute_trade_on_conn(
@@ -755,6 +901,13 @@ def create_portfolio_router(
              "worst_trade": {...} | null,     # min realized_pnl sell
              "sector_allocation": [{"sector", "value", "weight"}]}
 
+        D2 §4 (additive; every pre-existing key and value stays
+        byte-identical): routers built WITH a market profile — as main.py
+        always does — append the daily_bars-backed risk keys
+        ``var_95_pct``, ``beta`` and ``risk_window_bars`` (see
+        ``_risk_metrics``). A profile-less router (the pre-D2 construction
+        used by legacy fixtures) returns exactly the pre-D2 shape.
+
         best_trade/worst_trade carry {"ticker", "side", "quantity", "price",
         "realized_pnl", "executed_at"}. sector_allocation values positions at
         the live cache price, grouped by ``sector_for``, plus a "cash" entry
@@ -841,7 +994,7 @@ def create_portfolio_router(
                 )
             ]
 
-            return {
+            analytics = {
                 "total_trades": totals["total"] or 0,
                 "sell_trades": totals["sells"] or 0,
                 "win_rate": win_rate,
@@ -852,6 +1005,25 @@ def create_portfolio_router(
                 "worst_trade": worst_trade,
                 "sector_allocation": sector_allocation,
             }
+
+            # D2 §4 additive risk keys — the profile supplies the daily_bars
+            # market partition and the equal-weight benchmark universe, so
+            # they exist only on profile-configured routers (main.py always
+            # is; the profile-less legacy construction keeps the pre-D2
+            # shape byte-for-byte). Computed inline on the same connection.
+            if profile is not None:
+                var_95_pct, beta, risk_window_bars = _risk_metrics(
+                    conn,
+                    price_cache,
+                    user_id,
+                    market=profile.key,
+                    benchmark_tickers=list(profile.universe.default_watchlist),
+                )
+                analytics["var_95_pct"] = var_95_pct
+                analytics["beta"] = beta
+                analytics["risk_window_bars"] = risk_window_bars
+
+            return analytics
         finally:
             conn.close()
 

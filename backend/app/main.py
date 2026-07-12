@@ -29,6 +29,7 @@ from app.market import (
     create_stream_router,
     session_clock_loop,
 )
+from app.market.factory import REAL_DATA_SOURCES, resolve_live_source
 from app.market.profiles import MarketProfile, resolve_market_profile
 from app.settings import RuntimeSettings
 
@@ -95,11 +96,13 @@ def _read_session_config() -> tuple[float, float] | None:
 
 
 def _create_session_clock(profile: MarketProfile | None = None) -> SessionClock:
-    """Build the app's SessionClock from the environment (M3.1 / CN-2 §5).
+    """Build the app's SessionClock from the environment (M3.1 / CN-2 §5 / D2 §1).
 
-    Real market data (MASSIVE_API_KEY active) forces 24/7 mode regardless of
-    the session env vars — the simulator's session cycle makes no sense
-    against live quotes. Otherwise the env config decides (see
+    Real market data (a resolved ``massive`` OR ``akshare`` live source)
+    forces 24/7 mode regardless of the session env vars — the simulator's
+    session cycle makes no sense against live quotes. With the default
+    ``FINALLY_LIVE_SOURCE`` (auto) this is byte-identical to the pre-D2
+    MASSIVE_API_KEY check. Otherwise the env config decides (see
     ``_read_session_config``).
 
     CN-2 §5: when the active profile has ``midday_break`` and the session clock
@@ -107,10 +110,16 @@ def _create_session_clock(profile: MarketProfile | None = None) -> SessionClock:
     ``FINALLY_SESSION_BREAK_SECONDS`` (default 120), turning the day into the
     four-phase am -> midday -> pm -> closed cycle.
     """
-    massive_active = bool(os.getenv("MASSIVE_API_KEY", "").strip())
-    session_config = None if massive_active else _read_session_config()
+    live_source = resolve_live_source()
+    real_data_active = live_source in REAL_DATA_SOURCES
+    session_config = None if real_data_active else _read_session_config()
     if session_config is None:
-        reason = "Massive API active" if massive_active else "env config"
+        if live_source == "massive":
+            reason = "Massive API active"
+        elif live_source == "akshare":
+            reason = "AKShare live data active"
+        else:
+            reason = "env config"
         logger.info("FinAlly startup: session clock in 24/7 mode (%s)", reason)
         return SessionClock()
     open_seconds, break_seconds = session_config
@@ -174,7 +183,12 @@ async def lifespan(app: FastAPI):
     # 整手/涨跌停/T+1/fee/午休 mechanics into every trade-executing factory/loop.
     profile = resolve_market_profile()
     logger.info("FinAlly startup: market profile '%s' active", profile.key)
-    if profile.key == "cn" and os.getenv("MASSIVE_API_KEY", "").strip():
+    # D2 §1: scoped to the RESOLVED live source (byte-identical with the
+    # default FINALLY_LIVE_SOURCE, where 'massive' resolves iff the key is
+    # set) so an explicit akshare/simulator choice on cn is not blocked by a
+    # stray MASSIVE_API_KEY. An invalid FINALLY_LIVE_SOURCE raises here —
+    # explicit misconfiguration fails startup.
+    if profile.key == "cn" and resolve_live_source() == "massive":
         raise ValueError(
             "MASSIVE_API_KEY currently supports only the US market profile; "
             "unset it to use the CN simulator"
@@ -347,6 +361,11 @@ async def lifespan(app: FastAPI):
             settings=settings,
         )
     )
+
+    # Competitions router (D2 §3 — timed private competitions). Creation is
+    # cookie-only (Bearer 403 in-route); join/read allow Bearer by design.
+    from app.routes.competitions import create_competitions_router
+    app.include_router(create_competitions_router(price_cache, db_path))
 
     # Mount static files LAST — must not shadow /api/* routes.
     _mount_static_files(app)

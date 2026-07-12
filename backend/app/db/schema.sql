@@ -283,6 +283,37 @@ CREATE TABLE IF NOT EXISTS daily_bars (
     PRIMARY KEY (market, ticker, date)
 );
 
+-- Competitions (D2 §3): timed private competitions. code is the 6-char
+-- share-to-join invite (A-Z2-9 minus the confusable I/O; 0/1 are excluded by
+-- construction), UNIQUE at the database level. Status is derived from time
+-- (no background loop): now < starts_at -> upcoming, now < ends_at ->
+-- running, else ended; this phase stamps starts_at = created_at so
+-- competitions are born running. init_db() executes this script on every
+-- startup, so pre-existing database volumes pick this table up idempotently
+-- via IF NOT EXISTS (new table — no column migration).
+CREATE TABLE IF NOT EXISTS competitions (
+    id         TEXT PRIMARY KEY,
+    name       TEXT NOT NULL,
+    code       TEXT NOT NULL UNIQUE,
+    created_by TEXT NOT NULL,
+    starts_at  TEXT NOT NULL,
+    ends_at    TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+-- Competition members (D2 §3): one row per (competition, user).
+-- baseline_value is the member's total portfolio value at join time
+-- (compute_standings caliber) — the fixed denominator of their board
+-- return %. Competitions do not isolate money: one portfolio may compete
+-- in several competitions at once (teaching trade-off, contract §3).
+CREATE TABLE IF NOT EXISTS competition_members (
+    competition_id TEXT NOT NULL,
+    user_id        TEXT NOT NULL,
+    joined_at      TEXT NOT NULL,
+    baseline_value REAL NOT NULL,
+    PRIMARY KEY (competition_id, user_id)
+);
+
 -- API keys (P3 §1): programmatic Bearer credentials for the open paper-broker
 -- API. Only the sha256 hex of the full plaintext is stored (key_hash) plus an
 -- 11-char display prefix ("fk_XXXXXXXX") for list identification — the
@@ -373,6 +404,8 @@ CREATE INDEX IF NOT EXISTS idx_api_audit_key_created
     ON api_audit (key_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_admin_audit_created
     ON admin_audit (created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_competition_members_user
+    ON competition_members (user_id);
 -- Database-level backstop for the season-reset concurrency invariant.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_seasons_one_current
     ON seasons ((1)) WHERE ended_at IS NULL;

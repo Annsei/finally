@@ -8,7 +8,8 @@ Public API:
     SessionClock        - Open/closed trading-session state machine (M3.1)
     session_clock_loop  - Background task driving session transitions
     asset_class_for     - 'equity' | 'crypto' classification helper (M3.3)
-    create_market_data_source - Factory that selects simulator or Massive
+    create_market_data_source - Factory that selects simulator, Massive, or
+                          AKShare live quotes (FINALLY_LIVE_SOURCE, D2 §1)
     create_stream_router - FastAPI router factory for SSE endpoint
 """
 

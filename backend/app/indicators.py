@@ -12,10 +12,11 @@ Provides three layers:
    samples into completed one-minute OHLCV bars (the still-forming newest
    minute is always dropped so values never jitter).
 2. **Indicators** — ``sma`` / ``ema`` / ``rsi`` / ``window_high`` /
-   ``window_low`` point functions plus their ``*_series`` forms. The point
-   functions are defined as the last element of the series functions, so a
-   backtest that precomputes a series once and indexes into it (performance)
-   is provably identical to the live engine calling the point function.
+   ``window_low`` / ``macd`` / ``bollinger`` / ``atr`` / ``kdj`` point
+   functions plus their ``*_series`` forms. The point functions are defined
+   as the last element of the series functions, so a backtest that
+   precomputes a series once and indexes into it (performance) is provably
+   identical to the live engine calling the point function.
    All return ``float`` or ``None`` when there is not enough data.
 3. **Declarative conditions** — the ``FIELD_SPECS`` whitelist registry,
    ``validate_condition_group`` / ``validate_exits`` / ``validate_sizing``
@@ -266,6 +267,87 @@ def rolling_std_series(values: Sequence[float], n: int) -> list[float | None]:
     return out
 
 
+def atr_series(
+    highs: Sequence[float],
+    lows: Sequence[float],
+    closes: Sequence[float],
+    period: int = 14,
+) -> list[float | None]:
+    """Average True Range series with Wilder smoothing (D2 contract §2).
+
+    ``TR[i] = max(high-low, |high-prev_close|, |low-prev_close|)`` — defined
+    from index 1 (needs the previous close). The first ATR value lands at
+    index ``period`` and is the simple mean of the first ``period`` TRs
+    (Wilder's seed, the same convention as :func:`rsi_series`); afterwards
+    ``atr = (prev_atr * (period-1) + tr) / period``. Golden-vector tests pin
+    the output against an independent dev-time reference computation.
+    """
+    m = len(closes)
+    out: list[float | None] = [None] * m
+    if period <= 0 or m < period + 1:
+        return out
+    tr_sum = 0.0
+    value = 0.0
+    for i in range(1, m):
+        h = float(highs[i])
+        lo = float(lows[i])
+        pc = float(closes[i - 1])
+        tr = max(h - lo, abs(h - pc), abs(lo - pc))
+        if i <= period:
+            tr_sum += tr
+            if i == period:
+                value = tr_sum / period
+                out[i] = value
+        else:
+            value = (value * (period - 1) + tr) / period
+            out[i] = value
+    return out
+
+
+def kdj_series(
+    highs: Sequence[float],
+    lows: Sequence[float],
+    closes: Sequence[float],
+    n: int = 9,
+    k_smooth: int = 3,
+    d_smooth: int = 3,
+) -> tuple[list[float | None], list[float | None], list[float | None]]:
+    """KDJ (随机指标) K/D/J series, Chinese convention (D2 contract §2).
+
+    ``RSV = (close - LLV(low, n)) / (HHV(high, n) - LLV(low, n)) * 100``
+    over the trailing ``n`` bars (first value at index ``n-1``); a flat
+    window (HHV == LLV) yields the neutral 50. K and D are the classic
+    recursions seeded at 50 (K/D 初值 50):
+    ``K = ((k_smooth-1) * prev_K + RSV) / k_smooth``,
+    ``D = ((d_smooth-1) * prev_D + K) / d_smooth``, ``J = 3K - 2D``.
+    Golden-vector tests pin the output against an independent dev-time
+    reference computation.
+    """
+    m = len(closes)
+    k_out: list[float | None] = [None] * m
+    d_out: list[float | None] = [None] * m
+    j_out: list[float | None] = [None] * m
+    if n <= 0 or k_smooth <= 0 or d_smooth <= 0 or m < n:
+        return k_out, d_out, j_out
+    hhv = rolling_max_series(highs, n)
+    llv = rolling_min_series(lows, n)
+    k_prev = 50.0
+    d_prev = 50.0
+    for i in range(n - 1, m):
+        window_range = hhv[i] - llv[i]
+        if window_range <= 0:
+            rsv = 50.0
+        else:
+            rsv = (float(closes[i]) - llv[i]) / window_range * 100.0
+        k_val = ((k_smooth - 1) * k_prev + rsv) / k_smooth
+        d_val = ((d_smooth - 1) * d_prev + k_val) / d_smooth
+        k_out[i] = k_val
+        d_out[i] = d_val
+        j_out[i] = 3.0 * k_val - 2.0 * d_val
+        k_prev, d_prev = k_val, d_val
+    return k_out, d_out, j_out
+
+
 def macd_series(
     closes: Sequence[float], fast: int = 12, slow: int = 26, signal: int = 9
 ) -> tuple[list[float | None], list[float | None], list[float | None]]:
@@ -383,6 +465,36 @@ def bollinger(
     if not mid:
         return None, None, None
     return mid[-1], upper[-1], lower[-1]
+
+
+def atr(
+    highs: Sequence[float],
+    lows: Sequence[float],
+    closes: Sequence[float],
+    period: int = 14,
+) -> float | None:
+    """Wilder ATR as of the last bar (D2 §2); ``None`` with fewer than
+    ``period + 1`` bars. Defined as the last element of :func:`atr_series`
+    — point/series parity by construction."""
+    series = atr_series(highs, lows, closes, period)
+    return series[-1] if series else None
+
+
+def kdj(
+    highs: Sequence[float],
+    lows: Sequence[float],
+    closes: Sequence[float],
+    n: int = 9,
+    k_smooth: int = 3,
+    d_smooth: int = 3,
+) -> tuple[float | None, float | None, float | None]:
+    """``(K, D, J)`` as of the last bar (D2 §2); ``None`` triple with fewer
+    than ``n`` bars. Defined as the last element of :func:`kdj_series` —
+    point/series parity by construction."""
+    k_series, d_series, j_series = kdj_series(highs, lows, closes, n, k_smooth, d_smooth)
+    if not k_series:
+        return None, None, None
+    return k_series[-1], d_series[-1], j_series[-1]
 
 
 # --------------------------------------------------------------------------
@@ -562,6 +674,37 @@ def _eval_boll_break(op, value, params, ctx, idx, quote) -> bool:
     return price <= mid - k * std
 
 
+def _eval_kdj_cross(op, value, params, ctx, idx, quote) -> bool:
+    """KDJ K/D cross on the completed-bar series (D2 contract §2).
+
+    ``above`` = K crosses ABOVE D on this bar (previous bar K <= D, current
+    K > D); ``below`` is the mirrored downward cross. Warm-up (any None leg)
+    evaluates False — the same strict-current/inclusive-previous semantics
+    as the other cross detectors.
+    """
+    n = params["n"]
+    k_now = _series_at(ctx, ("kdjk", n), idx)
+    d_now = _series_at(ctx, ("kdjd", n), idx)
+    k_prev = _series_at(ctx, ("kdjk", n), idx - 1)
+    d_prev = _series_at(ctx, ("kdjd", n), idx - 1)
+    if None in (k_now, d_now, k_prev, d_prev):
+        return False
+    if op == "above":
+        return k_prev <= d_prev and k_now > d_now
+    return k_prev >= d_prev and k_now < d_now
+
+
+def _eval_atr_pct(op, value, params, ctx, idx, quote) -> bool:
+    """ATR as a percent of the close — volatility filter (D2 contract §2).
+
+    ``above``: ATR/close*100 >= value; ``below``: <= value. The series is
+    precomputed per completed bar (each bar's ATR over its own close), so
+    live and backtest read the identical value by construction.
+    """
+    level = _series_at(ctx, ("atrp", params["period"]), idx)
+    return level is not None and _cmp(op, level, value)
+
+
 def _check_fast_slow(params: dict) -> str | None:
     if params["fast"] >= params["slow"]:
         return "param 'fast' must be less than 'slow'"
@@ -639,8 +782,32 @@ D1_FIELD_SPECS: dict[str, FieldSpec] = {
     ),
 }
 
-# The full whitelist every validator/evaluator consults.
+# The P2 + D1 whitelist. D1 tests pin this dict's key set to exactly
+# ``set(FIELD_SPECS) | set(D1_FIELD_SPECS)``, so — like FIELD_SPECS before it
+# — it can never grow again. Later extension registries merge into
+# ACTIVE_FIELD_SPECS below instead.
 ALL_FIELD_SPECS: dict[str, FieldSpec] = {**FIELD_SPECS, **D1_FIELD_SPECS}
+
+# D2 contract §2 extension fields. Same pinned-registry split as D1: a
+# separate registry keeps the existing exact-set pins on FIELD_SPECS /
+# D1_FIELD_SPECS / ALL_FIELD_SPECS green while kdj_cross/atr_pct validate
+# and evaluate exactly like first-class fields everywhere.
+D2_FIELD_SPECS: dict[str, FieldSpec] = {
+    "kdj_cross": FieldSpec(
+        params={"n": ParamSpec(5, 30, default=9)},
+        value_rule="forbidden",
+        evaluator=_eval_kdj_cross,
+    ),
+    "atr_pct": FieldSpec(
+        params={"period": ParamSpec(5, 50, default=14)},
+        value_rule="required_positive",
+        evaluator=_eval_atr_pct,
+    ),
+}
+
+# The full whitelist every validator/evaluator consults (P2 nine + D1 pair
+# + D2 pair).
+ACTIVE_FIELD_SPECS: dict[str, FieldSpec] = {**ALL_FIELD_SPECS, **D2_FIELD_SPECS}
 
 
 def max_condition_warmup_bars() -> int:
@@ -652,17 +819,25 @@ def max_condition_warmup_bars() -> int:
     (``slow + 1``) and RSI's first value needs ``period + 1`` closes.
     D1 fields: macd_cross's signal line first resolves at
     ``slow + signal - 2`` and the cross reads the previous bar, so its
-    warm-up is ``slow + signal``; boll_break needs ``period`` bars. Both
-    stay within the P2 maximum (240), so the live ring-buffer capacity is
-    unchanged.
+    warm-up is ``slow + signal``; boll_break needs ``period`` bars. D2
+    fields: kdj_cross's K/D first resolve at ``n - 1`` and the cross reads
+    the previous bar (``n + 1`` bars); atr_pct's first ATR lands at index
+    ``period`` (``period + 1`` bars). All stay within the P2 maximum (240),
+    so the live ring-buffer capacity is unchanged.
     """
     most = 0
-    for name, spec in ALL_FIELD_SPECS.items():
+    for name, spec in ACTIVE_FIELD_SPECS.items():
         if name == "macd_cross":
             most = max(most, int(spec.params["slow"].hi + spec.params["signal"].hi))
             continue
         if name == "boll_break":
             most = max(most, int(spec.params["period"].hi))
+            continue
+        if name == "kdj_cross":
+            most = max(most, int(spec.params["n"].hi) + 1)
+            continue
+        if name == "atr_pct":
+            most = max(most, int(spec.params["period"].hi) + 1)
             continue
         extra = 1 if name in ("ma_cross", "ema_cross", "rsi") else 0
         for ps in spec.params.values():
@@ -698,7 +873,7 @@ def _validate_condition(cond: object) -> str | None:
     if extra:
         return f"unknown condition keys: {sorted(extra)}"
     field_name = cond.get("field")
-    spec = ALL_FIELD_SPECS.get(field_name) if isinstance(field_name, str) else None
+    spec = ACTIVE_FIELD_SPECS.get(field_name) if isinstance(field_name, str) else None
     if spec is None:
         return f"unknown field {field_name!r}"
     op = cond.get("op")
@@ -904,17 +1079,17 @@ def build_series_context(entry: Mapping, bars_1m) -> dict:
     """Precompute every indicator series the entry's conditions read.
 
     Returns ``{(kind, *params): series}`` keyed by indicator kind ('sma' |
-    'ema' | 'rsi' | 'whigh' | 'wlow' | 'bstd' | 'macdl' | 'macds') and its
-    parameters. Entries whose conditions need no series (price/
-    day_change_pct only) return ``{}`` without touching the bars at all.
-    Computed with the same series functions the point indicators are defined
-    by — a context evaluated at its last index is identical to calling the
-    point functions on the same bars.
+    'ema' | 'rsi' | 'whigh' | 'wlow' | 'bstd' | 'macdl' | 'macds' | 'kdjk' |
+    'kdjd' | 'atrp') and its parameters. Entries whose conditions need no
+    series (price/day_change_pct only) return ``{}`` without touching the
+    bars at all. Computed with the same series functions the point
+    indicators are defined by — a context evaluated at its last index is
+    identical to calling the point functions on the same bars.
     """
     keys: set[tuple] = set()
     for cond in _conditions(entry):
         field_name = cond.get("field") if isinstance(cond, Mapping) else None
-        spec = ALL_FIELD_SPECS.get(field_name)
+        spec = ACTIVE_FIELD_SPECS.get(field_name)
         if spec is None or not spec.params:
             continue
         params = _condition_params(cond, spec)
@@ -939,6 +1114,11 @@ def build_series_context(entry: Mapping, bars_1m) -> dict:
             # Bands recompose from the shared SMA + population-std series.
             keys.add(("sma", params["period"]))
             keys.add(("bstd", params["period"]))
+        elif field_name == "kdj_cross":
+            # One computation feeds both stored series (K + D).
+            keys.add(("kdj", params["n"]))
+        elif field_name == "atr_pct":
+            keys.add(("atrp", params["period"]))
     if not keys:
         return {}
     closes, highs, lows = _extract_columns(bars_1m)
@@ -962,11 +1142,22 @@ def build_series_context(entry: Mapping, bars_1m) -> dict:
             macd_line, signal_line, _hist = macd_series(closes, fast, slow, signal)
             ctx[("macdl", fast, slow, signal)] = macd_line
             ctx[("macds", fast, slow, signal)] = signal_line
+        elif kind == "kdj":
+            k_series, d_series, _j = kdj_series(highs, lows, closes, n)
+            ctx[("kdjk", n)] = k_series
+            ctx[("kdjd", n)] = d_series
+        elif kind == "atrp":
+            # Each bar's ATR as a percent of that bar's close — the exact
+            # :func:`atr_series` values, recomposed per index.
+            ctx[key] = [
+                (a / c * 100.0) if (a is not None and c > 0) else None
+                for a, c in zip(atr_series(highs, lows, closes, n), closes)
+            ]
     return ctx
 
 
 def _evaluate_condition_at(cond: Mapping, ctx: Mapping, idx: int, quote) -> bool:
-    spec = ALL_FIELD_SPECS.get(cond.get("field")) if isinstance(cond, Mapping) else None
+    spec = ACTIVE_FIELD_SPECS.get(cond.get("field")) if isinstance(cond, Mapping) else None
     if spec is None:
         return False
     op = cond.get("op")

@@ -12,7 +12,8 @@ asyncio task (``session_clock_loop``, wired in main.py's lifespan) calls
 24/7 mode: constructing the clock without durations (or with any duration
 <= 0) makes it *always open* — ``tick()`` never transitions, ``is_open`` is
 always True, and ``next_transition_at`` is None. This is the default for
-tests, for real market data (MASSIVE_API_KEY), and for invalid env config.
+tests, for real market data (a resolved ``massive`` or ``akshare`` live
+source — D2 §1), and for invalid env config.
 
 Time is injectable (``now`` callable) so transitions are unit-testable
 without sleeping. All reads are thread-safe (the trade path and background
