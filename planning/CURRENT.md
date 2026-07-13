@@ -19,7 +19,11 @@ ships as a modular monolith in one container:
 - simulator-first US and A-share market profiles;
 - market, symbol, journal, arena, strategy, run-library and developer pages;
 - manual/advanced orders, standing rules, declarative strategies and backtests;
-- LLM chat actions and deterministic `LLM_MOCK` mode;
+- LLM chat actions and deterministic `LLM_MOCK` mode, including an AI
+  strategy researcher: one chat request batch-backtests 2–4 candidate
+  strategies on stored daily history, ranks them by a documented robustness
+  score, and deploys only on an explicit click
+  ([D4_RESEARCHER_CONTRACT.md](D4_RESEARCHER_CONTRACT.md));
 - cookie identities for the UI and guarded Bearer keys for external bots.
 
 ## Market data sources
