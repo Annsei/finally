@@ -786,3 +786,28 @@ export interface HistorySyncResponse {
   results: HistorySyncResult[];
   total_bars?: number;
 }
+
+// ---------------------------------------------------------------------------
+// Market replay status (D3 §3) — GET /api/market/replay. Independent endpoint;
+// the session snapshot keeps its exact shape. Outside replay mode the payload
+// is exactly {"active": false}, so the type is a discriminated union on
+// `active` and the UI renders NOTHING unless active === true.
+// ---------------------------------------------------------------------------
+export interface ReplayStatusInactive {
+  active: false;
+}
+
+export interface ReplayStatusActive {
+  active: true;
+  from: string; // ISO date (YYYY-MM-DD) — replay window start
+  to: string; // ISO date — replay window end
+  current_date: string; // ISO date of the trading day being replayed
+  day_index: number; // 0-based index of current_date (first day == 0); UI renders day_index + 1
+  total_days: number;
+  seconds_per_day: number;
+  loop: boolean;
+  finished: boolean; // no-loop replays: window exhausted, prices frozen
+  source_hint: string; // "sample" | "mixed" | real source name
+}
+
+export type ReplayStatusResponse = ReplayStatusInactive | ReplayStatusActive;

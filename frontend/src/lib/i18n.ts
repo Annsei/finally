@@ -755,6 +755,16 @@ const en: Dict = {
   'analytics.beta': 'Beta',
   'analytics.riskWindow': '{n} bars',
   'analytics.riskHint': 'Available after syncing historical data —',
+
+  // --- D3 additions (market replay indicators, D3 §3) -------------------------
+  'replay.badge': 'Replay {date} · {i}/{n}',
+  'replay.title': 'Market Replay',
+  'replay.window': '{from} → {to}',
+  'replay.day': 'Day {i}/{n} · {date}',
+  'replay.progressAria': 'Replay progress',
+  'replay.loop': 'Loop',
+  'replay.once': 'Once',
+  'replay.finished': 'Replay finished (prices frozen)',
 };
 
 // ---------------------------------------------------------------------------
@@ -1471,6 +1481,16 @@ const zh: Dict = {
   'analytics.beta': 'Beta',
   'analytics.riskWindow': '{n} 根',
   'analytics.riskHint': '同步历史数据后可用 —',
+
+  // --- D3 additions (market replay indicators, D3 §3) -------------------------
+  'replay.badge': '回放 {date} · {i}/{n}',
+  'replay.title': '行情回放',
+  'replay.window': '{from} → {to}',
+  'replay.day': '第 {i}/{n} 天 · {date}',
+  'replay.progressAria': '回放进度',
+  'replay.loop': '循环',
+  'replay.once': '单次',
+  'replay.finished': '回放已结束（价格冻结）',
 };
 
 const DICTS: Record<Lang, Dict> = { en, zh };

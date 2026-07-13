@@ -14,6 +14,7 @@ import { fetcher } from '@/lib/fetcher';
 import type { MarketSessionResponse } from '@/types/market';
 import { useMarketProfile } from '@/lib/marketProfile';
 import { useT } from '@/lib/i18n';
+import { ReplayBadge } from '@/components/ReplayStatus';
 
 function latestTickTs(prices: Record<string, { timestamp: number }>): number | null {
   let max: number | null = null;
@@ -91,6 +92,9 @@ export default function StatusBar() {
     <footer className="h-6 shrink-0 flex items-center justify-between gap-3 overflow-x-auto whitespace-nowrap px-2 sm:px-4 border-t border-terminal-border bg-terminal-surface text-xs">
       <span className="flex shrink-0 items-center gap-3 text-terminal-muted">
         <SessionBadge now={now} />
+        {/* Replay chip (D3 §3) — additive; renders nothing unless replay mode
+            is active, so the strip stays byte-identical by default. */}
+        <ReplayBadge />
         <span className="hidden md:inline">
           {t('status.shortcuts')} <kbd className="px-1">/</kbd> {t('status.scSearch')} ·{' '}
           <kbd className="px-1">↑↓</kbd> {t('status.scSelect')} ·{' '}

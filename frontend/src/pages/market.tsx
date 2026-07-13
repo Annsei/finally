@@ -29,6 +29,7 @@ import EventArchive from '@/components/EventArchive';
 import HistoryCoverageCard from '@/components/HistoryCoverageCard';
 import MarketCorrelation from '@/components/MarketCorrelation';
 import MarketSentiment from '@/components/MarketSentiment';
+import { ReplayBanner } from '@/components/ReplayStatus';
 import SymbolLink from '@/components/SymbolLink';
 import { fetcher } from '@/lib/fetcher';
 import { usePriceStore } from '@/stores/priceStore';
@@ -306,6 +307,9 @@ export default function MarketPage() {
 
   return (
     <AppShell>
+      {/* Replay banner (D3 §3) — additive; renders nothing unless replay mode
+          is active, so the default page DOM is untouched. */}
+      <ReplayBanner />
       <div className="flex gap-4 h-full min-h-0">
         {/* Left column: quote grid + correlation heatmap (P4 §2) */}
         <div className="flex-[3] min-w-0 flex flex-col gap-4 min-h-0">
