@@ -22,12 +22,26 @@ ships as a modular monolith in one container:
 - LLM chat actions and deterministic `LLM_MOCK` mode;
 - cookie identities for the UI and guarded Bearer keys for external bots.
 
+## Market data sources
+
 Real live-quote feeds are explicit opt-ins via `FINALLY_LIVE_SOURCE`
 (`massive` for US, `akshare` for CN; default `auto` keeps the simulator-first
 behavior). They are teaching-grade data only, and real quotes freeze outside
 real exchange hours, so the quote freshness gate blocks trading until the next
 session — expected behavior, documented in [OPERATIONS.md](OPERATIONS.md). The
 simulator remains the product default.
+
+`FINALLY_LIVE_SOURCE=replay` is the historical replay mode: stored
+`daily_bars` (sample or previously synced real history) stream as accelerated
+live sessions — one day per `FINALLY_REPLAY_SECONDS_PER_DAY` seconds, with
+previous closes and CN price-limit bands rolling on the real historical
+values, so trading, rules, strategies, competitions and the AI work
+unchanged. The window comes from `FINALLY_REPLAY_FROM`/`FINALLY_REPLAY_TO`
+(default: the last 20 commonly-covered days; missing coverage is auto-filled
+from the committed sample series, never the network). Replay state is served
+by `GET /api/market/replay` (`{"active": false}` in every other mode); the
+mode is environment-driven with no runtime toggle. See the replay runbook in
+[OPERATIONS.md](OPERATIONS.md).
 
 ## Supported runtime boundary
 

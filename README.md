@@ -23,6 +23,19 @@ capstone. The default configuration is a trusted, loopback-only local demo.
 - lightweight classroom identities, seasons/leaderboard and external bot API
   keys with ticker/order/daily guardrails and an audit ledger.
 
+### Teaching with historical replay
+
+Set `FINALLY_LIVE_SOURCE=replay` to stream stored daily history as
+accelerated live sessions: one real trading day plays out in
+`FINALLY_REPLAY_SECONDS_PER_DAY` seconds (default 120), with previous
+closes, day changes and A-share price-limit bands rolling on the real
+historical values. A class can trade through a famous window — sync real
+history once, set `FINALLY_REPLAY_FROM`/`FINALLY_REPLAY_TO` to, say, the
+March 2020 circuit-breaker weeks, create a timed private competition and
+share the join code; fresh volumes fall back to the committed offline sample
+series automatically. See the replay runbook in
+[planning/OPERATIONS.md](planning/OPERATIONS.md).
+
 ## Architecture and supported scale
 
 One Docker image serves the static Next.js frontend and FastAPI backend on port

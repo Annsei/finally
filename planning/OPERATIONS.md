@@ -49,16 +49,20 @@ network-shared SQLite file.
 ## Market data sources
 
 `FINALLY_LIVE_SOURCE` selects the price feed: `auto` (default), `simulator`,
-`massive` or `akshare`. `auto` preserves the long-standing selection exactly —
-`MASSIVE_API_KEY` set picks Massive, otherwise the built-in simulator. The
-simulator remains the product default; both real feeds are explicit opt-ins.
+`massive`, `akshare` or `replay`. `auto` preserves the long-standing selection
+exactly — `MASSIVE_API_KEY` set picks Massive, otherwise the built-in
+simulator. The simulator remains the product default; the other feeds are
+explicit opt-ins.
 
 - `massive` requires `MASSIVE_API_KEY` (real US market data).
 - `akshare` polls real A-share spot quotes and requires `FINALLY_MARKET=cn`;
   `FINALLY_AKSHARE_POLL_SECONDS` sets its poll cadence (default 15 seconds,
   clamped to 5..120).
-- Misconfiguration — an unknown value, `massive` without a key, or `akshare`
-  outside the CN profile — fails startup rather than degrading silently.
+- `replay` streams stored `daily_bars` history as accelerated live sessions
+  (see the runbook below).
+- Misconfiguration — an unknown value, `massive` without a key, `akshare`
+  outside the CN profile, or a `replay` window the stored data cannot cover —
+  fails startup rather than degrading silently.
 
 Real feeds run a 24/7 session clock, but real quotes freeze once the actual
 exchange closes: the feed keeps serving the closing frame, quotes go stale,
@@ -68,6 +72,49 @@ schedule classroom use inside real market hours, or keep the simulator, which
 is always live on its accelerated session clock. AKShare data is
 teaching-grade only, not investment-grade, and automated tests and E2E runs
 never enable a real feed.
+
+## Market replay mode
+
+`FINALLY_LIVE_SOURCE=replay` replays stored daily bars as live market data:
+one historical trading day is compressed into
+`FINALLY_REPLAY_SECONDS_PER_DAY` seconds (default 120, clamped 30..600) with
+a `FINALLY_REPLAY_BREAK_SECONDS` closed break between days (default 5,
+clamped 2..60 — also the CN lunch-break length). Previous closes, day
+changes and the CN price-limit bands roll with the REAL historical values;
+trading, rules, strategies, competitions and the AI all work unchanged. Only
+equity tickers with stored history replay — crypto has no daily bars and is
+absent in this mode. There is no runtime toggle: the mode is environment
+driven, so the instructor controls it at deployment.
+
+Running a replay competition (for example a historical-window private
+contest):
+
+1. Pick the window. `FINALLY_REPLAY_FROM`/`FINALLY_REPLAY_TO` (ISO dates,
+   both set) select an explicit window; leaving both empty replays the most
+   recent 20 commonly-covered trading days. On a fresh volume, startup
+   injects the committed sample series automatically (never the network).
+   For a real window (say the March 2020 US circuit-breaker weeks), start
+   once in any mode and sync real history first:
+   `curl -X POST http://127.0.0.1:8000/api/market/history/sync -H 'Content-Type: application/json' -d '{"source":"yfinance","years":10}'`.
+2. Set the env and restart the container: `FINALLY_LIVE_SOURCE=replay`, the
+   window, the pace, and `FINALLY_REPLAY_LOOP` (`true` restarts at the first
+   day forever; `false` freezes prices when the window ends — the freshness
+   gate then blocks further trading).
+3. Verify with `curl http://127.0.0.1:8000/api/market/replay` — it reports
+   `active`, the window, `current_date`, `day_index`/`total_days`, `loop`,
+   `finished` and a `source_hint` (`sample`, a real source, or `mixed`).
+   Non-replay deployments return `{"active": false}`.
+4. Create a timed private competition sized to the window and share the
+   join code with the class. Wall-clock length: US
+   `total_days * (seconds_per_day + break_seconds)` seconds; CN adds the
+   midday break — `total_days * (seconds_per_day + 2 * break_seconds)`
+   (replay reuses `break_seconds` as the four-phase midday pause).
+
+A window the stored data cannot cover (fewer than 2 common trading days
+across the default watchlist) fails startup with the current per-ticker
+coverage and instructions — sync more history or adjust the window. Replay
+sessions settle and roll exactly like simulator sessions, so leaderboards
+and seasons behave normally.
 
 ## Liveness and readiness
 
