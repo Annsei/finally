@@ -26,6 +26,7 @@ import AppShell from '@/components/AppShell';
 import SymbolLink from '@/components/SymbolLink';
 import { fetcher } from '@/lib/fetcher';
 import { useMarketProfile } from '@/lib/marketProfile';
+import { useUiStore } from '@/stores/uiStore';
 import { useT, type TFunction } from '@/lib/i18n';
 import { formatMoney } from '@/lib/format';
 import { TICKER_DIRECTORY } from '@/lib/tickers';
@@ -510,6 +511,18 @@ export default function StrategiesPage() {
       ? Object.entries(profile.names).map(([code, label]) => ({ code, label }))
       : TICKER_DIRECTORY.map((info) => ({ code: info.symbol, label: info.name }));
 
+  // D4 §3.3 — "AI research" entry point: prefill a research prompt through the
+  // pendingChatMessage one-shot channel (same handoff as /symbol's AI Analyze)
+  // and open the chat dock. Uses the form's ticker when present, else the
+  // market's first autocomplete entry.
+  const setPendingChatMessage = useUiStore((s) => s.setPendingChatMessage);
+  const setChatOpen = useUiStore((s) => s.setChatOpen);
+  const openResearch = () => {
+    const target = ticker.trim().toUpperCase() || tickerOptions[0]?.code || 'AAPL';
+    setPendingChatMessage(t('research.prefill', { ticker: target }));
+    setChatOpen(true);
+  };
+
   const opChoices: ('above' | 'below')[] = ['above', 'below'];
 
   return (
@@ -544,7 +557,20 @@ export default function StrategiesPage() {
 
         {/* Builder form */}
         <section className={sectionClass}>
-          <h2 className={sectionTitleClass}>{t('strategy.formTitle')}</h2>
+          <div className="flex items-center justify-between border-b border-terminal-border shrink-0 pr-2">
+            <h2 className="px-2 py-1.5 text-xs font-semibold text-terminal-muted uppercase tracking-wider">
+              {t('strategy.formTitle')}
+            </h2>
+            <button
+              type="button"
+              data-testid="research-button"
+              onClick={openResearch}
+              className="px-2 py-0.5 rounded text-[10px] font-semibold text-white"
+              style={{ backgroundColor: '#753991' }}
+            >
+              {t('research.button')}
+            </button>
+          </div>
           <form
             data-testid="strategy-form"
             className="p-2 flex flex-col gap-3"

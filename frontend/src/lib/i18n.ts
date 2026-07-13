@@ -765,6 +765,27 @@ const en: Dict = {
   'replay.loop': 'Loop',
   'replay.once': 'Once',
   'replay.finished': 'Replay finished (prices frozen)',
+
+  // --- D4 additions (AI strategy researcher card, D4 §3.4) --------------------
+  'research.title': 'AI Research: {ticker}',
+  'research.days': '{days} trading days',
+  'research.score': 'Score',
+  'research.return': 'Return',
+  'research.drawdown': 'Max DD',
+  'research.winRate': 'Win',
+  'research.trades': 'Trades',
+  'research.deploy': 'Deploy',
+  'research.deploying': 'Deploying…',
+  'research.deployed': 'Deployed',
+  'research.archived': 'Archived',
+  'research.viewRun': 'View run',
+  'research.viewStrategy': 'View strategy',
+  'research.recommended': 'Recommended',
+  'research.failed': 'Failed',
+  'research.noRecommendation': 'No recommendation — no candidate traded in the window.',
+  'research.prefill':
+    'Research candidate strategies for {ticker}: try trend following, mean reversion and breakout, backtest them on history, and compare the results.',
+  'research.button': 'AI Research',
 };
 
 // ---------------------------------------------------------------------------
@@ -1491,6 +1512,27 @@ const zh: Dict = {
   'replay.loop': '循环',
   'replay.once': '单次',
   'replay.finished': '回放已结束（价格冻结）',
+
+  // --- D4 additions (AI strategy researcher card, D4 §3.4) --------------------
+  'research.title': 'AI 策略研究：{ticker}',
+  'research.days': '{days} 个交易日',
+  'research.score': '稳健分',
+  'research.return': '收益',
+  'research.drawdown': '回撤',
+  'research.winRate': '胜率',
+  'research.trades': '成交数',
+  'research.deploy': '部署',
+  'research.deploying': '部署中…',
+  'research.deployed': '已部署',
+  'research.archived': '已归档',
+  'research.viewRun': '查看回测',
+  'research.viewStrategy': '查看策略',
+  'research.recommended': '推荐',
+  'research.failed': '失败',
+  'research.noRecommendation': '暂无推荐 — 窗口内没有产生成交的候选。',
+  'research.prefill':
+    '帮我研究一下 {ticker} 的策略：趋势跟随、超跌反弹和突破都试试，用历史数据回测后对比结果。',
+  'research.button': 'AI 研究',
 };
 
 const DICTS: Record<Lang, Dict> = { en, zh };

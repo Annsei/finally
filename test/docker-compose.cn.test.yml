@@ -2,7 +2,7 @@
 # Mirrors docker-compose.test.yml but boots the A-share market profile and runs
 # ONLY the CN specs (cn.spec.ts + pages-cn.spec.ts + strategies-cn.spec.ts +
 # developers-cn.spec.ts + p4-cn.spec.ts + history-cn.spec.ts +
-# arena-comp-cn.spec.ts).
+# arena-comp-cn.spec.ts + research-cn.spec.ts).
 # The CN project's testMatch (/cn\.spec\.ts/) discovers them all when
 # E2E_SPECS is empty — new *-cn.spec.ts files run without command changes.
 # The US harness lives in docker-compose.test.yml and is unchanged.

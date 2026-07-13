@@ -6,6 +6,7 @@ import { formatShares } from '@/lib/format';
 import { useMarketProfile } from '@/lib/marketProfile';
 import { useUiStore } from '@/stores/uiStore';
 import { useT, type TFunction } from '@/lib/i18n';
+import StrategyResearchCard from '@/components/chat/StrategyResearchCard';
 import type {
   ChatHistoryResponse,
   ChatPostResponse,
@@ -400,7 +401,8 @@ export default function ChatPanel({ open, onToggle, onNewTrade }: Props) {
         data.watchlist_changes?.length ||
         data.orders?.length ||
         data.rules?.length ||
-        data.strategies?.length
+        data.strategies?.length ||
+        data.research?.length // D4 — research persists draft strategies + runs
       ) {
         onNewTrade?.();
       }
@@ -551,6 +553,15 @@ export default function ChatPanel({ open, onToggle, onNewTrade }: Props) {
                   ))}
                   {msg.actions.watchlist_changes?.map((change, i) => (
                     <WatchlistBadge key={`wl-${i}`} change={change} t={t} sym={sym} lot={lot} />
+                  ))}
+                  {/* D4 §3.2 — research comparison cards: block cards under
+                      the pills (w-full wraps them onto their own rows). */}
+                  {msg.actions.research?.map((outcome, i) => (
+                    <StrategyResearchCard
+                      key={`research-${i}`}
+                      outcome={outcome}
+                      onDeployed={onNewTrade}
+                    />
                   ))}
                 </div>
               )}

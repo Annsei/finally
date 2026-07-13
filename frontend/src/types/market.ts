@@ -435,6 +435,32 @@ export interface StrategyOutcome {
   stats?: BacktestStats;
 }
 
+// Chat research outcomes (D4 §2.2) — one batch per ResearchInstruction. Every
+// completed candidate is already persisted as a draft strategy plus a linked
+// Run Library entry; deploy is a separate explicit PATCH from the card.
+export interface ResearchCandidateOutcome {
+  status: 'completed' | 'failed';
+  name: string;
+  hypothesis?: string | null;
+  error?: string; // failed candidates only
+  // completed candidates only:
+  strategy_id?: string;
+  run_id?: string;
+  score?: number; // round(total_return_pct - 0.5 * max_drawdown_pct, 2)
+  rank?: number; // 1..n over completed candidates
+  traded?: boolean; // round_trips >= 1
+  stats?: BacktestStats;
+}
+
+export interface ResearchOutcome {
+  status: 'completed' | 'failed'; // failed only when zero candidates completed
+  ticker: string;
+  days?: number;
+  error?: string; // batch-level failures (e.g. candidate-count guard)
+  candidates?: ResearchCandidateOutcome[];
+  recommended_strategy_id?: string | null; // null when the winner never traded
+}
+
 // Chat action outcomes for AI-placed orders and AI-created rules (M2.1/2.2):
 export interface ChatOrderOutcome {
   status: string; // open | filled | failed
@@ -740,6 +766,7 @@ export interface ChatMessage {
     rules?: ChatRuleOutcome[];
     backtests?: ChatBacktestOutcome[];
     strategies?: StrategyOutcome[];
+    research?: ResearchOutcome[]; // D4 §2.2 — present only when the action fired
   } | null;
   created_at: string;
 }
@@ -758,6 +785,7 @@ export interface ChatPostResponse {
   rules?: ChatRuleOutcome[];
   backtests?: ChatBacktestOutcome[];
   strategies?: StrategyOutcome[];
+  research?: ResearchOutcome[]; // D4 §2.2 — present only when the action fired
 }
 
 // ---------------------------------------------------------------------------

@@ -573,6 +573,85 @@ describe('ChatPanel', () => {
   });
 
   // -------------------------------------------------------------------------
+  // Test 6b (D4): research outcomes render a StrategyResearchCard block card
+  // -------------------------------------------------------------------------
+  it('Test 6b (D4): assistant actions.research renders a research card with ranked rows', () => {
+    const researchStats = {
+      total_return_pct: 12.3,
+      buy_hold_return_pct: 8.0,
+      max_drawdown_pct: 4.5,
+      final_equity: 11230,
+      fires: 6,
+      round_trips: 6,
+      win_rate: 0.67,
+      avg_win: 140,
+      avg_loss: -80,
+      profit_factor: 2.1,
+      commission_paid: 0,
+      rejections: { insufficient_cash: 0 },
+    };
+    const researchMsg: ChatMessage = {
+      role: 'assistant',
+      content: 'I researched three approaches for AAPL.',
+      actions: {
+        trades: [],
+        watchlist_changes: [],
+        research: [
+          {
+            status: 'completed',
+            ticker: 'AAPL',
+            days: 120,
+            candidates: [
+              {
+                status: 'completed',
+                name: 'Golden Cross',
+                hypothesis: 'Trend following via SMA cross.',
+                strategy_id: 'st-1',
+                run_id: 'run-1',
+                score: 10.05,
+                rank: 1,
+                traded: true,
+                stats: researchStats,
+              },
+              {
+                status: 'completed',
+                name: 'RSI Rebound',
+                hypothesis: 'Mean reversion on oversold RSI.',
+                strategy_id: 'st-2',
+                run_id: 'run-2',
+                score: 8.1,
+                rank: 2,
+                traded: true,
+                stats: researchStats,
+              },
+              { status: 'failed', name: 'Broken Idea', error: 'missing exit' },
+            ],
+            recommended_strategy_id: 'st-1',
+          },
+        ],
+      },
+      created_at: '2026-07-13T00:00:00Z',
+    };
+
+    (useSWR as jest.Mock).mockReturnValue({
+      data: { messages: [researchMsg] },
+      mutate: mockMutateHistory,
+    });
+
+    renderPanel();
+
+    // Block card (not a pill) with one row per candidate, the recommended
+    // badge, and a deploy button per completed candidate.
+    const card = screen.getByTestId('research-card');
+    expect(card.textContent).toContain('AAPL');
+    expect(screen.getAllByTestId('research-candidate')).toHaveLength(3);
+    expect(screen.getAllByTestId('research-recommended')).toHaveLength(1);
+    expect(screen.getAllByTestId('research-deploy')).toHaveLength(2);
+    expect(card.textContent).toContain('Broken Idea');
+    expect(card.textContent).toContain('missing exit');
+  });
+
+  // -------------------------------------------------------------------------
   // Test 7 (M5.1): briefs render clamped, click expands
   // -------------------------------------------------------------------------
   it('Test 7 (M5.1): brief messages render two-line clamped and expand on click', () => {

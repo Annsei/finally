@@ -2,7 +2,7 @@
 
 The browser suites validate the cross-layer contracts that unit tests cannot:
 static deep links, SSE recovery, US/CN profile behavior, trading, chat,
-strategies, run library, arena and developer API keys.
+strategies, AI strategy research, run library, arena and developer API keys.
 
 ## Full US suite
 
@@ -39,6 +39,24 @@ E2E_SPECS="specs/fresh-start.spec.ts specs/sse-resilience.spec.ts specs/trade.sp
   --abort-on-container-exit --exit-code-from playwright
 
 E2E_SPECS="specs/cn.spec.ts" \
+  docker compose -f docker-compose.cn.test.yml up --build \
+  --abort-on-container-exit --exit-code-from playwright
+```
+
+The D4 AI-researcher flow ships one spec per profile: `specs/research.spec.ts`
+is picked up by the default US `e2e` project, and `specs/research-cn.spec.ts`
+by the CN project's `/cn\.spec\.ts/` testMatch — both run in the full suites
+with no config changes (filename convention). Both specs seed the committed
+sample daily bars themselves (`ensureSampleHistory`, offline `sample` source,
+idempotent under the sync throttle), so the subsets below pass on a fresh
+volume without running the history specs first. Smoke just that flow with:
+
+```bash
+E2E_SPECS="specs/fresh-start.spec.ts specs/research.spec.ts" \
+  docker compose -f docker-compose.test.yml up --build \
+  --abort-on-container-exit --exit-code-from playwright
+
+E2E_SPECS="specs/research-cn.spec.ts" \
   docker compose -f docker-compose.cn.test.yml up --build \
   --abort-on-container-exit --exit-code-from playwright
 ```
