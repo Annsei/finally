@@ -22,11 +22,26 @@ Determinism knobs (exactly what the capture used):
 Comparison is canonical-JSON equality of the FULL response body against the
 stored fixture — any key added, removed, or changed in these two branches
 fails the suite.
+
+D4 §2.5 adds two research fixtures on the same machinery (the four above
+stay byte-identical — their messages contain neither 'research' nor '研究'):
+
+- chat_mock_research.json     US router, "Research momentum strategies for
+                              AAPL" turn (3 ranked template candidates)
+- chat_mock_research_zh.json  CN router, "帮我研究一下 600519 的策略" turn
+                              (all candidates zero-trade — ¥20k cash_pct
+                              cannot buy a 600519 lot — recommendation null)
+
+Their determinism needs nothing new: strategy/run ids come from the patched
+uuid4 counter, the seeded COMMITTED sample bars have fixed dates/prices, and
+the D1 history replay is RNG-free (seed is null), so the full response body
+— stats included — is exactly reproducible and byte-compared like the rest.
 """
 
 from __future__ import annotations
 
 import json
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -34,8 +49,9 @@ import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
-from app.db.connection import init_db
+from app.db.connection import get_conn, init_db
 from app.market import PriceCache
+from app.market.history import SampleProvider, upsert_daily_bars
 from app.market.profiles import CN_PROFILE
 from app.market.seed_prices import SEED_PRICES
 from app.routes.chat import create_chat_router
@@ -61,6 +77,31 @@ def _patch_determinism(monkeypatch) -> None:
 
     monkeypatch.setattr("uuid.uuid4", fake_uuid4)
     monkeypatch.setattr("random.randint", lambda a, b: 4242)
+
+
+def _seed_sample_bars(db_file: str, market: str, ticker: str) -> None:
+    """Store the committed sample series for one ticker (capture parity).
+
+    The committed CSVs have FIXED dates and prices, so the D4 research
+    turn's history backtests — and therefore the full response body — are
+    deterministic. The fetched_at stamp never reaches a response.
+    """
+    bars = SampleProvider(market).fetch_daily(
+        ticker, date(2020, 1, 1), date(2026, 7, 1)
+    )
+    conn = get_conn(db_file)
+    try:
+        upsert_daily_bars(
+            conn,
+            market=market,
+            ticker=ticker,
+            bars=bars,
+            source="sample",
+            fetched_at="2026-07-01T00:00:00+00:00",
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 @pytest_asyncio.fixture
@@ -156,4 +197,86 @@ class TestChatMockGoldenZH:
         assert resp.status_code == 200
         assert _canonical(resp.json()) == _canonical(
             _load_golden("chat_mock_backtest_zh.json")
+        )
+
+
+# ---------------------------------------------------------------------------
+# D4 §2.5 — the research branch goldens (fixtures mirror the two above plus
+# the committed sample bars the history backtests replay)
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def us_research_golden_client(tmp_path, monkeypatch):
+    """us_golden_client + the committed AAPL sample bars (D4 research)."""
+    db_file = str(tmp_path / "us_research_golden.db")
+    monkeypatch.setenv("DB_PATH", db_file)
+    monkeypatch.setenv("LLM_MOCK", "true")
+    init_db(db_file)
+    _seed_sample_bars(db_file, "us", "AAPL")
+    _patch_determinism(monkeypatch)
+
+    price_cache = PriceCache()
+    for ticker, price in SEED_PRICES.items():
+        price_cache.update(ticker, price)
+
+    test_app = FastAPI()
+    test_app.include_router(create_chat_router(price_cache, db_file))
+    async with AsyncClient(
+        transport=ASGITransport(app=test_app), base_url="http://test"
+    ) as client:
+        yield client
+
+
+@pytest_asyncio.fixture
+async def cn_research_golden_client(tmp_path, monkeypatch):
+    """cn_golden_client + the committed 600519 sample bars (D4 research)."""
+    db_file = str(tmp_path / "cn_research_golden.db")
+    monkeypatch.setenv("DB_PATH", db_file)
+    monkeypatch.setenv("LLM_MOCK", "true")
+    init_db(
+        db_file,
+        seed_cash=CN_PROFILE.seed_cash,
+        default_watchlist=list(CN_PROFILE.universe.default_watchlist),
+    )
+    _seed_sample_bars(db_file, "cn", "600519")
+    _patch_determinism(monkeypatch)
+
+    price_cache = PriceCache()
+    for ticker, price in CN_PROFILE.universe.seed_prices.items():
+        price_cache.update(ticker, price)
+    price_cache.update("AAPL", 190.0)
+
+    test_app = FastAPI()
+    test_app.include_router(
+        create_chat_router(price_cache, db_file, profile=CN_PROFILE)
+    )
+    async with AsyncClient(
+        transport=ASGITransport(app=test_app), base_url="http://test"
+    ) as client:
+        yield client
+
+
+@pytest.mark.asyncio
+class TestChatMockGoldenResearch:
+    async def test_us_research_branch_matches_golden(
+        self, us_research_golden_client
+    ):
+        resp = await us_research_golden_client.post(
+            "/api/chat/", json={"message": "Research momentum strategies for AAPL"}
+        )
+        assert resp.status_code == 200
+        assert _canonical(resp.json()) == _canonical(
+            _load_golden("chat_mock_research.json")
+        )
+
+    async def test_zh_research_branch_matches_golden(
+        self, cn_research_golden_client
+    ):
+        resp = await cn_research_golden_client.post(
+            "/api/chat/", json={"message": "帮我研究一下 600519 的策略"}
+        )
+        assert resp.status_code == 200
+        assert _canonical(resp.json()) == _canonical(
+            _load_golden("chat_mock_research_zh.json")
         )

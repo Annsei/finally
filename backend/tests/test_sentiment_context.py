@@ -42,14 +42,16 @@ from app.routes.chat import (
 
 GOLDEN_DIR = Path(__file__).parent / "golden"
 
-# sha256 pins of the P4-frozen system prompts (computed from the pre-P4
-# constants at 19b489b). ANY byte change to either constant fails here —
-# the P4 §1 sentiment line must ride the per-request context instead.
+# sha256 pins of the frozen system prompts (recomputed for D4 §2.3, which
+# appends the 'research' bullet to both constants — the ONLY permitted
+# prompt evolution since the P4 pins). ANY other byte change to either
+# constant fails here — the P4 §1 sentiment line must still ride the
+# per-request context instead.
 SYSTEM_PROMPT_SHA256 = (
-    "8c06b9bfb9c6d2254a76e3bf9a974455f866388389637c4eb82076c8f9404366"
+    "64a589ae7ee2e041450b3fb624b745c760e2a07cdbb1108a43b5de016eda1af2"
 )
 SYSTEM_PROMPT_ZH_SHA256 = (
-    "29c52698cd0ac08b991a5e11ee465c8784993f69d4f4c0ab1ee65a223e6c02b7"
+    "ea443b3d9a86103fccb53ba40f05f40939d2c1595c38f2562487bfd723959093"
 )
 
 

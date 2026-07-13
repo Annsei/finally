@@ -4,7 +4,9 @@ Provides:
 - POST /api/chat — LLM-powered chat with structured output; auto-executes
   trades, advanced orders (limit/stop/stop_limit — M2.1), standing rules
   (M2.2), strategy backtests (M5 — stateless engine runs, compact outcomes),
-  and watchlist changes; persists conversation history to chat_messages.
+  strategy research batches (D4 — ranked candidate history backtests via
+  ``app.research``), and watchlist changes; persists conversation history
+  to chat_messages.
 - GET /api/chat — last 20 chat_messages rows of every kind
   ('chat' | 'brief' | 'review' | 'rule'); optional ``kind``/``limit`` query
   params filter and resize the window (P1 §3.6, defaults unchanged).
@@ -46,6 +48,7 @@ from app.market.cache import PriceCache
 from app.market.profiles import MarketProfile
 from app.market.sentiment import compute_market_sentiment, sentiment_context_line
 from app.market.session import SessionClock
+from app.research import run_research_on_conn
 from app.routes.backtest_runs import insert_backtest_run_on_conn
 
 # Bind the profile-aware placement impl to the legacy module name: chat
@@ -136,7 +139,20 @@ SYSTEM_PROMPT = (
     "(reference it via 'strategy': its id or name; optional days/runs) and "
     "stores the result in the run library. 'deploy' turns a draft or paused "
     "strategy live so the engine trades it automatically; 'pause' freezes a "
-    "live one. Always recommend running a backtest before deploying."
+    "live one. Always recommend running a backtest before deploying.\n"
+    "- 'research': strategy research requests. Use when the user asks you to "
+    "research, explore, or compare candidate strategies for a ticker. Each "
+    "item: {ticker, days?, candidates: [{name, hypothesis?, template?, "
+    "entry?, exits?, sizing?}]} with 2-4 candidates. Give each candidate a "
+    "short name and a one-line hypothesis, and vary the approaches (trend "
+    "following, mean reversion, breakout). Candidates may reference a "
+    "template with optional overrides or give explicit entry/exits/sizing; "
+    "every candidate MUST include at least one exit. The platform backtests "
+    "each candidate on stored daily history over 'days' trading days "
+    "(default 120), ranks them by robustness score (return minus half the "
+    "max drawdown), and shows a comparison card with deploy buttons. Do not "
+    "also emit 'strategies' actions in the same turn; never deploy in the "
+    "research turn — the user decides from the card."
 )
 
 # System prompt for the daily review (M2.4) — plain text, no structured output.
@@ -211,7 +227,16 @@ SYSTEM_PROMPT_ZH = (
     "'fixed_qty', qty}（A 股须整手）或 {mode: 'cash_pct', pct 1-100}。"
     "'backtest' 回测一条已保存的策略（用 'strategy' 引用其 id 或名称；可选 "
     "days/runs），结果存入回测库。'deploy' 将草稿/暂停策略转为 live，由引擎"
-    "自动交易；'pause' 冻结 live 策略。务必建议先回测再部署。"
+    "自动交易；'pause' 冻结 live 策略。务必建议先回测再部署。\n"
+    "- 'research'：策略研究请求。当用户要求研究、探索或对比某只股票的候选"
+    "策略时使用。每项为 {ticker, days?, candidates: [{name, hypothesis?, "
+    "template?, entry?, exits?, sizing?}]}，candidates 须为 2-4 个。给每个"
+    "候选一个简短 name 和一句话 hypothesis，并让思路各不相同（趋势跟随、"
+    "均值回归、突破等）。候选可引用模板 key 并用显式 entry/exits/sizing "
+    "覆盖，也可完全显式给出；每个候选必须至少包含一个退出条件。平台会在"
+    "存储的日线历史上回测每个候选（days 为交易日数，默认 120），按稳健分"
+    "（收益减去一半最大回撤）排名，并展示带部署按钮的对比卡。同一轮不要"
+    "再输出 'strategies' 动作；研究轮次绝不部署——由用户在对比卡上决定。"
 )
 
 # Chinese (zh-CN) variant of REVIEW_SYSTEM_PROMPT (CN-3) — plain-text A-share
@@ -314,6 +339,39 @@ class StrategyInstruction(BaseModel):
     source: str | None = None  # D1 §3 passthrough: "synthetic" | "history"
 
 
+class ResearchCandidate(BaseModel):
+    """One candidate strategy inside a research request (D4 §2.1).
+
+    ``template`` supplies any of ``entry``/``exits``/``sizing`` the candidate
+    does not give explicitly — the same merge rule as the 'create' strategy
+    action. Every merged candidate must end up with at least one exit
+    (research products must be deployable); the handler enforces it.
+    """
+
+    name: str  # short display name, 1..40 after trim
+    hypothesis: str | None = None  # one-line rationale, shown in the card
+    template: str | None = None  # TEMPLATES_BY_KEY key; supplies missing parts
+    entry: dict | None = None  # condition-group DSL (overrides template)
+    exits: dict | None = None
+    sizing: dict | None = None
+
+
+class ResearchInstruction(BaseModel):
+    """A strategy research batch the LLM asks to run (D4 §2.1).
+
+    The handler (``app.research.run_research_on_conn``) backtests every
+    candidate on stored daily-bar history, persists each success as a DRAFT
+    strategy plus a Run Library entry, and ranks the results by the D4
+    robustness score. ``days`` counts TRADING days — None means 120, then the
+    history mode's existing 20..750 clamp applies. 2-4 candidates per batch;
+    deploying is never part of research (the user clicks it on the card).
+    """
+
+    ticker: str
+    days: int | None = None
+    candidates: list[ResearchCandidate] = []
+
+
 class ChatResponse(BaseModel):
     message: str
     trades: list[TradeInstruction] = []
@@ -324,15 +382,30 @@ class ChatResponse(BaseModel):
 
 
 class ChatTurnResponse(ChatResponse):
-    """The structured-output schema the chat endpoint actually requests.
+    """The P2 §7 structured-output schema (adds ``strategies``).
 
-    P2 §7 adds the ``strategies`` action array. It lives on a SUBCLASS so the
-    pre-P2 ``ChatResponse`` field set stays frozen for its pinned regression
-    tests; the endpoint requests/validates/constructs this extended shape
+    The ``strategies`` action array lives on a SUBCLASS so the pre-P2
+    ``ChatResponse`` field set stays frozen for its pinned regression tests
     (a plain ``ChatResponse`` payload parses into it with ``strategies=[]``).
+    Since D4 the endpoint requests the ``ChatResearchTurnResponse`` extension
+    below; this field set is itself pinned by the P2 regression tests.
     """
 
     strategies: list[StrategyInstruction] = []
+
+
+class ChatResearchTurnResponse(ChatTurnResponse):
+    """The structured-output schema the chat endpoint actually requests.
+
+    D4 §2.1 adds the ``research`` action array. Like ``strategies`` before
+    it (P2 §7), the new array lives on a SUBCLASS: the ``ChatTurnResponse``
+    field set is pinned by the P2 regression tests exactly as ``ChatResponse``
+    is by the pre-P2 ones, so the endpoint requests/validates/constructs this
+    extended shape instead (a plain ``ChatTurnResponse`` payload parses into
+    it with ``research=[]``).
+    """
+
+    research: list[ResearchInstruction] = []
 
 
 # ---------------------------------------------------------------------------
@@ -705,7 +778,9 @@ def create_chat_router(
         failed dict otherwise), rule outcomes ("rules":
         {"status": "created", "rule": {...}} or failed dict), and backtest
         outcomes ("backtests": compact {"status": "completed", ticker,
-        config, stats} — never curves/trades — or failed dict, M5). Per-action
+        config, stats} — never curves/trades — or failed dict, M5), and
+        research outcomes ("research": ranked candidate batches with
+        strategy_id/run_id/score per candidate — D4 §2.2). Per-action
         validation failures are returned as outcome dicts (status=failed) —
         they do NOT raise HTTP errors and do not abort the remaining actions.
 
@@ -790,6 +865,13 @@ def create_chat_router(
                 wants_strategy = (
                     "strategy" in message_lower or "策略" in body.message
                 ) and not ("backtest" in message_lower or "回测" in body.message)
+                # D4 §2.4: 'research'/'研究' routes to the deterministic
+                # research branch BEFORE the strategy check in both chains —
+                # "research ... strategies" phrasings must reach it. The four
+                # golden messages ("hello there" / "你好" / "backtest ..." /
+                # "帮我回测…") contain neither token, so the pinned
+                # default/backtest mocks stay byte-identical.
+                wants_research = "research" in message_lower or "研究" in body.message
                 mock_strategy_actions = [
                     StrategyInstruction(
                         action="create",
@@ -806,8 +888,54 @@ def create_chat_router(
                     ),
                 ]
                 if is_zh:
-                    if wants_strategy:
-                        parsed = ChatTurnResponse(
+                    # D4 §2.4: deterministic zh research batch — 600519 (in
+                    # the committed CN sample bars), 3 template candidates
+                    # with lot-safe cash_pct sizing, 120 trading days.
+                    if wants_research:
+                        parsed = ChatResearchTurnResponse(
+                            message=(
+                                "[模拟] 研究完成：已在存储的日线历史上回测 "
+                                "600519 的 3 个候选策略，并按稳健分排名。"
+                                "请在对比卡上查看结果，由你决定是否部署。"
+                            ),
+                            research=[
+                                ResearchInstruction(
+                                    ticker="600519",
+                                    days=120,
+                                    candidates=[
+                                        ResearchCandidate(
+                                            name="均线金叉",
+                                            hypothesis=(
+                                                "趋势跟随：5 日均线上穿 20 日"
+                                                "均线时买入，吃中期趋势。"
+                                            ),
+                                            template="ma_golden_cross",
+                                            sizing={"mode": "cash_pct", "pct": 20},
+                                        ),
+                                        ResearchCandidate(
+                                            name="RSI 超跌反弹",
+                                            hypothesis=(
+                                                "均值回归：14 日 RSI 跌破 30 "
+                                                "的超跌区间时低吸。"
+                                            ),
+                                            template="rsi_rebound",
+                                            sizing={"mode": "cash_pct", "pct": 20},
+                                        ),
+                                        ResearchCandidate(
+                                            name="动量突破",
+                                            hypothesis=(
+                                                "动量追涨：价格突破近 60 分钟"
+                                                "高点时顺势进场。"
+                                            ),
+                                            template="momentum_breakout",
+                                            sizing={"mode": "cash_pct", "pct": 20},
+                                        ),
+                                    ],
+                                )
+                            ],
+                        )
+                    elif wants_strategy:
+                        parsed = ChatResearchTurnResponse(
                             message=(
                                 f"[模拟] 已创建 {mock_strategy_ticker} 的均线金叉"
                                 "策略（草稿），并将 20 日回测结果存入回测库。"
@@ -816,7 +944,7 @@ def create_chat_router(
                             strategies=mock_strategy_actions,
                         )
                     elif "backtest" in body.message.lower() or "回测" in body.message:
-                        parsed = ChatTurnResponse(
+                        parsed = ChatResearchTurnResponse(
                             message=(
                                 "[模拟] 回测完成：已在 20 个模拟交易日上测试 NVDA "
                                 "逢跌买入策略。"
@@ -835,7 +963,7 @@ def create_chat_router(
                             ],
                         )
                     else:
-                        parsed = ChatTurnResponse(
+                        parsed = ChatResearchTurnResponse(
                             message="已将 PYPL 加入你的自选，并为你买入 5 股 AAPL。",
                             trades=[
                                 TradeInstruction(ticker="AAPL", side="buy", quantity=5)
@@ -844,11 +972,61 @@ def create_chat_router(
                                 WatchlistChange(ticker="PYPL", action="add")
                             ],
                         )
+                # D4 §2.4: deterministic en research batch — AAPL (in the
+                # committed US sample bars), the same 3 template candidates
+                # as the zh branch with lot-safe cash_pct sizing.
+                elif wants_research:
+                    parsed = ChatResearchTurnResponse(
+                        message=(
+                            "[MOCK] Research complete: 3 candidate strategies "
+                            "for AAPL backtested on stored daily history and "
+                            "ranked by robustness score. Review the comparison "
+                            "card and deploy the one you like."
+                        ),
+                        research=[
+                            ResearchInstruction(
+                                ticker="AAPL",
+                                days=120,
+                                candidates=[
+                                    ResearchCandidate(
+                                        name="Golden Cross",
+                                        hypothesis=(
+                                            "Trend following: buy when the "
+                                            "5-day MA crosses above the "
+                                            "20-day MA."
+                                        ),
+                                        template="ma_golden_cross",
+                                        sizing={"mode": "cash_pct", "pct": 20},
+                                    ),
+                                    ResearchCandidate(
+                                        name="RSI Rebound",
+                                        hypothesis=(
+                                            "Mean reversion: buy oversold "
+                                            "dips when the 14-day RSI drops "
+                                            "below 30."
+                                        ),
+                                        template="rsi_rebound",
+                                        sizing={"mode": "cash_pct", "pct": 20},
+                                    ),
+                                    ResearchCandidate(
+                                        name="Momentum Breakout",
+                                        hypothesis=(
+                                            "Breakout: enter when price "
+                                            "clears the recent 60-minute "
+                                            "window high."
+                                        ),
+                                        template="momentum_breakout",
+                                        sizing={"mode": "cash_pct", "pct": 20},
+                                    ),
+                                ],
+                            )
+                        ],
+                    )
                 # P2 §7: 'strategy' (without 'backtest') → the deterministic
                 # strategy branch mirroring the zh one above (same actions,
                 # NVDA ticker).
                 elif wants_strategy:
-                    parsed = ChatTurnResponse(
+                    parsed = ChatResearchTurnResponse(
                         message=(
                             "[MOCK] Created the MA Golden Cross strategy on "
                             f"{mock_strategy_ticker} as a draft and saved a "
@@ -861,7 +1039,7 @@ def create_chat_router(
                 # everything else keeps the original PYPL/AAPL payload
                 # byte-identical for the E2E suite.
                 elif "backtest" in body.message.lower():
-                    parsed = ChatTurnResponse(
+                    parsed = ChatResearchTurnResponse(
                         message=(
                             "[MOCK] Backtest complete: NVDA dip-buy strategy "
                             "tested over 20 simulated days."
@@ -880,7 +1058,7 @@ def create_chat_router(
                         ],
                     )
                 else:
-                    parsed = ChatTurnResponse(
+                    parsed = ChatResearchTurnResponse(
                         message=(
                             "I've added PYPL to your watchlist and bought 5 shares of AAPL for you."
                         ),
@@ -895,11 +1073,11 @@ def create_chat_router(
                         completion,
                         model=MODEL,
                         messages=messages,
-                        response_format=ChatTurnResponse,
+                        response_format=ChatResearchTurnResponse,
                         reasoning_effort="low",
                         extra_body=EXTRA_BODY,
                     )
-                    parsed = ChatTurnResponse.model_validate_json(
+                    parsed = ChatResearchTurnResponse.model_validate_json(
                         response.choices[0].message.content
                     )
                 except Exception:
@@ -1244,6 +1422,35 @@ def create_chat_router(
                         }
                     )
 
+            # Step 6f (D4 §2.2): Run research batches — each instruction
+            # backtests 2-4 candidate strategies on stored daily history,
+            # persists the successes as drafts + Run Library rows on the
+            # shared connection, and ranks them. The handler never commits
+            # (everything joins the single Step 7 commit) and each
+            # instruction fails independently — the existing per-action
+            # isolation. Sources for universe/profile/commission/cash/market
+            # are exactly the strategies-backtest step's. The whole batch
+            # runs off the event loop like the engine calls above; the
+            # shared connection is safe there (check_same_thread=False) and
+            # never used concurrently — the request awaits the worker.
+            research_outcomes: list[dict] = []
+            for r in parsed.research:
+                outcome = await asyncio.to_thread(
+                    run_research_on_conn,
+                    conn,
+                    price_cache,
+                    ticker=r.ticker,
+                    days=r.days,
+                    candidates=[c.model_dump() for c in r.candidates],
+                    user_id=user_id,
+                    universe=universe,
+                    profile=profile,
+                    market=market,
+                    commission_bps=commission_bps,
+                    starting_cash=starting_cash,
+                )
+                research_outcomes.append(outcome)
+
             # Step 7: Persist both messages (T-02-12 — parameterized SQL)
             # Separate timestamps guarantee deterministic ORDER BY created_at ordering
             # even when both rows are written in the same request (WR-02).
@@ -1260,6 +1467,8 @@ def create_chat_router(
                 actions["backtests"] = backtest_outcomes
             if strategy_outcomes:
                 actions["strategies"] = strategy_outcomes
+            if research_outcomes:
+                actions["research"] = research_outcomes
             user_ts = datetime.now(timezone.utc).isoformat()
             conn.execute(
                 "INSERT INTO chat_messages (id, user_id, role, content, actions, kind, created_at) "
@@ -1316,6 +1525,8 @@ def create_chat_router(
                 response_payload["backtests"] = backtest_outcomes
             if strategy_outcomes:
                 response_payload["strategies"] = strategy_outcomes
+            if research_outcomes:
+                response_payload["research"] = research_outcomes
             return response_payload
 
         except Exception:
