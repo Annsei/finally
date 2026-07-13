@@ -109,8 +109,36 @@ def _create_session_clock(profile: MarketProfile | None = None) -> SessionClock:
     is enabled, the lunch break length equals the parsed
     ``FINALLY_SESSION_BREAK_SECONDS`` (default 120), turning the day into the
     four-phase am -> midday -> pm -> closed cycle.
+
+    D3 §2: the replay live source builds the clock from
+    FINALLY_REPLAY_SECONDS_PER_DAY / FINALLY_REPLAY_BREAK_SECONDS instead of
+    the regular session env vars (one replay day == one session). The CN
+    midday break is preserved per profile (am+pm each half of the day, the
+    break_seconds-long lunch pause in between) — identical shape to the
+    simulator's four-phase day.
     """
     live_source = resolve_live_source()
+    if live_source == "replay":
+        from app.market.replay_source import read_replay_env
+
+        replay_config = read_replay_env()
+        midday_break_seconds = (
+            replay_config.break_seconds
+            if profile is not None and profile.midday_break
+            else 0.0
+        )
+        logger.info(
+            "FinAlly startup: session clock in replay mode "
+            "(day=%ss, break=%ss, midday=%ss)",
+            replay_config.seconds_per_day,
+            replay_config.break_seconds,
+            midday_break_seconds,
+        )
+        return SessionClock(
+            replay_config.seconds_per_day,
+            replay_config.break_seconds,
+            midday_break_seconds=midday_break_seconds,
+        )
     real_data_active = live_source in REAL_DATA_SOURCES
     session_config = None if real_data_active else _read_session_config()
     if session_config is None:
@@ -220,6 +248,22 @@ async def lifespan(app: FastAPI):
     else:
         trading_profile = profile
 
+    # Replay startup data (D3 §2, BEFORE the source is created): verify the
+    # default equity universe's daily-bar coverage over the replay window,
+    # synchronously inject the sample provider for tickers lacking coverage
+    # (zero network, zero optional imports), and fail startup with explicit
+    # coverage/guidance when the window still cannot be replayed.
+    if resolve_live_source() == "replay":
+        from app.market.replay_source import ensure_replay_startup_data
+
+        replay_days = ensure_replay_startup_data(db_path, profile)
+        logger.info(
+            "FinAlly startup: replay window resolved to %d trading days (%s..%s)",
+            len(replay_days),
+            replay_days[0],
+            replay_days[-1],
+        )
+
     logger.info("FinAlly startup: creating price cache and market data source")
     # CN-2 §4: the price-limit function funnels every tick through the clamp.
     # P2 §2/§3: the ring buffer is the live strategy engine's ONLY bar source,
@@ -231,7 +275,9 @@ async def lifespan(app: FastAPI):
         limit_pct_fn=profile.price_limit_pct,
         max_quote_age_seconds=settings.quote_max_age_seconds,
     )
-    source = create_market_data_source(price_cache, session_clock, profile.universe)
+    source = create_market_data_source(
+        price_cache, session_clock, profile.universe, db_path=db_path
+    )
 
     # Start market data with the UNION of every user's watchlist (M4 — the
     # source tracks all users' tickers), falling back to the profile's
@@ -316,6 +362,12 @@ async def lifespan(app: FastAPI):
         price_cache, session_clock, db_path=db_path, universe=profile.universe
     )
     app.include_router(market_router)
+
+    # Replay status router (D3 §3 — GET /api/market/replay). Registered in
+    # EVERY mode: non-replay sources report {"active": false}; the session
+    # snapshot endpoint keeps its exact shape untouched.
+    from app.routes.replay import create_replay_router
+    app.include_router(create_replay_router(source))
 
     # History data router (D1 §2 — daily-bar sync/query; sample source plus
     # lazily-imported yfinance/akshare, so registration never needs network

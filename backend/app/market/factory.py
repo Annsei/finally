@@ -23,10 +23,11 @@ from .universe import MarketUniverse
 logger = logging.getLogger(__name__)
 
 LIVE_SOURCE_ENV = "FINALLY_LIVE_SOURCE"
-LIVE_SOURCE_CHOICES = ("auto", "simulator", "massive", "akshare")
+LIVE_SOURCE_CHOICES = ("auto", "simulator", "massive", "akshare", "replay")
 # Source kinds that stream real market data — main.py forces the session
 # clock into 24/7 mode for these (the simulator's open/close cycle makes no
-# sense against live quotes).
+# sense against live quotes). Deliberately EXCLUDES 'replay' (D3 §2): the
+# replay source needs the accelerated session clock to roll its days.
 REAL_DATA_SOURCES = frozenset({"massive", "akshare"})
 
 
@@ -87,11 +88,12 @@ def create_market_data_source(
     price_cache: PriceCache,
     session_clock: SessionClock | None = None,
     universe: MarketUniverse | None = None,
+    db_path: str | None = None,
 ) -> MarketDataSource:
     """Create the appropriate market data source based on environment variables.
 
     Selection is driven by FINALLY_LIVE_SOURCE ∈ auto|simulator|massive|
-    akshare (D2 §1):
+    akshare|replay (D2 §1 / D3 §2):
 
     - ``auto`` (default, byte-identical to the pre-D2 behavior):
       MASSIVE_API_KEY set and non-empty → MassiveDataSource (real market
@@ -100,18 +102,27 @@ def create_market_data_source(
       MASSIVE_API_KEY is an explicit misconfiguration and fails startup.
     - ``akshare``: real A-share spot quotes (AkshareLiveSource) — only legal
       with FINALLY_MARKET=cn; any other market profile fails startup.
+    - ``replay``: historical daily-bar replay (ReplayDataSource, D3) —
+      requires ``db_path`` (daily_bars lives in the app database); main.py
+      validates/injects window coverage BEFORE creating the source.
 
     Returns an unstarted source. Caller must await source.start(tickers).
 
     Args:
         price_cache: Shared cache the source writes ticks into.
-        session_clock: Optional session clock (M3.1). Only the simulator uses
-            it (equities freeze while closed); the real sources stream real
-            data and always run 24/7 — main.py forces a 24/7 clock whenever
-            the resolved live source is massive or akshare.
+        session_clock: Optional session clock (M3.1). Only the simulator and
+            the replay source use it (equities freeze while closed; replay
+            days roll on reopen); the real sources stream real data and
+            always run 24/7 — main.py forces a 24/7 clock whenever the
+            resolved live source is massive or akshare.
         universe: Optional market universe (CN-1). Only the simulator uses it
-            (seeds/params/correlations/asset classes); the real sources
-            stream real data. None keeps the US module-constant behavior.
+            (seeds/params/correlations/asset classes); the replay source uses
+            its default equity watchlist as the calendar base; the real
+            sources stream real data. None keeps the US module-constant
+            behavior.
+        db_path: SQLite path backing the replay source's daily_bars reads
+            (D3 §2). Only the replay branch reads it; main.py (the single
+            call site) always passes it.
     """
     choice = resolve_live_source()
 
@@ -136,6 +147,33 @@ def create_market_data_source(
             poll_interval,
         )
         return AkshareLiveSource(price_cache=price_cache, poll_interval=poll_interval)
+    elif choice == "replay":
+        if not db_path:
+            raise ValueError(
+                f"{LIVE_SOURCE_ENV}=replay requires a db_path (daily_bars "
+                "lives in the application database — main.py passes it)"
+            )
+        from .replay_source import ReplayDataSource, read_replay_env
+
+        profile = resolve_market_profile()
+        replay_universe = universe if universe is not None else profile.universe
+        config = read_replay_env()
+        logger.info(
+            "Market data source: Historical replay (%s, %.0fs/day, loop=%s)",
+            f"{config.from_date}..{config.to_date}"
+            if config.from_date is not None
+            else "auto window",
+            config.seconds_per_day,
+            config.loop,
+        )
+        return ReplayDataSource(
+            price_cache,
+            db_path=db_path,
+            market=profile.key,
+            session_clock=session_clock,
+            universe=replay_universe,
+            config=config,
+        )
     else:
         logger.info("Market data source: GBM Simulator")
         return SimulatorDataSource(
