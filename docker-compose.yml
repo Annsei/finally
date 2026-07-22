@@ -1,0 +1,47 @@
+# Local, single-replica deployment. Ports bind to localhost unless the operator
+# explicitly sets FINALLY_BIND_HOST. See planning/OPERATIONS.md before exposing
+# either service beyond the host.
+x-app-common: &app-common
+  build: .
+  image: finally
+  env_file:
+    - path: .env
+      required: false
+  restart: unless-stopped
+  stop_grace_period: 15s
+  init: true
+  deploy:
+    # Application market state and background loops are process-local.
+    replicas: 1
+
+services:
+  app:
+    <<: *app-common
+    ports:
+      - "${FINALLY_BIND_HOST:-127.0.0.1}:${FINALLY_US_PORT:-8000}:8000"
+    volumes:
+      - finally-us-data:/app/db
+    environment:
+      FINALLY_MARKET: us
+      DB_PATH: /app/db/finally.db
+
+  # Opt in with: docker compose --profile cn up --build -d
+  # This starts a second, isolated A-share instance alongside the US service.
+  app-cn:
+    <<: *app-common
+    profiles: [cn]
+    ports:
+      - "${FINALLY_BIND_HOST:-127.0.0.1}:${FINALLY_CN_PORT:-8001}:8000"
+    volumes:
+      - finally-cn-data:/app/db
+    environment:
+      FINALLY_MARKET: cn
+      DB_PATH: /app/db/finally.db
+      # Massive currently provides the US feed only; do not leak a shared .env
+      # key into the CN profile, which intentionally uses its simulator.
+      MASSIVE_API_KEY: ""
+
+volumes:
+  # Compose project scoping prevents two checkouts from silently sharing data.
+  finally-us-data:
+  finally-cn-data:

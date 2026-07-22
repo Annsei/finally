@@ -1,48 +1,163 @@
+import { useState } from 'react';
 import useSWR from 'swr';
 import WatchlistRow from './WatchlistRow';
 import type { WatchlistResponse } from '@/types/market';
 import { fetcher } from '@/lib/fetcher';
+import { useMarketProfile } from '@/lib/marketProfile';
+import { useT } from '@/lib/i18n';
 
 interface Props {
   selectedTicker: string | null;
   onSelectTicker: (ticker: string) => void;
 }
 
-export default function WatchlistPanel({ selectedTicker, onSelectTicker }: Props) {
-  const { data } = useSWR<WatchlistResponse>('/api/watchlist/', fetcher);
-  const tickers = data?.tickers?.map((t) => t.ticker) ?? [];
+// Ticker format accepted by the backend: 1-10 uppercase letters
+const TICKER_RE = /^[A-Z]{1,10}$/;
 
-  if (tickers.length === 0) {
-    return (
-      <div className="w-64 shrink-0 p-4">
-        <h3 className="text-terminal-muted text-sm font-semibold">No prices yet</h3>
-        <p className="text-terminal-muted text-xs mt-1">Waiting for the live market feed…</p>
-      </div>
-    );
+// Parse {"error": "..."} (or FastAPI {"detail": "..."}) from a failed response
+async function readErrorDetail(res: Response): Promise<string> {
+  try {
+    const body = await res.json();
+    return body?.error ?? body?.detail ?? '';
+  } catch {
+    return '';
   }
+}
+
+export default function WatchlistPanel({ selectedTicker, onSelectTicker }: Props) {
+  const t = useT();
+  const profile = useMarketProfile();
+  // Same SWR key as index.tsx — bound mutate revalidates every subscriber
+  const { data, mutate } = useSWR<WatchlistResponse>('/api/watchlist/', fetcher);
+  const tickers = data?.tickers?.map((row) => row.ticker) ?? [];
+
+  const [addInput, setAddInput] = useState('');
+  const [adding, setAdding] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  const handleAdd = async () => {
+    const ticker = addInput.trim().toUpperCase();
+    setActionError(null);
+
+    // Client-side validation before any network call: 1-10 chars A-Z
+    if (!TICKER_RE.test(ticker)) {
+      setActionError(t('watchlist.errFormat'));
+      return;
+    }
+    if (tickers.includes(ticker)) {
+      setActionError(t('watchlist.errAlready', { ticker }));
+      return;
+    }
+
+    setAdding(true);
+    try {
+      // POST /api/watchlist/ {ticker} — trailing slash matches the SWR key style
+      const res = await fetch('/api/watchlist/', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ticker }),
+      });
+      if (!res.ok) {
+        throw new Error((await readErrorDetail(res)) || `Add failed (${res.status})`);
+      }
+      setAddInput('');
+      await mutate();
+    } catch (e) {
+      setActionError(e instanceof Error && e.message ? e.message : t('watchlist.errAddFail'));
+    } finally {
+      setAdding(false);
+    }
+  };
+
+  const handleRemove = async (ticker: string) => {
+    setActionError(null);
+    try {
+      // DELETE /api/watchlist/{ticker} — path param, no trailing slash
+      const res = await fetch(`/api/watchlist/${encodeURIComponent(ticker)}`, {
+        method: 'DELETE',
+      });
+      if (!res.ok) {
+        throw new Error((await readErrorDetail(res)) || `Remove failed (${res.status})`);
+      }
+      await mutate();
+    } catch (e) {
+      setActionError(e instanceof Error && e.message ? e.message : t('watchlist.errRemoveFail'));
+    }
+  };
 
   return (
-    <div className="w-64 shrink-0">
-      <table className="w-full text-xs border-collapse">
-        <thead>
-          <tr className="text-terminal-muted border-b border-terminal-border">
-            <th className="text-left py-1 pl-1 font-semibold">Symbol</th>
-            <th className="text-right py-1 font-semibold">Price</th>
-            <th className="text-right py-1 font-semibold">Change %</th>
-            <th className="text-right py-1 pr-2 font-semibold">Chart</th>
-          </tr>
-        </thead>
-        <tbody>
-          {tickers.map((ticker) => (
-            <WatchlistRow
-              key={ticker}
-              ticker={ticker}
-              isSelected={ticker === selectedTicker}
-              onSelect={() => onSelectTicker(ticker)}
-            />
-          ))}
-        </tbody>
-      </table>
+    <div
+      data-testid="watchlist-panel"
+      className="w-full max-h-64 shrink-0 flex flex-col md:w-56 md:max-h-none xl:w-52 2xl:w-64"
+    >
+      {/* Add-ticker form — compact, dense terminal style */}
+      <div className="flex gap-1 pb-2">
+        <input
+          type="text"
+          data-testid="watchlist-add-input"
+          aria-label={t('watchlist.addAria')}
+          list="ticker-suggestions"
+          value={addInput}
+          onChange={(e) => setAddInput(e.target.value.toUpperCase())}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') void handleAdd();
+          }}
+          placeholder={t('watchlist.addPlaceholder')}
+          maxLength={10}
+          disabled={adding}
+          className="flex-1 min-w-0 px-2 py-1 text-xs font-mono bg-terminal-bg border border-terminal-border text-terminal-text rounded focus:outline-none focus:border-terminal-blue placeholder:text-terminal-muted disabled:opacity-50"
+        />
+        <button
+          type="button"
+          data-testid="watchlist-add-button"
+          onClick={() => void handleAdd()}
+          disabled={adding || !addInput.trim()}
+          className="px-2.5 py-1 rounded text-xs font-semibold text-white disabled:opacity-50 disabled:cursor-not-allowed transition-opacity"
+          style={{ backgroundColor: '#753991' }}
+        >
+          {t('watchlist.add')}
+        </button>
+      </div>
+
+      {/* Inline error for add/remove failures (e.g., duplicate or invalid ticker) */}
+      {actionError && (
+        <p data-testid="watchlist-error" className="pb-1.5 text-xs text-terminal-down leading-tight">
+          {actionError}
+        </p>
+      )}
+
+      {tickers.length === 0 ? (
+        <div className="p-4">
+          <h3 className="text-terminal-muted text-sm font-semibold">{t('watchlist.noPrices')}</h3>
+          <p className="text-terminal-muted text-xs mt-1">{t('watchlist.waitingFeed')}</p>
+        </div>
+      ) : (
+        <div className="overflow-y-auto min-h-0">
+          <table className="w-full text-xs border-collapse">
+            <thead>
+              <tr className="text-terminal-muted border-b border-terminal-border">
+                <th className="text-left py-1 pl-1 font-semibold">{t('watchlist.colSymbol')}</th>
+                <th className="text-right py-1 font-semibold">{t('watchlist.colPrice')}</th>
+                <th className="text-right py-1 font-semibold">{t('watchlist.colDayPct')}</th>
+                <th className="text-right py-1 pr-1 font-semibold">{t('watchlist.colChart')}</th>
+                <th className="w-4" aria-label="Remove column" />
+              </tr>
+            </thead>
+            <tbody>
+              {tickers.map((ticker) => (
+                <WatchlistRow
+                  key={ticker}
+                  ticker={ticker}
+                  isSelected={ticker === selectedTicker}
+                  onSelect={() => onSelectTicker(ticker)}
+                  onRemove={() => void handleRemove(ticker)}
+                  profile={profile}
+                />
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }

@@ -2,18 +2,95 @@
 
 from __future__ import annotations
 
+from contextlib import AsyncExitStack
+from types import SimpleNamespace
+
+import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
+from app.market import MarketDataSource, PriceCache
+
+
+class FakeTime:
+    """Deterministic, manually-advanced time source for SessionClock tests.
+
+    Pass an instance as ``SessionClock(..., now=fake_time)`` and drive
+    transitions with ``fake_time.advance(seconds)`` + ``clock.tick()`` —
+    no sleeping. Importable helper (not a fixture) shared by session tests.
+    """
+
+    def __init__(self, start: float = 1_000.0) -> None:
+        self.now = start
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+class FakeMarketSource(MarketDataSource):
+    """In-memory MarketDataSource test double that records add/remove calls.
+
+    Installed on ``app.state.market_source`` by the client fixtures (mirroring
+    main.py's lifespan wiring) so tests can assert that routes sync watchlist
+    changes to the market data source.
+
+    When a ``price_cache`` is attached (the client fixtures attach the app's
+    cache), the fake mirrors the real sources' cache semantics: ``add_ticker``
+    seeds a price for a brand-new ticker immediately (the behavior the chat
+    add-then-trade flow relies on) and ``remove_ticker`` evicts the ticker
+    from the cache.
+    """
+
+    SEED_PRICE = 100.0
+
+    def __init__(self, price_cache: PriceCache | None = None) -> None:
+        self.added: list[str] = []
+        self.removed: list[str] = []
+        self._tickers: list[str] = []
+        self.price_cache = price_cache
+
+    async def start(self, tickers: list[str]) -> None:
+        self._tickers = list(tickers)
+
+    async def stop(self) -> None:
+        pass
+
+    async def add_ticker(self, ticker: str) -> None:
+        self.added.append(ticker)
+        if ticker not in self._tickers:
+            self._tickers.append(ticker)
+        if self.price_cache is not None and self.price_cache.get(ticker) is None:
+            self.price_cache.update(ticker, self.SEED_PRICE)
+
+    async def remove_ticker(self, ticker: str) -> None:
+        self.removed.append(ticker)
+        if ticker in self._tickers:
+            self._tickers.remove(ticker)
+        if self.price_cache is not None:
+            self.price_cache.remove(ticker)
+
+    def get_tickers(self) -> list[str]:
+        return list(self._tickers)
+
+
+@pytest.fixture
+def fake_market_source():
+    """Fake market data source; request alongside app_client/chat_client to assert sync calls."""
+    return FakeMarketSource()
+
 
 @pytest_asyncio.fixture
-async def app_client(tmp_path, monkeypatch):
+async def app_client(tmp_path, monkeypatch, fake_market_source):
     """FastAPI test client with isolated temp SQLite DB and seeded price cache.
 
     Creates a fresh FastAPI app instance per test to avoid route accumulation
     on the module-level app singleton (which registers routers inside lifespan).
-    Initializes the DB and seeds the price cache so trade tests have prices.
+    Initializes the DB, seeds the price cache so trade tests have prices, and
+    installs a FakeMarketSource on app.state (as main.py's lifespan does).
     """
     db_file = str(tmp_path / "test.db")
     monkeypatch.setenv("DB_PATH", db_file)
@@ -21,8 +98,15 @@ async def app_client(tmp_path, monkeypatch):
     from app.db.connection import init_db
     from app.market import PriceCache, create_stream_router
     from app.market.seed_prices import SEED_PRICES
+    from app.routes.auth import create_auth_router
+    from app.routes.backtest import create_backtest_router
     from app.routes.health import router as health_router
+    from app.routes.leaderboard import create_leaderboard_router
+    from app.routes.market import create_market_router
+    from app.routes.orders import create_orders_router
     from app.routes.portfolio import create_portfolio_router
+    from app.routes.rules import create_rules_router
+    from app.routes.seasons import create_seasons_router
     from app.routes.watchlist import create_watchlist_router
 
     init_db(db_file)
@@ -32,23 +116,38 @@ async def app_client(tmp_path, monkeypatch):
     for ticker, price in SEED_PRICES.items():
         price_cache.update(ticker, price)
 
+    # Attach the app's cache so the fake source seeds prices on add_ticker
+    # (mirrors SimulatorDataSource/MassiveDataSource behavior).
+    fake_market_source.price_cache = price_cache
+
     test_app = FastAPI()
+    test_app.state.market_source = fake_market_source
     test_app.include_router(health_router)
     test_app.include_router(create_stream_router(price_cache))
     test_app.include_router(create_portfolio_router(price_cache, db_file))
+    test_app.include_router(create_orders_router(price_cache, db_file))
+    test_app.include_router(create_rules_router(price_cache, db_file))
+    test_app.include_router(create_backtest_router(price_cache))
     test_app.include_router(create_watchlist_router(price_cache, db_file))
+    test_app.include_router(create_market_router(price_cache))
+    test_app.include_router(create_auth_router(db_file))
+    test_app.include_router(create_leaderboard_router(price_cache, db_file))
+    test_app.include_router(create_seasons_router(price_cache, db_file))
 
     async with AsyncClient(transport=ASGITransport(app=test_app), base_url="http://test") as client:
         yield client
 
 
 @pytest_asyncio.fixture
-async def chat_client(tmp_path, monkeypatch):
+async def chat_client(tmp_path, monkeypatch, fake_market_source):
     """FastAPI test client with all routers registered and LLM_MOCK=true.
 
     Extends app_client with the chat router and sets LLM_MOCK=true so that
     chat tests never make real network calls to OpenRouter.
-    Includes all five routers: health, stream, portfolio, watchlist, chat.
+    Includes health, stream, portfolio, orders, rules, watchlist, and chat
+    routers (mirroring main.py) so chat-agent tests can verify order rows and
+    rule rows through the public endpoints.
+    Installs a FakeMarketSource on app.state (as main.py's lifespan does).
     """
     db_file = str(tmp_path / "test.db")
     monkeypatch.setenv("DB_PATH", db_file)
@@ -59,7 +158,9 @@ async def chat_client(tmp_path, monkeypatch):
     from app.market.seed_prices import SEED_PRICES
     from app.routes.chat import create_chat_router
     from app.routes.health import router as health_router
+    from app.routes.orders import create_orders_router
     from app.routes.portfolio import create_portfolio_router
+    from app.routes.rules import create_rules_router
     from app.routes.watchlist import create_watchlist_router
 
     init_db(db_file)
@@ -69,12 +170,97 @@ async def chat_client(tmp_path, monkeypatch):
     for ticker, price in SEED_PRICES.items():
         price_cache.update(ticker, price)
 
+    # Attach the app's cache so the fake source seeds prices on add_ticker
+    # (mirrors SimulatorDataSource/MassiveDataSource behavior).
+    fake_market_source.price_cache = price_cache
+
     test_app = FastAPI()
+    test_app.state.market_source = fake_market_source
     test_app.include_router(health_router)
     test_app.include_router(create_stream_router(price_cache))
     test_app.include_router(create_portfolio_router(price_cache, db_file))
+    test_app.include_router(create_orders_router(price_cache, db_file))
+    test_app.include_router(create_rules_router(price_cache, db_file))
     test_app.include_router(create_watchlist_router(price_cache, db_file))
     test_app.include_router(create_chat_router(price_cache, db_file))
 
     async with AsyncClient(transport=ASGITransport(app=test_app), base_url="http://test") as client:
         yield client
+
+
+@pytest_asyncio.fixture
+async def arena(tmp_path, monkeypatch, fake_market_source):
+    """Multi-user arena app (M4): every router registered, LLM_MOCK=true.
+
+    Yields a SimpleNamespace with:
+    - ``app``: the FastAPI test app (all routers incl. auth/chat/leaderboard/
+      seasons, FakeMarketSource on app.state — mirrors main.py's lifespan)
+    - ``db_file``: path to the isolated temp SQLite DB
+    - ``price_cache``: the app's PriceCache (seeded with SEED_PRICES)
+    - ``market_source``: the FakeMarketSource (started with the seeded
+      watchlist union, as main.py does)
+    - ``make_client()``: async factory returning an independent AsyncClient
+      with its OWN cookie jar — call once per simulated user (plus one for
+      anonymous), so isolation tests can act as several users at once.
+    """
+    db_file = str(tmp_path / "arena.db")
+    monkeypatch.setenv("DB_PATH", db_file)
+    monkeypatch.setenv("LLM_MOCK", "true")
+
+    from app.db.connection import get_conn, init_db
+    from app.market import PriceCache, create_stream_router
+    from app.market.seed_prices import SEED_PRICES
+    from app.routes.auth import create_auth_router
+    from app.routes.backtest import create_backtest_router
+    from app.routes.chat import create_chat_router
+    from app.routes.health import router as health_router
+    from app.routes.leaderboard import create_leaderboard_router
+    from app.routes.market import create_market_router
+    from app.routes.orders import create_orders_router
+    from app.routes.portfolio import create_portfolio_router
+    from app.routes.rules import create_rules_router
+    from app.routes.seasons import create_seasons_router
+    from app.routes.watchlist import create_watchlist_router
+
+    init_db(db_file)
+
+    price_cache = PriceCache()
+    for ticker, price in SEED_PRICES.items():
+        price_cache.update(ticker, price)
+
+    fake_market_source.price_cache = price_cache
+    # Start the source with the union of all users' watchlists (main.py M4).
+    conn = get_conn(db_file)
+    tickers = [row["ticker"] for row in conn.execute("SELECT DISTINCT ticker FROM watchlist")]
+    conn.close()
+    await fake_market_source.start(tickers)
+
+    test_app = FastAPI()
+    test_app.state.market_source = fake_market_source
+    test_app.include_router(health_router)
+    test_app.include_router(create_stream_router(price_cache))
+    test_app.include_router(create_portfolio_router(price_cache, db_file))
+    test_app.include_router(create_orders_router(price_cache, db_file))
+    test_app.include_router(create_rules_router(price_cache, db_file))
+    test_app.include_router(create_backtest_router(price_cache))
+    test_app.include_router(create_watchlist_router(price_cache, db_file))
+    test_app.include_router(create_chat_router(price_cache, db_file))
+    test_app.include_router(create_market_router(price_cache))
+    test_app.include_router(create_auth_router(db_file))
+    test_app.include_router(create_leaderboard_router(price_cache, db_file))
+    test_app.include_router(create_seasons_router(price_cache, db_file))
+
+    async with AsyncExitStack() as stack:
+
+        async def make_client() -> AsyncClient:
+            return await stack.enter_async_context(
+                AsyncClient(transport=ASGITransport(app=test_app), base_url="http://test")
+            )
+
+        yield SimpleNamespace(
+            app=test_app,
+            db_file=db_file,
+            price_cache=price_cache,
+            market_source=fake_market_source,
+            make_client=make_client,
+        )

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 
 import pytest
@@ -93,6 +92,20 @@ class TestSSEStream:
         await gen.aclose()
 
         assert first_event.startswith("retry:")
+
+    async def test_stream_sends_named_heartbeat_when_prices_are_quiet(self):
+        cache = PriceCache()
+        gen = _generate_events(
+            cache,
+            DummyRequest(),
+            interval=0,
+            heartbeat_interval=0,
+        )
+        await anext(gen)  # retry directive
+        heartbeat = await anext(gen)
+        await gen.aclose()
+
+        assert heartbeat == "event: heartbeat\ndata: {}\n\n"
 
     async def test_multiple_router_instances_do_not_conflict(self):
         """Each call to create_stream_router() produces an independent router."""

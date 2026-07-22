@@ -1,0 +1,92 @@
+/**
+ * NewsTicker.tsx — scrolling market-event feed (FRONTEND_REALISM.md §3.1)
+ *
+ * The simulator's sudden 2-5% moves surface as events via
+ * GET /api/market/events (polled — news cadence doesn't need SSE). Content is
+ * rendered twice inside .news-ticker-track for a seamless CSS marquee loop;
+ * hover pauses the animation (see globals.css).
+ */
+import { useState } from 'react';
+import useSWR from 'swr';
+import { fetcher } from '@/lib/fetcher';
+import SymbolLink from '@/components/SymbolLink';
+import type { MarketEvent, MarketEventsResponse } from '@/types/market';
+import { useT } from '@/lib/i18n';
+import { useMarketProfile } from '@/lib/marketProfile';
+
+function formatTime(ts: number, locale: string): string {
+  const d = new Date(ts * 1000);
+  return isNaN(d.getTime()) ? '' : d.toLocaleTimeString(locale, { hour12: false });
+}
+
+function EventItem({ ev, locale, interactive }: { ev: MarketEvent; locale: string; interactive: boolean }) {
+  // Direction colour flips with the market (CSS var); the news feed reads as
+  // green-up / red-down on US, red-up / green-down on the A-share market.
+  const color = ev.direction === 'up' ? 'var(--color-up)' : 'var(--color-down)';
+  return (
+    <span className="inline-flex items-baseline gap-1 px-4 text-xs" data-testid={`news-item-${ev.id}`}>
+      <span className="text-terminal-muted tabular-nums">{formatTime(ev.timestamp, locale)}</span>
+      <span style={{ color }}>{ev.direction === 'up' ? '▲' : '▼'}</span>
+      {/* Code links to the symbol detail page (P1 §2) */}
+      {interactive ? (
+        <SymbolLink code={ev.ticker} className="font-semibold text-terminal-text" />
+      ) : (
+        <span className="font-semibold text-terminal-text">{ev.ticker}</span>
+      )}
+      {/* LLM narrative when enriched (M3.2), template headline otherwise */}
+      <span className="text-terminal-text">{ev.narrative ?? ev.headline}</span>
+    </span>
+  );
+}
+
+export default function NewsTicker() {
+  const t = useT();
+  const profile = useMarketProfile();
+  const [paused, setPaused] = useState(false);
+  const { data } = useSWR<MarketEventsResponse>('/api/market/events', fetcher, {
+    refreshInterval: 5000,
+  });
+  const events = data?.events ?? [];
+
+  return (
+    <div
+      data-testid="news-ticker"
+      className="h-6 flex items-center overflow-hidden border-b border-terminal-border bg-terminal-surface/60"
+    >
+      {events.length === 0 ? (
+        <span className="px-4 text-xs text-terminal-muted">
+          {t('news.empty')}
+        </span>
+      ) : (
+        <>
+          <button
+            type="button"
+            aria-pressed={paused}
+            aria-label={paused ? t('news.resume') : t('news.pause')}
+            onClick={() => setPaused((value) => !value)}
+            className="shrink-0 self-stretch border-r border-terminal-border px-2 text-[10px] text-terminal-muted hover:text-terminal-text"
+          >
+            {paused ? '▶' : 'Ⅱ'}
+          </button>
+          <div className="overflow-hidden">
+            <div className="news-ticker-track" style={{ animationPlayState: paused ? 'paused' : 'running' }}>
+              {/* duplicated content = seamless loop */}
+              {[0, 1].map((copy) => (
+                <span key={copy} aria-hidden={copy === 1}>
+                  {events.map((ev) => (
+                    <EventItem
+                      key={`${copy}-${ev.id}`}
+                      ev={ev}
+                      locale={profile.locale}
+                      interactive={copy === 0}
+                    />
+                  ))}
+                </span>
+              ))}
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}

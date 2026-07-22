@@ -8,8 +8,6 @@ Tests the module-level helper directly (not via HTTP) to verify:
 
 from __future__ import annotations
 
-import sqlite3
-
 import pytest
 
 from app.market import PriceCache
@@ -20,7 +18,7 @@ from app.market.seed_prices import SEED_PRICES
 def fresh_db(tmp_path):
     """Provide a fresh initialized SQLite connection for direct helper testing."""
     db_file = str(tmp_path / "test_helper.db")
-    from app.db.connection import init_db, get_conn
+    from app.db.connection import get_conn, init_db
     init_db(db_file)
     conn = get_conn(db_file)
     yield conn
@@ -51,10 +49,20 @@ class TestExecuteTradeOnConnImport:
 
     def test_signature(self):
         import inspect
+
         from app.routes.portfolio import execute_trade_on_conn
         sig = inspect.signature(execute_trade_on_conn)
         params = list(sig.parameters.keys())
-        assert params == ["conn", "price_cache", "ticker", "side", "quantity"]
+        assert params == [
+            "conn", "price_cache", "ticker", "side", "quantity", "commission_bps",
+            "session_clock", "user_id",
+        ]
+        # Anonymous default — legacy callers keep pre-M4 single-user behavior
+        assert sig.parameters["user_id"].default == "default"
+        # Commission-free by default — legacy callers keep pre-M1 behavior
+        assert sig.parameters["commission_bps"].default == 0.0
+        # No session clock by default — legacy callers keep pre-M3 behavior
+        assert sig.parameters["session_clock"].default is None
 
 
 class TestExecuteTradeOnConnFailurePaths:
@@ -170,3 +178,142 @@ class TestExecuteTradeOnConnSuccessPaths:
             "SELECT cash_balance FROM users_profile WHERE id = 'default'"
         ).fetchone()["cash_balance"]
         assert after < before
+
+
+class TestFillsAtBidAsk:
+    """Batch 2 §2.3: buys fill at the cached ask, sells at the cached bid."""
+
+    BID = 189.90
+    ASK = 190.10
+    LAST = 190.00
+
+    @pytest.fixture
+    def quoted_cache(self):
+        """Cache with a distinct bid/ask around the last price for AAPL."""
+        cache = PriceCache()
+        cache.update("AAPL", self.LAST, bid=self.BID, ask=self.ASK)
+        return cache
+
+    def test_buy_fills_at_ask(self, fresh_db, quoted_cache):
+        from app.routes.portfolio import execute_trade_on_conn
+        result = execute_trade_on_conn(fresh_db, quoted_cache, "AAPL", "buy", 2.0)
+        assert result["status"] == "executed"
+        assert result["price"] == self.ASK
+
+        # Cash debit, position avg_cost, and trade log all use the ask
+        cash = fresh_db.execute(
+            "SELECT cash_balance FROM users_profile WHERE id = 'default'"
+        ).fetchone()["cash_balance"]
+        assert cash == pytest.approx(10_000.0 - 2.0 * self.ASK)
+        pos = fresh_db.execute(
+            "SELECT avg_cost FROM positions WHERE user_id = 'default' AND ticker = 'AAPL'"
+        ).fetchone()
+        assert pos["avg_cost"] == self.ASK
+        trade = fresh_db.execute(
+            "SELECT price FROM trades WHERE user_id = 'default' AND ticker = 'AAPL'"
+        ).fetchone()
+        assert trade["price"] == self.ASK
+
+    def test_sell_fills_at_bid(self, fresh_db, quoted_cache):
+        from app.routes.portfolio import execute_trade_on_conn
+        buy = execute_trade_on_conn(fresh_db, quoted_cache, "AAPL", "buy", 2.0)
+        assert buy["status"] == "executed"
+
+        sell = execute_trade_on_conn(fresh_db, quoted_cache, "AAPL", "sell", 1.0)
+        assert sell["status"] == "executed"
+        assert sell["price"] == self.BID
+
+        cash = fresh_db.execute(
+            "SELECT cash_balance FROM users_profile WHERE id = 'default'"
+        ).fetchone()["cash_balance"]
+        assert cash == pytest.approx(10_000.0 - 2.0 * self.ASK + 1.0 * self.BID)
+
+    def test_fallback_to_price_when_bid_equals_ask(self, fresh_db):
+        """bid == ask (zero spread / defaulted quote) fills at the last price."""
+        from app.routes.portfolio import execute_trade_on_conn
+        cache = PriceCache()
+        cache.update("AAPL", 190.00)  # No quote → bid = ask = price
+        result = execute_trade_on_conn(fresh_db, cache, "AAPL", "buy", 1.0)
+        assert result["status"] == "executed"
+        assert result["price"] == 190.00
+
+    def test_insufficient_cash_checked_against_ask(self, fresh_db):
+        """A buy affordable at the last price but not at the ask must fail."""
+        from app.routes.portfolio import execute_trade_on_conn
+        cache = PriceCache()
+        # 100 shares * $100.00 = exactly $10,000 — affordable at the price,
+        # but the ask ($100.50) puts the cost at $10,050.
+        cache.update("AAPL", 100.00, bid=99.50, ask=100.50)
+        result = execute_trade_on_conn(fresh_db, cache, "AAPL", "buy", 100.0)
+        assert result["status"] == "failed"
+        assert result["error"] == "Insufficient cash"
+
+    def test_insufficient_shares_still_validated(self, fresh_db, quoted_cache):
+        from app.routes.portfolio import execute_trade_on_conn
+        result = execute_trade_on_conn(fresh_db, quoted_cache, "AAPL", "sell", 1.0)
+        assert result["status"] == "failed"
+        assert result["error"] == "Insufficient shares to sell"
+
+    def test_ticker_not_in_cache_unchanged(self, fresh_db, empty_cache):
+        """The 'Ticker not found in price cache' path is untouched."""
+        from app.routes.portfolio import execute_trade_on_conn
+        result = execute_trade_on_conn(fresh_db, empty_cache, "AAPL", "buy", 1.0)
+        assert result["status"] == "failed"
+        assert "Ticker not found in price cache" in result["error"]
+
+
+class TestSellAtALossAccounting:
+    """Spec §12 edge case: selling at a loss must realize the loss exactly."""
+
+    def test_sell_all_shares_at_a_loss(self, fresh_db):
+        """Buy 10 @ $200, price drops to $150, sell all 10.
+
+        Cash must equal initial_cash - buy_cost + sell_proceeds exactly, the
+        position row must be deleted, and both trade rows must record the
+        price at their respective execution times.
+        """
+        from app.routes.portfolio import execute_trade_on_conn
+
+        cache = PriceCache()
+        cache.update("AAPL", 200.0)
+
+        initial_cash: float = fresh_db.execute(
+            "SELECT cash_balance FROM users_profile WHERE id = 'default'"
+        ).fetchone()["cash_balance"]
+
+        buy = execute_trade_on_conn(fresh_db, cache, "AAPL", "buy", 10.0)
+        assert buy["status"] == "executed"
+        assert buy["price"] == 200.0
+
+        # Price drops 25% — the position is now underwater
+        cache.update("AAPL", 150.0)
+
+        sell = execute_trade_on_conn(fresh_db, cache, "AAPL", "sell", 10.0)
+        assert sell["status"] == "executed"
+        assert sell["price"] == 150.0
+        fresh_db.commit()
+
+        # Cash reflects the realized loss exactly: -$2000 buy, +$1500 sell
+        cash: float = fresh_db.execute(
+            "SELECT cash_balance FROM users_profile WHERE id = 'default'"
+        ).fetchone()["cash_balance"]
+        assert cash == pytest.approx(initial_cash - 10.0 * 200.0 + 10.0 * 150.0)
+        assert cash == pytest.approx(initial_cash - 500.0)  # $500 realized loss
+
+        # Position fully closed — row deleted
+        pos_row = fresh_db.execute(
+            "SELECT quantity FROM positions WHERE user_id = 'default' AND ticker = 'AAPL'"
+        ).fetchone()
+        assert pos_row is None
+
+        # Both trades logged with the correct execution prices
+        trade_rows = fresh_db.execute(
+            "SELECT side, quantity, price FROM trades "
+            "WHERE user_id = 'default' AND ticker = 'AAPL'"
+        ).fetchall()
+        assert len(trade_rows) == 2
+        by_side = {row["side"]: row for row in trade_rows}
+        assert by_side["buy"]["quantity"] == 10.0
+        assert by_side["buy"]["price"] == 200.0
+        assert by_side["sell"]["quantity"] == 10.0
+        assert by_side["sell"]["price"] == 150.0

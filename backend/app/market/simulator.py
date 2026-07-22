@@ -6,6 +6,8 @@ import asyncio
 import logging
 import math
 import random
+import zlib
+from collections.abc import Callable
 
 import numpy as np
 
@@ -15,14 +17,124 @@ from .seed_prices import (
     CORRELATION_GROUPS,
     CROSS_GROUP_CORR,
     DEFAULT_PARAMS,
+    INTRA_CRYPTO_CORR,
     INTRA_FINANCE_CORR,
     INTRA_TECH_CORR,
     SEED_PRICES,
     TICKER_PARAMS,
     TSLA_CORR,
+    asset_class_for,
+    sector_for,
 )
+from .session import SessionClock
+from .universe import MarketUniverse
 
 logger = logging.getLogger(__name__)
+
+# Sector-correlated event bursts (M3.2b): when a random event shocks a ticker,
+# with this probability every same-sector peer is shocked too, by a fraction
+# of the source move (same sign, per-peer jitter).
+BURST_PROBABILITY = 0.35
+BURST_FRACTION_MIN = 0.25
+BURST_FRACTION_MAX = 0.50
+
+# Per-tick volume: lognormal draw shared by all tickers.
+# median = e^9.2 ~= 9,900 shares; sigma 0.8 puts the 2-sigma range at roughly
+# 2k-49k, so typical values land in the 1k-100k band and vary tick to tick.
+VOLUME_LOG_MEAN = 9.2
+VOLUME_LOG_SIGMA = 0.8
+
+# Quoted spread bounds in basis points (deterministic per ticker).
+MIN_SPREAD_BPS = 1
+MAX_SPREAD_BPS = 5
+
+
+def spread_bps_for(ticker: str) -> float:
+    """Deterministic per-ticker quoted spread in basis points (1-5 bp).
+
+    Derived from a stable CRC32 hash of the ticker so the spread is fixed for
+    the life of the process (and across processes — CRC32 is not seed-salted
+    like Python's built-in hash()).
+    """
+    span = MAX_SPREAD_BPS - MIN_SPREAD_BPS + 1
+    return float(MIN_SPREAD_BPS + zlib.crc32(ticker.encode("utf-8")) % span)
+
+
+def compute_quote(ticker: str, price: float) -> tuple[float, float]:
+    """Best bid/ask for a price using the ticker's fixed spread.
+
+    bid = price * (1 - spread/2), ask = price * (1 + spread/2), both rounded
+    to 2dp. After rounding, a half-spread smaller than half a cent would
+    collapse onto the price, so each side is pushed at least one cent away —
+    guaranteeing bid < price < ask for prices >= $1.
+    """
+    half_spread = price * spread_bps_for(ticker) / 2.0 / 10_000.0
+    bid = round(price - half_spread, 2)
+    ask = round(price + half_spread, 2)
+    rounded_price = round(price, 2)
+    if bid >= rounded_price:
+        bid = round(rounded_price - 0.01, 2)
+    if ask <= rounded_price:
+        ask = round(rounded_price + 0.01, 2)
+    return bid, ask
+
+
+def draw_volume() -> float:
+    """Per-tick traded volume: a lognormal draw (whole shares, > 0)."""
+    return float(max(1, round(random.lognormvariate(VOLUME_LOG_MEAN, VOLUME_LOG_SIGMA))))
+
+
+def compute_peer_shocks(
+    ticker: str,
+    shock_magnitude: float,
+    shock_sign: int,
+    candidates: list[str],
+    rng: random.Random | None = None,
+    sector_fn: Callable[[str], str] | None = None,
+) -> dict[str, float]:
+    """Sector-correlated burst for one random event (M3.2b).
+
+    Given a random event that just shocked ``ticker`` by
+    ``shock_sign * shock_magnitude`` (fractional, e.g. +0.03 for +3%), decide
+    whether the shock cascades to the ticker's sector and compute each peer's
+    shock. The burst fires with probability ``BURST_PROBABILITY``; when it
+    does, EVERY same-sector peer among ``candidates`` (excluding ``ticker``
+    itself) is shocked by 25-50% of the source magnitude, same sign — the
+    fraction is drawn independently per peer (the jitter).
+
+    Tickers in the "other" bucket (unknown/user-added) have no meaningful
+    sector, so they never burst.
+
+    ``sector_fn`` classifies a ticker's sector (CN-2 §6): None uses the
+    module-level US ``sector_for``; the GBM simulator injects the active
+    universe's ``sector_for`` so CN codes cascade within 白酒/新能源 etc.
+    (the US map returns "other" for them and would never burst).
+
+    Deterministic-testable: pass a seeded ``random.Random`` (or a fake with
+    ``random()``/``uniform()``) as ``rng`` to force or suppress the burst;
+    defaults to the module-level ``random``. Draw order: one ``random()`` for
+    the fire decision, then one ``uniform(BURST_FRACTION_MIN,
+    BURST_FRACTION_MAX)`` per peer in ``candidates`` order.
+
+    Returns {peer: signed fractional shock}; empty dict when no burst fires
+    or the ticker has no sector peers.
+    """
+    r = rng if rng is not None else random
+    classify = sector_fn if sector_fn is not None else sector_for
+    sector = classify(ticker)
+    if sector == "other":
+        return {}
+    peers = [t for t in candidates if t != ticker and classify(t) == sector]
+    if not peers:
+        return {}
+    if r.random() >= BURST_PROBABILITY:
+        return {}
+    return {
+        peer: shock_sign
+        * shock_magnitude
+        * r.uniform(BURST_FRACTION_MIN, BURST_FRACTION_MAX)
+        for peer in peers
+    }
 
 
 class GBMSimulator:
@@ -52,9 +164,21 @@ class GBMSimulator:
         tickers: list[str],
         dt: float = DEFAULT_DT,
         event_probability: float = 0.001,
+        rng: random.Random | None = None,
+        universe: MarketUniverse | None = None,
     ) -> None:
         self._dt = dt
         self._event_prob = event_probability
+        # Random source for the event/burst mechanism (NOT the GBM draws,
+        # which stay on numpy). Injectable so tests can force events and
+        # sector bursts deterministically; defaults to the module-level
+        # ``random`` (same behavior as before).
+        self._rng = rng if rng is not None else random
+        # Optional market universe (CN-1): when provided, seed prices, GBM
+        # params, and the correlation structure come from it instead of the
+        # module-level US constants. None reproduces the pre-CN-1 behavior
+        # exactly.
+        self._universe = universe
 
         # Per-ticker state
         self._tickers: list[str] = []
@@ -71,10 +195,16 @@ class GBMSimulator:
 
     # --- Public API ---
 
-    def step(self) -> dict[str, float]:
-        """Advance all tickers by one time step. Returns {ticker: new_price}.
+    def step(self, only: set[str] | None = None) -> dict[str, float]:
+        """Advance tickers by one time step. Returns {ticker: new_price}.
 
         This is the hot path — called every 500ms. Keep it fast.
+
+        Args:
+            only: When given, only tickers in this set advance (and appear in
+                the result); all others keep their current price untouched.
+                Used while the session is closed to tick crypto 24/7 while
+                equity prices stay frozen (M3.1/M3.3). None advances all.
         """
         n = len(self._tickers)
         if n == 0:
@@ -90,7 +220,10 @@ class GBMSimulator:
             z_correlated = z_independent
 
         result: dict[str, float] = {}
+        pending_burst_shocks: list[tuple[str, float]] = []
         for i, ticker in enumerate(self._tickers):
+            if only is not None and ticker not in only:
+                continue  # Frozen (e.g. equity while the session is closed)
             params = self._params[ticker]
             mu = params["mu"]
             sigma = params["sigma"]
@@ -102,9 +235,9 @@ class GBMSimulator:
 
             # Random event: ~0.1% chance per tick per ticker
             # With 10 tickers at 2 ticks/sec, expect an event ~every 50 seconds
-            if random.random() < self._event_prob:
-                shock_magnitude = random.uniform(0.02, 0.05)
-                shock_sign = random.choice([-1, 1])
+            if self._rng.random() < self._event_prob:
+                shock_magnitude = self._rng.uniform(0.02, 0.05)
+                shock_sign = self._rng.choice([-1, 1])
                 self._prices[ticker] *= 1 + shock_magnitude * shock_sign
                 logger.debug(
                     "Random event on %s: %.1f%% %s",
@@ -112,8 +245,35 @@ class GBMSimulator:
                     shock_magnitude * 100,
                     "up" if shock_sign > 0 else "down",
                 )
+                # Sector-correlated burst (M3.2b): the event may cascade to
+                # same-sector peers. Staged and applied after the loop so
+                # every peer lands in THIS tick's result regardless of
+                # ticker iteration order.
+                pending_burst_shocks.extend(
+                    compute_peer_shocks(
+                        ticker,
+                        shock_magnitude,
+                        shock_sign,
+                        self._tickers,
+                        rng=self._rng,
+                        sector_fn=(
+                            self._universe.sector_for
+                            if self._universe is not None
+                            else None
+                        ),
+                    ).items()
+                )
 
             result[ticker] = round(self._prices[ticker], 2)
+
+        for peer, shock in pending_burst_shocks:
+            if only is not None and peer not in only:
+                continue  # Never shock a frozen ticker's price silently
+            if peer not in self._prices:
+                continue
+            self._prices[peer] *= 1 + shock
+            result[peer] = round(self._prices[peer], 2)
+            logger.debug("Sector burst shock on %s: %+.2f%%", peer, shock * 100)
 
         return result
 
@@ -137,6 +297,18 @@ class GBMSimulator:
         """Current price for a ticker, or None if not tracked."""
         return self._prices.get(ticker)
 
+    def set_price(self, ticker: str, price: float) -> None:
+        """Overwrite a tracked ticker's internal price (CN-2 §4).
+
+        Used when the PriceCache clamps a tick to the daily price-limit band:
+        writing the clamped value back into the GBM state stops the internal
+        random walk from drifting far past a locked board, so the next tick
+        that walks back inside the band naturally reopens it (自然开板). No-op
+        for untracked tickers.
+        """
+        if ticker in self._prices:
+            self._prices[ticker] = price
+
     def get_tickers(self) -> list[str]:
         """Return the list of currently tracked tickers."""
         return list(self._tickers)
@@ -148,8 +320,14 @@ class GBMSimulator:
         if ticker in self._prices:
             return
         self._tickers.append(ticker)
-        self._prices[ticker] = SEED_PRICES.get(ticker, random.uniform(50.0, 300.0))
-        self._params[ticker] = TICKER_PARAMS.get(ticker, dict(DEFAULT_PARAMS))
+        if self._universe is not None:
+            seeds = self._universe.seed_prices
+            params = self._universe.ticker_params
+            defaults = self._universe.default_params
+        else:
+            seeds, params, defaults = SEED_PRICES, TICKER_PARAMS, DEFAULT_PARAMS
+        self._prices[ticker] = seeds.get(ticker, random.uniform(50.0, 300.0))
+        self._params[ticker] = params.get(ticker, dict(defaults))
 
     def _rebuild_cholesky(self) -> None:
         """Rebuild the Cholesky decomposition of the ticker correlation matrix.
@@ -165,11 +343,18 @@ class GBMSimulator:
         corr = np.eye(n)
         for i in range(n):
             for j in range(i + 1, n):
-                rho = self._pairwise_correlation(self._tickers[i], self._tickers[j])
+                rho = self._correlation(self._tickers[i], self._tickers[j])
                 corr[i, j] = rho
                 corr[j, i] = rho
 
         self._cholesky = np.linalg.cholesky(corr)
+
+    def _correlation(self, t1: str, t2: str) -> float:
+        """Pairwise correlation: from the injected universe when present (CN-1),
+        otherwise the module-level US map (``_pairwise_correlation``)."""
+        if self._universe is not None:
+            return self._universe.pairwise_correlation(t1, t2)
+        return self._pairwise_correlation(t1, t2)
 
     @staticmethod
     def _pairwise_correlation(t1: str, t2: str) -> float:
@@ -184,6 +369,7 @@ class GBMSimulator:
         """
         tech = CORRELATION_GROUPS["tech"]
         finance = CORRELATION_GROUPS["finance"]
+        crypto = CORRELATION_GROUPS["crypto"]
 
         # TSLA is in tech set but behaves independently
         if t1 == "TSLA" or t2 == "TSLA":
@@ -193,6 +379,8 @@ class GBMSimulator:
             return INTRA_TECH_CORR
         if t1 in finance and t2 in finance:
             return INTRA_FINANCE_CORR
+        if t1 in crypto and t2 in crypto:
+            return INTRA_CRYPTO_CORR
 
         return CROSS_GROUP_CORR
 
@@ -202,6 +390,14 @@ class SimulatorDataSource(MarketDataSource):
 
     Runs a background asyncio task that calls GBMSimulator.step() every
     `update_interval` seconds and writes results to the PriceCache.
+
+    Session awareness (M3.1/M3.3): when a ``session_clock`` is provided and
+    the market is CLOSED, only crypto tickers advance and write to the cache
+    — equity prices freeze at their last value (no cache updates at all, so
+    per-ticker records, bars, and the version counter stay put for them).
+    Without a clock (or with a 24/7 clock) everything ticks continuously.
+    ``add_ticker`` still seeds a first price even while closed so a
+    just-watched ticker is immediately quotable in the UI.
     """
 
     def __init__(
@@ -209,10 +405,17 @@ class SimulatorDataSource(MarketDataSource):
         price_cache: PriceCache,
         update_interval: float = 0.5,
         event_probability: float = 0.001,
+        session_clock: SessionClock | None = None,
+        universe: MarketUniverse | None = None,
     ) -> None:
         self._cache = price_cache
         self._interval = update_interval
         self._event_prob = event_probability
+        self._session_clock = session_clock
+        # Optional market universe (CN-1): forwarded to the GBM simulator
+        # (seeds/params/correlations) and used for the closed-session
+        # asset-class check. None keeps the module-constant US behavior.
+        self._universe = universe
         self._sim: GBMSimulator | None = None
         self._task: asyncio.Task | None = None
 
@@ -220,12 +423,15 @@ class SimulatorDataSource(MarketDataSource):
         self._sim = GBMSimulator(
             tickers=tickers,
             event_probability=self._event_prob,
+            universe=self._universe,
         )
-        # Seed the cache with initial prices so SSE has data immediately
+        # Seed the cache with initial prices so SSE has data immediately.
+        # This first write also fixes each ticker's session prev_close in the
+        # cache to the price the GBM walk starts from (constant thereafter).
         for ticker in tickers:
             price = self._sim.get_price(ticker)
             if price is not None:
-                self._cache.update(ticker=ticker, price=price)
+                self._write_tick(ticker, price)
         self._task = asyncio.create_task(self._run_loop(), name="simulator-loop")
         logger.info("Simulator started with %d tickers", len(tickers))
 
@@ -242,10 +448,12 @@ class SimulatorDataSource(MarketDataSource):
     async def add_ticker(self, ticker: str) -> None:
         if self._sim:
             self._sim.add_ticker(ticker)
-            # Seed cache immediately so the ticker has a price right away
+            # Seed cache immediately so the ticker has a price right away.
+            # This first write fixes the ticker's session prev_close to its
+            # GBM starting price (constant thereafter).
             price = self._sim.get_price(ticker)
             if price is not None:
-                self._cache.update(ticker=ticker, price=price)
+                self._write_tick(ticker, price)
             logger.info("Simulator: added ticker %s", ticker)
 
     async def remove_ticker(self, ticker: str) -> None:
@@ -257,14 +465,51 @@ class SimulatorDataSource(MarketDataSource):
     def get_tickers(self) -> list[str]:
         return self._sim.get_tickers() if self._sim else []
 
+    def _write_tick(self, ticker: str, price: float) -> None:
+        """Write one simulated tick (price + volume + bid/ask quote) to the cache.
+
+        If the cache clamps the price to a daily limit band (CN-2 §4), the
+        clamped value is written back into the simulator's internal state so
+        the GBM walk resumes from the board, not from a runaway theoretical
+        price — keeping封板 realistic and self-reopening. us never clamps, so
+        the writeback branch is dead there.
+        """
+        bid, ask = compute_quote(ticker, price)
+        update = self._cache.update(
+            ticker=ticker,
+            price=price,
+            volume=draw_volume(),
+            bid=bid,
+            ask=ask,
+        )
+        if self._sim is not None and update.price != round(price, 2):
+            self._sim.set_price(ticker, update.price)
+
+    def _active_tickers(self) -> set[str] | None:
+        """Tickers allowed to tick right now.
+
+        None means "all" (market open, or no session clock). While the
+        session is closed only crypto tickers advance — equities freeze.
+        """
+        if self._session_clock is None or self._session_clock.is_open:
+            return None
+        classify = (
+            self._universe.asset_class_for if self._universe is not None else asset_class_for
+        )
+        return {
+            ticker
+            for ticker in (self._sim.get_tickers() if self._sim else [])
+            if classify(ticker) == "crypto"
+        }
+
     async def _run_loop(self) -> None:
         """Core loop: step the simulation, write to cache, sleep."""
         while True:
             try:
                 if self._sim:
-                    prices = self._sim.step()
+                    prices = self._sim.step(only=self._active_tickers())
                     for ticker, price in prices.items():
-                        self._cache.update(ticker=ticker, price=price)
+                        self._write_tick(ticker, price)
             except Exception:
                 logger.exception("Simulator step failed")
             await asyncio.sleep(self._interval)

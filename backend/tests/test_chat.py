@@ -9,6 +9,9 @@ prefix="/api/chat" + @router.post("/") so the full path is /api/chat/).
 
 from __future__ import annotations
 
+import json
+from types import SimpleNamespace
+
 import pytest
 
 
@@ -148,12 +151,16 @@ class TestChat:
         # After one chat POST we have at least 2 rows (user + assistant)
         assert len(data["messages"]) >= 2
 
-        # Each message has the expected keys
+        # Each message has the expected keys (kind added in M2 Wave 2)
         for msg in data["messages"]:
             assert "role" in msg
             assert "content" in msg
             assert "actions" in msg
+            assert "kind" in msg
             assert "created_at" in msg
+
+        # Ordinary conversation turns carry kind='chat'
+        assert all(msg["kind"] == "chat" for msg in data["messages"])
 
         # Messages are ordered ascending by created_at (earliest first)
         timestamps = [msg["created_at"] for msg in data["messages"]]
@@ -174,3 +181,120 @@ class TestChat:
             assert isinstance(asst_msg["actions"], dict), (
                 f"actions must be a parsed dict, not {type(asst_msg['actions'])}"
             )
+
+
+def _raw_completion_factory(content: str):
+    """Build a litellm.completion stand-in returning raw (possibly invalid) content."""
+
+    def fake_completion(*args, **kwargs):
+        message = SimpleNamespace(content=content)
+        return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+    return fake_completion
+
+
+@pytest.mark.asyncio
+class TestChatMalformedLLMResponse:
+    """Malformed LLM output must hit the graceful 500 path with zero side effects.
+
+    Spec §12: "graceful handling of malformed responses". The except handler in
+    chat.py catches parse/validation failures and returns HTTP 500 with
+    {"error": "LLM unavailable"} — nothing may be persisted or executed.
+    """
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            pytest.param(
+                "Sure! I'd buy 5 shares of AAPL. (not JSON at all)",
+                id="non-json-garbage",
+            ),
+            pytest.param(
+                json.dumps({"trades": [], "watchlist_changes": []}),
+                id="valid-json-missing-required-message",
+            ),
+        ],
+    )
+    async def test_malformed_llm_response_returns_500_and_writes_nothing(
+        self, chat_client, monkeypatch, content
+    ):
+        import litellm
+
+        monkeypatch.setenv("LLM_MOCK", "false")
+        monkeypatch.setattr(litellm, "completion", _raw_completion_factory(content))
+
+        resp = await chat_client.post("/api/chat/", json={"message": "hello"})
+        assert resp.status_code == 500
+        assert resp.json() == {"error": "LLM unavailable"}
+
+        # No partial chat_messages rows were written
+        history = await chat_client.get("/api/chat/")
+        assert history.json()["messages"] == []
+
+        # No trades executed, cash untouched, no positions created
+        portfolio = (await chat_client.get("/api/portfolio/")).json()
+        assert portfolio["cash"] == 10000.0
+        assert portfolio["positions"] == []
+
+
+def _capturing_completion_factory(captured: dict):
+    """Build a litellm.completion stand-in that records kwargs and returns valid JSON."""
+
+    def fake_completion(*args, **kwargs):
+        captured.update(kwargs)
+        content = json.dumps({"message": "ok", "trades": [], "watchlist_changes": []})
+        message = SimpleNamespace(content=content)
+        return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+    return fake_completion
+
+
+@pytest.mark.asyncio
+class TestChatMarketEventContext:
+    """The LLM prompt gains a 'Recent market events' section only when events exist.
+
+    Extends the litellm.completion monkeypatch pattern to capture the
+    ``messages`` argument and inspect the system prompt's portfolio context.
+    """
+
+    async def test_events_appear_in_llm_context(
+        self, chat_client, fake_market_source, monkeypatch
+    ):
+        import litellm
+
+        # Fire a market event through the cache funnel: AAPL +3% in one tick.
+        cache = fake_market_source.price_cache
+        price = cache.get_price("AAPL")
+        cache.update("AAPL", price * 1.03)
+        newest = cache.get_events(limit=1)[0]
+        assert "surges" in newest.headline  # sanity: event actually recorded
+
+        captured: dict = {}
+        monkeypatch.setenv("LLM_MOCK", "false")
+        monkeypatch.setattr(litellm, "completion", _capturing_completion_factory(captured))
+
+        resp = await chat_client.post("/api/chat/", json={"message": "anything happening?"})
+        assert resp.status_code == 200
+
+        system_content = captured["messages"][0]["content"]
+        assert captured["messages"][0]["role"] == "system"
+        assert "Recent market events:" in system_content
+        assert newest.headline in system_content
+        assert " UTC" in system_content  # HH:MM:SS UTC timestamp prefix
+
+    async def test_no_events_no_section(self, chat_client, monkeypatch):
+        """Seed prices are first ticks (flat) — no events, so no section."""
+        import litellm
+
+        captured: dict = {}
+        monkeypatch.setenv("LLM_MOCK", "false")
+        monkeypatch.setattr(litellm, "completion", _capturing_completion_factory(captured))
+
+        resp = await chat_client.post("/api/chat/", json={"message": "hello"})
+        assert resp.status_code == 200
+
+        system_content = captured["messages"][0]["content"]
+        assert "Recent market events" not in system_content
+        # The rest of the portfolio context is still present
+        assert "Cash: $" in system_content
+        assert "Watchlist:" in system_content

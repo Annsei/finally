@@ -1,4 +1,5 @@
-import { usePriceStore, useTicker } from '@/stores/priceStore';
+import { renderHook, act } from '@testing-library/react';
+import { mergePriceMaps, usePriceStore, useTicker } from '@/stores/priceStore';
 import type { PriceUpdate } from '@/types/market';
 
 // PriceUpdate fixture with all snake_case fields
@@ -10,6 +11,13 @@ const aaplUpdate: PriceUpdate = {
   change: 1.5,
   change_percent: 0.79,
   direction: 'up',
+};
+
+const msftUpdate: PriceUpdate = {
+  ...aaplUpdate,
+  ticker: 'MSFT',
+  price: 420,
+  previous_price: 419,
 };
 
 beforeEach(() => {
@@ -36,15 +44,66 @@ describe('usePriceStore', () => {
     expect(usePriceStore.getState().connectionStatus).toBe('connected');
   });
 
-  test('Test 4: useTicker returns AAPL PriceUpdate after setPrices, undefined for unknown ticker', () => {
-    // Set prices in store
-    usePriceStore.setState({ prices: { AAPL: aaplUpdate } });
+  test('Test 4: useTicker hook returns the ticker PriceUpdate, undefined for unknown, and tracks updates', () => {
+    const { result: aapl } = renderHook(() => useTicker('AAPL'));
+    const { result: unknown } = renderHook(() => useTicker('UNKNOWN'));
 
-    // useTicker reads from the store state directly
-    const aaplData = usePriceStore.getState().prices['AAPL'];
-    const unknownData = usePriceStore.getState().prices['UNKNOWN'];
+    // Nothing in the store yet
+    expect(aapl.current).toBeUndefined();
+    expect(unknown.current).toBeUndefined();
 
-    expect(aaplData).toEqual(aaplUpdate);
-    expect(unknownData).toBeUndefined();
+    act(() => {
+      usePriceStore.setState({ prices: { AAPL: aaplUpdate } });
+    });
+
+    expect(aapl.current).toEqual(aaplUpdate);
+    expect(unknown.current).toBeUndefined();
+  });
+
+  test('Test 5: mergePriceMaps reuses unchanged ticker objects and the whole map for identical frames', () => {
+    const previous = { AAPL: aaplUpdate, MSFT: msftUpdate };
+    const identicalFreshFrame = {
+      AAPL: { ...aaplUpdate },
+      MSFT: { ...msftUpdate },
+    };
+    expect(mergePriceMaps(previous, identicalFreshFrame)).toBe(previous);
+
+    const merged = mergePriceMaps(previous, {
+      AAPL: { ...aaplUpdate, price: 193, timestamp: aaplUpdate.timestamp + 1 },
+      MSFT: { ...msftUpdate },
+    });
+    expect(merged).not.toBe(previous);
+    expect(merged.AAPL).not.toBe(previous.AAPL);
+    expect(merged.MSFT).toBe(previous.MSFT);
+  });
+
+  test('Test 6: an unchanged ticker selector does not rerender when another ticker changes', () => {
+    usePriceStore.getState().setPrices({ AAPL: aaplUpdate, MSFT: msftUpdate });
+    let renders = 0;
+    const { result } = renderHook(() => {
+      renders += 1;
+      return useTicker('MSFT');
+    });
+    const initialRenderCount = renders;
+    const initialMsft = result.current;
+
+    act(() => {
+      usePriceStore.getState().setPrices({
+        AAPL: { ...aaplUpdate, price: 193, timestamp: aaplUpdate.timestamp + 1 },
+        MSFT: { ...msftUpdate },
+      });
+    });
+
+    expect(result.current).toBe(initialMsft);
+    expect(renders).toBe(initialRenderCount);
+  });
+
+  test('Test 7: complete-snapshot reconciliation removes missing tickers', () => {
+    const merged = mergePriceMaps(
+      { AAPL: aaplUpdate, MSFT: msftUpdate },
+      { AAPL: { ...aaplUpdate } }
+    );
+    expect(merged.AAPL).toBe(aaplUpdate);
+    expect(merged.MSFT).toBeUndefined();
   });
 });

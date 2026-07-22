@@ -1,0 +1,57 @@
+# E2E test harness (PLAN.md §12): app container + Playwright container.
+# Keeps browser dependencies out of the production image.
+#
+# Run from the test/ directory:
+#   docker compose -f docker-compose.test.yml up --build --abort-on-container-exit --exit-code-from playwright
+#
+# The app runs with LLM_MOCK=true for fast, free, deterministic chat tests and
+# WITHOUT a data volume, so every run starts from a fresh seeded database.
+services:
+  app:
+    build:
+      context: ..
+    networks:
+      default:
+        aliases:
+          - finally-us-app
+    environment:
+      LLM_MOCK: "true"
+      OPENROUTER_API_KEY: test-not-used
+    # Tighter probe than the Dockerfile's 30s-interval HEALTHCHECK so the
+    # playwright container starts as soon as the API is actually up.
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/ready', timeout=2).read()",
+        ]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
+  playwright:
+    # Image tag MUST match the @playwright/test version pinned in package.json
+    # (convention: mcr.microsoft.com/playwright:v<version>-<ubuntu codename>).
+    image: mcr.microsoft.com/playwright:v1.61.1-noble
+    depends_on:
+      app:
+        condition: service_healthy
+    working_dir: /tests
+    volumes:
+      - ./:/tests
+      # Keep Linux container dependencies out of the host checkout. Reports and
+      # traces still land in the bind-mounted test directory for CI artifacts.
+      - playwright-node-modules:/tests/node_modules
+    environment:
+      BASE_URL: http://finally-us-app:8000
+      CI: "true"
+      E2E_SPECS: "${E2E_SPECS:-}"
+    # Recommended for Chromium stability in containers.
+    ipc: host
+    command: sh -c "npm ci && npx playwright test $${E2E_SPECS}"
+
+volumes:
+  playwright-node-modules:

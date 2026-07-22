@@ -1,0 +1,580 @@
+"""Event-driven AI briefs (M2.3) and news-narrative enrichment (M3.2a).
+
+A background watcher polls the price cache's market-event feed (~2s cadence)
+and runs TWO passes per cycle:
+
+1. Narrative enrichment (M3.2a): for each NEW event — ALL tickers, not only
+   held/watched — ask the LLM for a one-line news-style headline (a plausible
+   but clearly simulated cause) and attach it to the event in the cache via
+   ``PriceCache.set_event_narrative``. Throttle: at most one enrichment per
+   ``NARRATIVE_COOLDOWN_SECONDS`` globally; skipped events keep their
+   template headline forever (they are consumed, never retried).
+
+2. AI briefs (M2.3, per-user since M4): for each NEW event whose ticker ANY
+   user holds or watches, ask the LLM for ONE one-sentence, actionable take
+   and push it into each eligible user's chat panel as an unsolicited
+   assistant message with kind='brief' (actions NULL — the frontend labels
+   briefs by their kind, so the stored content carries no prefix). Eligible
+   users are capped at MAX_BRIEF_USERS_PER_EVENT per event to bound cost.
+
+Brief throttling (module constants):
+- Global: at most one brief per BRIEF_GLOBAL_COOLDOWN_SECONDS across all
+  tickers.
+- Per ticker: at most one brief per BRIEF_TICKER_COOLDOWN_SECONDS.
+Events skipped by either throttle (or because the ticker is irrelevant, or
+the LLM call failed) are CONSUMED — they are never queued for a later pass.
+The two passes keep independent seen-sets and throttles: an event throttled
+for narration can still produce a brief, and vice versa.
+
+Provides:
+- ``process_events_for_briefs_once(price_cache, db_path, state, now=None)`` —
+  one briefs scan pass (async, unit-testable; ``now`` injects a wall-clock
+  for deterministic throttle tests). Returns counts.
+- ``process_events_for_narratives_once(price_cache, state, now=None)`` —
+  one narrative-enrichment pass (same testability contract). Returns counts.
+- ``briefs_watch_loop(price_cache, db_path, interval)`` — asyncio background
+  task wired in main.py's lifespan, running both passes every ~2 seconds with
+  clean cancellation and per-pass error isolation.
+
+When ``LLM_MOCK=true`` briefs and narratives are deterministic text — no
+network call.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import sqlite3
+import time
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+
+from app.db.connection import get_conn
+from app.market.cache import PriceCache
+from app.market.models import MarketEvent
+from app.market.profiles import MarketProfile
+from app.market.seed_prices import asset_class_for
+from app.market.sentiment import compute_market_sentiment, sentiment_context_line
+
+logger = logging.getLogger(__name__)
+
+MODEL = "openrouter/openai/gpt-oss-120b"
+EXTRA_BODY = {"provider": {"order": ["cerebras"]}}
+
+# At most one brief per three minutes across all tickers — at 60s the chat
+# panel degraded into a brief feed that drowned the actual conversation.
+BRIEF_GLOBAL_COOLDOWN_SECONDS = 180.0
+# …and at most one brief per ticker every five minutes.
+BRIEF_TICKER_COOLDOWN_SECONDS = 300.0
+# Hard cap enforced on brief text (the prompt asks for one short sentence;
+# the model may not comply) — keeps the chat panel scannable.
+BRIEF_MAX_CHARS = 140
+# M4 cost cap: ONE brief text is generated per event (one LLM call) and its
+# row is written for each user who holds or watches the ticker, capped at
+# this many users per event so a popular ticker cannot multiply LLM/chat
+# volume unboundedly. Eligible users beyond the cap get no brief for that
+# event (deterministic: users are ordered by user_id).
+MAX_BRIEF_USERS_PER_EVENT = 3
+# Cadence of the background watcher.
+BRIEFS_WATCH_INTERVAL_SECONDS = 2.0
+# At most one LLM narrative enrichment per 10s globally (M3.2a). Events
+# skipped by this throttle stay template-only forever.
+NARRATIVE_COOLDOWN_SECONDS = 10.0
+# Hard cap requested from the LLM for narrative headlines.
+NARRATIVE_MAX_CHARS = 90
+
+BRIEF_SYSTEM_PROMPT = (
+    "You are FinAlly, an AI trading assistant. A sudden market move just "
+    "happened on a ticker the user holds or watches. Reply with exactly ONE "
+    f"short, punchy sentence of at most {BRIEF_MAX_CHARS} characters — plain "
+    "text, no JSON, no markdown. Only suggest actions this long-only "
+    "platform supports: buying shares, selling shares the user holds, "
+    "limit/stop orders, standing rules, or watchlist changes. NEVER suggest "
+    "short selling, options, or margin."
+)
+
+NARRATIVE_SYSTEM_PROMPT = (
+    "You are a financial news wire inside a market SIMULATOR. Given a "
+    "templated market-event headline, write exactly ONE punchy news-style "
+    f"headline of at most {NARRATIVE_MAX_CHARS} characters explaining the "
+    "move with a plausible but clearly invented, simulated cause (this is "
+    "fake money — never reference real current events). Plain text only: no "
+    "surrounding quotes, no JSON, no markdown, no emoji."
+)
+
+# Chinese (zh-CN) variants selected when the active profile's locale is
+# 'zh-CN' (CN-3). The brief version injects A-share context (整手 100-share
+# lots, T+1, 印花税) so suggestions stay legal on this market; both keep the
+# same length caps and plain-text rules as their English counterparts. With
+# no profile or an 'en-US' locale the English prompts above are used
+# byte-for-byte and the English mock text is unchanged.
+BRIEF_SYSTEM_PROMPT_ZH = (
+    "你是 FinAlly，一个 AI 交易助手。用户持有或关注的某只股票刚刚出现异动。"
+    f"用恰好一句、不超过 {BRIEF_MAX_CHARS} 个字符的简短有力的话回复——纯文本，"
+    "不要 JSON、不要 markdown。这是 A 股市场：买入须整手（100 股整数倍），"
+    "T+1 交收，卖出计印花税。只建议本平台（仅做多）支持的操作：买入股票、"
+    "卖出已持有股票、限价/止损单、常驻规则、自选调整。绝不建议卖空、期权"
+    "或融资融券。"
+)
+
+NARRATIVE_SYSTEM_PROMPT_ZH = (
+    "你是市场模拟器内的一条财经新闻快讯。给定一条模板化的市场事件标题，写出"
+    f"恰好一条不超过 {NARRATIVE_MAX_CHARS} 个字符的有力的新闻式标题，用一个"
+    "貌似合理但明显虚构、模拟的原因解释此次波动（这是虚拟资金——绝不引用真实"
+    "的时事）。仅纯文本：不要引号、不要 JSON、不要 markdown、不要表情符号。"
+)
+
+
+def _locale_is_zh(profile: MarketProfile | None) -> bool:
+    """True when the active market profile localizes AI text to Chinese (CN-3).
+
+    None (no profile) or an 'en-US' locale keeps the English prompts and
+    English deterministic mock text byte-for-byte.
+    """
+    return profile is not None and profile.locale == "zh-CN"
+
+
+@dataclass
+class BriefWatcherState:
+    """Mutable watcher state carried across passes (one instance per loop).
+
+    ``seen_event_ids`` marks events already consumed (briefed OR skipped);
+    it is pruned each pass to ids still present in the cache's event ring
+    buffer, so it stays bounded. The two timestamp fields drive the global
+    and per-ticker throttles.
+    """
+
+    seen_event_ids: set[str] = field(default_factory=set)
+    last_brief_ts: float | None = None
+    last_ticker_brief_ts: dict[str, float] = field(default_factory=dict)
+
+
+@dataclass
+class NarrativeEnricherState:
+    """Mutable narrative-enricher state carried across passes (M3.2a).
+
+    Independent of ``BriefWatcherState`` — the enricher covers ALL tickers
+    and has its own (10s global) throttle. ``seen_event_ids`` marks events
+    already consumed (enriched OR skipped); pruned each pass to ids still in
+    the cache's event ring buffer so it stays bounded.
+    """
+
+    seen_event_ids: set[str] = field(default_factory=set)
+    last_narrative_ts: float | None = None
+
+
+async def _generate_brief_text(
+    price_cache: PriceCache,
+    position_row: sqlite3.Row | None,
+    event: MarketEvent,
+    profile: MarketProfile | None = None,
+) -> str | None:
+    """One-sentence AI brief for a market event, or None on any LLM failure.
+
+    Mock path (LLM_MOCK=true): deterministic text, no network call.
+    Real path: compact prompt — the event headline, the user's position in
+    the ticker (qty / avg cost / unrealized P&L) or "watching, no position",
+    and the day change — via LiteLLM -> OpenRouter (Cerebras), plain text.
+    Errors are logged and reported as None; the caller skips the event.
+
+    On a 'zh-CN' profile locale (CN-3) the system prompt and the deterministic
+    mock text are Chinese; None/US keeps both byte-identical to today.
+    """
+    is_zh = _locale_is_zh(profile)
+    if os.getenv("LLM_MOCK", "false").lower() == "true":
+        if is_zh:
+            return (
+                f"[模拟简报] {event.ticker} 异动 {event.change_percent:+.1f}%"
+                " —— 请检视你的持仓。"
+            )
+        return (
+            f"[MOCK BRIEF] {event.ticker} moved {event.change_percent:+.1f}%"
+            " — review your exposure."
+        )
+
+    quote = price_cache.get(event.ticker)
+    if position_row is not None:
+        quantity: float = position_row["quantity"]
+        avg_cost: float = position_row["avg_cost"]
+        # No quote (ticker evicted between event and pass) — value at cost so
+        # the prompt stays coherent (unrealized reads $0.00).
+        current_price = quote.price if quote else avg_cost
+        unrealized = (current_price - avg_cost) * quantity
+        position_line = (
+            f"User position: {quantity:g} shares at avg cost ${avg_cost:.2f}, "
+            f"unrealized P&L ${unrealized:+.2f}"
+        )
+    else:
+        position_line = "User position: watching, no position"
+    day_line = (
+        f"Day change: {quote.day_change_percent:+.2f}%" if quote else "Day change: n/a"
+    )
+
+    # P4 §1: append the market sentiment line to the event context — only
+    # when the cache holds >= 2 tickers (the helper returns None below the
+    # gate). The mock branch above returned already, so LLM_MOCK output is
+    # byte-identical to pre-P4.
+    event_context = f"Market event: {event.headline}\n{position_line}\n{day_line}"
+    sentiment_line = sentiment_context_line(
+        compute_market_sentiment(price_cache), zh=is_zh
+    )
+    if sentiment_line is not None:
+        event_context += f"\n{sentiment_line}"
+
+    messages = [
+        {
+            "role": "system",
+            "content": BRIEF_SYSTEM_PROMPT_ZH if is_zh else BRIEF_SYSTEM_PROMPT,
+        },
+        {
+            "role": "user",
+            "content": event_context,
+        },
+    ]
+    try:
+        from litellm import completion  # lazy import — never reached when mocked
+
+        response = await asyncio.to_thread(
+            completion,
+            model=MODEL,
+            messages=messages,
+            reasoning_effort="low",
+            extra_body=EXTRA_BODY,
+        )
+        text = (response.choices[0].message.content or "").strip()
+    except Exception:
+        logger.exception(
+            "Brief LLM call failed for %s — skipping event %s", event.ticker, event.id
+        )
+        return None
+    if not text:
+        logger.warning(
+            "Brief LLM returned empty content for %s — skipping event %s",
+            event.ticker,
+            event.id,
+        )
+        return None
+    # Belt and braces: the prompt asks for one short sentence, but the model
+    # may ramble — enforce the cap so the chat panel stays scannable.
+    text = text.strip("\"'").strip()
+    if len(text) > BRIEF_MAX_CHARS:
+        text = text[: BRIEF_MAX_CHARS - 1].rstrip() + "…"
+    return text or None
+
+
+async def _generate_narrative_text(
+    price_cache: PriceCache,
+    event: MarketEvent,
+    profile: MarketProfile | None = None,
+) -> str | None:
+    """One-line news-style narrative for a market event, or None on failure.
+
+    Mock path (LLM_MOCK=true): deterministic ``[MOCK NEWS] {headline}`` — no
+    network call. Real path: compact prompt — the template headline, ticker,
+    day change, and asset class — via LiteLLM -> OpenRouter (Cerebras), plain
+    text, asking for a single punchy simulated-cause headline (<= 90 chars).
+    Errors are logged and reported as None; the caller skips the event.
+
+    On a 'zh-CN' profile locale (CN-3) the system prompt and the deterministic
+    mock prefix are Chinese; None/US keeps both byte-identical to today.
+    """
+    is_zh = _locale_is_zh(profile)
+    if os.getenv("LLM_MOCK", "false").lower() == "true":
+        return f"[模拟新闻] {event.headline}" if is_zh else f"[MOCK NEWS] {event.headline}"
+
+    quote = price_cache.get(event.ticker)
+    day_line = (
+        f"Day change: {quote.day_change_percent:+.2f}%" if quote else "Day change: n/a"
+    )
+    asset_class = quote.asset_class if quote else asset_class_for(event.ticker)
+
+    messages = [
+        {
+            "role": "system",
+            "content": NARRATIVE_SYSTEM_PROMPT_ZH if is_zh else NARRATIVE_SYSTEM_PROMPT,
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Template headline: {event.headline}\n"
+                f"Ticker: {event.ticker}\n"
+                f"{day_line}\n"
+                f"Asset class: {asset_class}"
+            ),
+        },
+    ]
+    try:
+        from litellm import completion  # lazy import — never reached when mocked
+
+        response = await asyncio.to_thread(
+            completion,
+            model=MODEL,
+            messages=messages,
+            reasoning_effort="low",
+            extra_body=EXTRA_BODY,
+        )
+        text = (response.choices[0].message.content or "").strip()
+    except Exception:
+        logger.exception(
+            "Narrative LLM call failed for %s — skipping event %s",
+            event.ticker,
+            event.id,
+        )
+        return None
+    if not text:
+        logger.warning(
+            "Narrative LLM returned empty content for %s — skipping event %s",
+            event.ticker,
+            event.id,
+        )
+        return None
+    # Belt and braces: the prompt asks for <= 90 chars and no quotes, but the
+    # model may not comply — enforce both so the feed stays tidy.
+    text = text.strip("\"'").strip()
+    if len(text) > NARRATIVE_MAX_CHARS:
+        text = text[: NARRATIVE_MAX_CHARS - 1].rstrip() + "…"
+    return text or None
+
+
+async def process_events_for_narratives_once(
+    price_cache: PriceCache,
+    state: NarrativeEnricherState,
+    profile: MarketProfile | None = None,
+    now: float | None = None,
+) -> dict[str, int]:
+    """One enrichment pass: narrate every new, unthrottled market event.
+
+    New events (ids not yet in ``state.seen_event_ids``) are processed oldest
+    first — ALL tickers, not only held/watched. Every new event is consumed
+    this pass regardless of outcome; skipped events keep their template
+    headline forever:
+
+    - Global 10s cooldown active            -> "skipped_throttled"
+    - LLM call failed / empty content       -> "skipped_llm_error"
+    - Event evicted from the ring buffer
+      before the narrative landed           -> "skipped_evicted"
+    - Otherwise the narrative is attached via
+      ``PriceCache.set_event_narrative``    -> "enriched"
+
+    The throttle timestamp advances only on a successful enrichment, so a
+    failed LLM call does not burn the cooldown budget.
+
+    Args:
+        price_cache: Shared cache (source of events; narrative store).
+        state: Enricher state carried across passes (seen ids + throttle).
+        now: Wall-clock override for deterministic throttle tests; defaults
+            to ``time.time()`` per event.
+
+    Returns:
+        Counts: {"enriched", "skipped_throttled", "skipped_llm_error",
+        "skipped_evicted"}.
+    """
+    counts = {
+        "enriched": 0,
+        "skipped_throttled": 0,
+        "skipped_llm_error": 0,
+        "skipped_evicted": 0,
+    }
+    events = price_cache.get_events()  # newest first
+    # Ids that fell off the ring buffer can never come back — prune the
+    # seen-set so it stays bounded by the buffer size.
+    state.seen_event_ids &= {e.id for e in events}
+    new_events = [e for e in reversed(events) if e.id not in state.seen_event_ids]
+
+    for event in new_events:
+        # Consumed no matter the outcome below — throttled/failed events are
+        # never queued for a later pass (they stay template-only).
+        state.seen_event_ids.add(event.id)
+
+        ts = now if now is not None else time.time()
+        if (
+            state.last_narrative_ts is not None
+            and ts - state.last_narrative_ts < NARRATIVE_COOLDOWN_SECONDS
+        ):
+            counts["skipped_throttled"] += 1
+            continue
+
+        text = await _generate_narrative_text(price_cache, event, profile)
+        if text is None:
+            counts["skipped_llm_error"] += 1
+            continue
+
+        if not price_cache.set_event_narrative(event.id, text):
+            # Evicted between the scan and the LLM round-trip — nothing to
+            # attach the narrative to.
+            counts["skipped_evicted"] += 1
+            continue
+
+        state.last_narrative_ts = ts
+        counts["enriched"] += 1
+        logger.info("Narrative attached for %s: %s", event.ticker, text)
+
+    return counts
+
+
+async def process_events_for_briefs_once(
+    price_cache: PriceCache,
+    db_path: str,
+    state: BriefWatcherState,
+    profile: MarketProfile | None = None,
+    now: float | None = None,
+) -> dict[str, int]:
+    """One watcher pass: brief every new, relevant, unthrottled market event.
+
+    New events (ids not yet in ``state.seen_event_ids``) are processed oldest
+    first. Every new event is consumed this pass regardless of outcome:
+
+    - No user holds or watches the ticker  -> "skipped_irrelevant"
+    - Global or per-ticker cooldown active -> "skipped_throttled"
+    - LLM call failed / empty content      -> "skipped_llm_error" (no row)
+    - Otherwise ONE brief text is generated (single LLM call) and an
+      assistant chat_messages row (kind='brief', actions NULL) is inserted
+      for each eligible user — every user who holds or watches the ticker,
+      capped at ``MAX_BRIEF_USERS_PER_EVENT`` (M4 cost bound) — and
+      committed                            -> "briefed" (counted per event)
+
+    Throttle timestamps advance only on a successful brief, so a failed LLM
+    call does not burn the cooldown budget. Throttles stay GLOBAL across all
+    users (they exist to cap LLM cost, not per-user chat volume).
+
+    Args:
+        price_cache: Shared cache (source of events, quotes, positions P&L).
+        db_path: Path to the SQLite database file.
+        state: Watcher state carried across passes (seen ids + throttles).
+        now: Wall-clock override for deterministic throttle tests; defaults
+            to ``time.time()`` per event.
+
+    Returns:
+        Counts: {"briefed", "skipped_irrelevant", "skipped_throttled",
+        "skipped_llm_error"}.
+    """
+    counts = {
+        "briefed": 0,
+        "skipped_irrelevant": 0,
+        "skipped_throttled": 0,
+        "skipped_llm_error": 0,
+    }
+    events = price_cache.get_events()  # newest first
+    # Events that fell off the ring buffer can never be returned again —
+    # prune their ids so the seen-set stays bounded by the buffer size.
+    state.seen_event_ids &= {e.id for e in events}
+    new_events = [e for e in reversed(events) if e.id not in state.seen_event_ids]
+    if not new_events:
+        return counts
+
+    conn = get_conn(db_path)
+    try:
+        for event in new_events:
+            # Consumed no matter the outcome below — throttled/irrelevant/
+            # failed events are never queued for a later pass.
+            state.seen_event_ids.add(event.id)
+            ticker = event.ticker
+
+            # Eligible users: everyone who watches OR holds the ticker,
+            # ordered by user_id for determinism, capped per event (M4).
+            eligible = [
+                row["user_id"]
+                for row in conn.execute(
+                    "SELECT user_id FROM ("
+                    " SELECT user_id FROM watchlist WHERE ticker = ?"
+                    " UNION"
+                    " SELECT user_id FROM positions WHERE ticker = ?"
+                    ") ORDER BY user_id LIMIT ?",
+                    (ticker, ticker, MAX_BRIEF_USERS_PER_EVENT),
+                )
+            ]
+            if not eligible:
+                counts["skipped_irrelevant"] += 1
+                continue
+
+            ts = now if now is not None else time.time()
+            if (
+                state.last_brief_ts is not None
+                and ts - state.last_brief_ts < BRIEF_GLOBAL_COOLDOWN_SECONDS
+            ):
+                counts["skipped_throttled"] += 1
+                continue
+            last_ticker_ts = state.last_ticker_brief_ts.get(ticker)
+            if (
+                last_ticker_ts is not None
+                and ts - last_ticker_ts < BRIEF_TICKER_COOLDOWN_SECONDS
+            ):
+                counts["skipped_throttled"] += 1
+                continue
+
+            # ONE LLM call per event: the prompt uses the first eligible
+            # HOLDER's position for context (or "watching, no position").
+            position_row = conn.execute(
+                "SELECT ticker, quantity, avg_cost FROM positions "
+                "WHERE ticker = ? AND user_id IN ({placeholders}) "
+                "ORDER BY user_id LIMIT 1".format(
+                    placeholders=",".join("?" * len(eligible))
+                ),
+                (ticker, *eligible),
+            ).fetchone()
+            text = await _generate_brief_text(
+                price_cache, position_row, event, profile
+            )
+            if text is None:
+                counts["skipped_llm_error"] += 1
+                continue
+
+            created_at = datetime.now(timezone.utc).isoformat()
+            for user_id in eligible:
+                conn.execute(
+                    "INSERT INTO chat_messages (id, user_id, role, content, actions, kind, created_at) "
+                    "VALUES (?, ?, 'assistant', ?, NULL, 'brief', ?)",
+                    (str(uuid.uuid4()), user_id, text, created_at),
+                )
+            conn.commit()
+            state.last_brief_ts = ts
+            state.last_ticker_brief_ts[ticker] = ts
+            counts["briefed"] += 1
+            logger.info(
+                "AI brief posted for %s to %d user(s): %s", ticker, len(eligible), text
+            )
+    finally:
+        conn.close()
+    return counts
+
+
+async def briefs_watch_loop(
+    price_cache: PriceCache,
+    db_path: str,
+    interval: float = BRIEFS_WATCH_INTERVAL_SECONDS,
+    profile: MarketProfile | None = None,
+) -> None:
+    """Background task: enrich event narratives and post AI briefs.
+
+    Each cycle runs the narrative-enrichment pass (M3.2a — all tickers) and
+    then the briefs pass (M2.3 — held/watched tickers only). The passes are
+    error-isolated from each other: a failure in one never blocks the other.
+
+    ``profile`` (CN-3) is threaded into both passes so the AI writes briefs
+    and narratives in the market's language; None/US keeps the English prompts
+    and English mock text unchanged.
+
+    Runs indefinitely until cancelled via ``asyncio.CancelledError``. Any
+    other exception (DB lock, cache hiccup) is logged and the loop continues
+    — one bad pass never kills the watcher.
+    """
+    state = BriefWatcherState()
+    narrative_state = NarrativeEnricherState()
+    while True:
+        try:
+            await process_events_for_narratives_once(
+                price_cache, narrative_state, profile
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Narrative enrichment pass error — will retry in %ss", interval)
+        try:
+            await process_events_for_briefs_once(price_cache, db_path, state, profile)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Briefs watch loop error — will retry in %ss", interval)
+        await asyncio.sleep(interval)

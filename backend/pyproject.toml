@@ -12,6 +12,10 @@ dependencies = [
     "rich>=13.0.0",
     "litellm>=1.87.1",
     "aiofiles>=25.1.0",
+    # D1 history sources — imported LAZILY inside the sync providers only
+    # (app/market/history.py); startup and the simulator path never load them.
+    "yfinance>=0.2.50",
+    "akshare>=1.14.0",
 ]
 
 [project.optional-dependencies]
@@ -21,10 +25,11 @@ dev = [
     "pytest-cov>=5.0.0",
     "ruff>=0.7.0",
     "httpx>=0.27.0",
+    # tests/test_example_bot.py imports examples/finally_bot.py, which uses
+    # requests — declare it instead of leaning on the litellm→tiktoken
+    # transitive dependency.
+    "requests>=2.31.0",
 ]
-
-[project.scripts]
-finally-server = "app.main:app"
 
 [build-system]
 requires = ["hatchling"]

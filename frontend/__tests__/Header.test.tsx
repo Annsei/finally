@@ -9,7 +9,7 @@
  * 5. Before data loads (undefined), cash/value render '—' without throwing
  */
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent, act } from '@testing-library/react';
 import { usePriceStore } from '@/stores/priceStore';
 
 // Mock swr to control what data is returned
@@ -18,6 +18,13 @@ jest.mock('swr', () => {
   const mockSWR = jest.fn();
   return { __esModule: true, default: mockSWR };
 });
+
+jest.mock('@/lib/reload', () => ({
+  __esModule: true,
+  hardReload: jest.fn(),
+}));
+
+import { hardReload } from '@/lib/reload';
 
 // Import swr after mock so we can configure it per test
 import useSWR from 'swr';
@@ -66,6 +73,16 @@ describe('Header component', () => {
     expect(screen.getByText(/12,345\.67/)).toBeTruthy();
   });
 
+  it('Test 4b (FIX 4): connection dot exposes data-testid="connection-status" and data-state', () => {
+    for (const status of ['connected', 'reconnecting', 'disconnected'] as const) {
+      usePriceStore.setState({ connectionStatus: status });
+      const { unmount } = render(<Header />);
+      const dot = screen.getByTestId('connection-status');
+      expect(dot.getAttribute('data-state')).toBe(status);
+      unmount();
+    }
+  });
+
   it('Test 5: renders — placeholder for cash and total_value before data loads', () => {
     mockUseSWR.mockReturnValue({ data: undefined } as any);
     // Should not throw; should render '—' placeholders
@@ -74,5 +91,140 @@ describe('Header component', () => {
     // to find elements containing the dash placeholder text
     const dashes = screen.getAllByText(/—/);
     expect(dashes.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('Test 5b (FE-06): header navigation and metrics stay reachable on narrow viewports', () => {
+    render(<Header />);
+    const header = screen.getByTestId('responsive-header');
+    expect(header.className).toContain('flex-wrap');
+    expect(header.className).toContain('xl:flex-nowrap');
+
+    const nav = screen.getByTestId('primary-nav');
+    expect(nav.className).toContain('w-full');
+    expect(nav.className).toContain('overflow-x-auto');
+    expect(nav.className).toContain('xl:w-auto');
+    expect(screen.getByTestId('nav-developers')).toBeInTheDocument();
+
+    const metrics = screen.getByTestId('header-metrics');
+    expect(metrics.className).toContain('w-full');
+    expect(metrics.className).toContain('overflow-x-auto');
+    expect(metrics.className).toContain('xl:overflow-visible');
+  });
+
+  // ---------------------------------------------------------------------------
+  // Batch-2 realism: Day P&L = Σ qty × (price − prev_close) over positions
+  // ---------------------------------------------------------------------------
+  it('Test 6: Day P&L computes from live prices vs prev_close, colored by sign', () => {
+    mockUseSWR.mockReturnValue({
+      data: {
+        cash: 5000,
+        total_value: 8810,
+        positions: [
+          { ticker: 'AAPL', quantity: 10, avg_cost: 185, current_price: 190.5, unrealized_pnl: 55, pnl_pct: 2.97 },
+          { ticker: 'NVDA', quantity: 2, avg_cost: 900, current_price: 880, unrealized_pnl: -40, pnl_pct: -2.2 },
+        ],
+      },
+    } as any);
+    usePriceStore.setState({
+      prices: {
+        AAPL: {
+          ticker: 'AAPL', price: 190.5, previous_price: 190.4, timestamp: 1, change: 0.1,
+          change_percent: 0.05, direction: 'up', prev_close: 188.0,
+        },
+        NVDA: {
+          ticker: 'NVDA', price: 880.0, previous_price: 881.0, timestamp: 1, change: -1,
+          change_percent: -0.11, direction: 'down', prev_close: 890.0,
+        },
+      } as any,
+    });
+
+    render(<Header />);
+
+    // AAPL: 10 × (190.5 − 188) = +25; NVDA: 2 × (880 − 890) = −20 → +$5.00
+    const dayPnl = screen.getByTestId('day-pnl');
+    expect(dayPnl.textContent).toBe('+$5.00');
+    expect(dayPnl.className).toContain('text-terminal-up');
+  });
+
+  it('Test 6b: negative Day P&L renders -$ with down coloring', () => {
+    mockUseSWR.mockReturnValue({
+      data: {
+        cash: 5000,
+        total_value: 6760,
+        positions: [
+          { ticker: 'NVDA', quantity: 2, avg_cost: 900, current_price: 880, unrealized_pnl: -40, pnl_pct: -2.2 },
+        ],
+      },
+    } as any);
+    usePriceStore.setState({
+      prices: {
+        NVDA: {
+          ticker: 'NVDA', price: 880.0, previous_price: 881.0, timestamp: 1, change: -1,
+          change_percent: -0.11, direction: 'down', prev_close: 890.0,
+        },
+      } as any,
+    });
+
+    render(<Header />);
+
+    const dayPnl = screen.getByTestId('day-pnl');
+    expect(dayPnl.textContent).toBe('-$20.00');
+    expect(dayPnl.className).toContain('text-terminal-down');
+  });
+
+  // ---------------------------------------------------------------------------
+  // M4.1: identity chip
+  // ---------------------------------------------------------------------------
+  it('Test 7: guest sees the sign-in affordance; a logged-in user sees name + sign out', () => {
+    // Guest (auth/me returns default)
+    mockUseSWR.mockImplementation(((key: string) => {
+      if (key === '/api/auth/me') return { data: { user: { id: 'default', name: 'Guest' } } } as any;
+      return { data: undefined } as any;
+    }) as any);
+    const { unmount } = render(<Header />);
+    expect(screen.getByTestId('auth-signin')).toBeInTheDocument();
+    unmount();
+
+    // Logged in
+    mockUseSWR.mockImplementation(((key: string) => {
+      if (key === '/api/auth/me') return { data: { user: { id: 'fiona', name: 'Fiona' } } } as any;
+      return { data: undefined } as any;
+    }) as any);
+    render(<Header />);
+    expect(screen.getByTestId('auth-user').textContent).toBe('Fiona');
+    expect(screen.getByTestId('auth-logout')).toBeInTheDocument();
+  });
+
+  it('Test 7b: sign-in form POSTs the name and reloads on success', async () => {
+    mockUseSWR.mockImplementation(((key: string) => {
+      if (key === '/api/auth/me') return { data: { user: { id: 'default', name: 'Guest' } } } as any;
+      return { data: undefined } as any;
+    }) as any);
+    global.fetch = jest.fn().mockResolvedValueOnce({ ok: true, json: async () => ({}) });
+
+    render(<Header />);
+
+    fireEvent.click(screen.getByTestId('auth-signin'));
+    fireEvent.change(screen.getByTestId('auth-name-input'), { target: { value: 'Fiona' } });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('auth-submit'));
+    });
+
+    expect(global.fetch).toHaveBeenCalledWith(
+      '/api/auth/login',
+      expect.objectContaining({ method: 'POST', body: JSON.stringify({ name: 'Fiona' }) })
+    );
+    await waitFor(() => expect(hardReload).toHaveBeenCalled());
+  });
+
+  it('Test 6c: Day P&L shows $0.00 with no positions and — before portfolio loads', () => {
+    mockUseSWR.mockReturnValue({ data: { cash: 10000, total_value: 10000, positions: [] } } as any);
+    const { unmount } = render(<Header />);
+    expect(screen.getByTestId('day-pnl').textContent).toBe('$0.00');
+    unmount();
+
+    mockUseSWR.mockReturnValue({ data: undefined } as any);
+    render(<Header />);
+    expect(screen.getByTestId('day-pnl').textContent).toBe('—');
   });
 });

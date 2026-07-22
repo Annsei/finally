@@ -85,3 +85,42 @@ class TestWatchlistEndpoints:
             assert "price" in entry
             assert "change_percent" in entry
             assert "direction" in entry
+            assert "day_change_percent" in entry
+
+    async def test_day_change_percent_value_when_cached(self, app_client):
+        """Cached tickers report a numeric day_change_percent (0.0 at seed)."""
+        response = await app_client.get("/api/watchlist/")
+        assert response.status_code == 200
+        for entry in response.json()["tickers"]:
+            # The fixture seeds the cache once per ticker, so the price still
+            # equals the session prev_close → day change is exactly 0.0.
+            assert entry["day_change_percent"] == 0.0
+
+    async def test_day_change_percent_null_when_not_cached(
+        self, app_client, fake_market_source
+    ):
+        """A watchlist ticker absent from the price cache reports null fields."""
+        # Detach the cache so the fake source does NOT seed a price on add —
+        # leaves the ticker in the DB watchlist but unknown to the cache.
+        fake_market_source.price_cache = None
+
+        add_resp = await app_client.post("/api/watchlist/", json={"ticker": "PYPL"})
+        assert add_resp.status_code == 200
+
+        get_resp = await app_client.get("/api/watchlist/")
+        entry = next(t for t in get_resp.json()["tickers"] if t["ticker"] == "PYPL")
+        assert entry["price"] is None
+        assert entry["day_change_percent"] is None
+
+    async def test_added_ticker_gets_day_change_percent(
+        self, app_client, fake_market_source
+    ):
+        """Adding a ticker seeds the market source/cache → prev_close exists,
+        so day_change_percent is a number (0.0 right after the seed write)."""
+        add_resp = await app_client.post("/api/watchlist/", json={"ticker": "PYPL"})
+        assert add_resp.status_code == 200
+        assert "PYPL" in fake_market_source.added
+
+        get_resp = await app_client.get("/api/watchlist/")
+        entry = next(t for t in get_resp.json()["tickers"] if t["ticker"] == "PYPL")
+        assert entry["day_change_percent"] == 0.0

@@ -2,5 +2,69 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ---------------------------------------------------------------------------
+ * Direction colours (FinAlly-CN, CN-3 §2)
+ * The default (US) market is green-up / red-down — identical to the previous
+ * hardcoded values. The A-share market (<html data-market="cn">) swaps them so
+ * up is red and down is green. Tailwind's terminal.up/down tokens and the
+ * flash keyframes both resolve through these variables.
+ * ------------------------------------------------------------------------- */
+:root {
+  --color-up: #22c55e;
+  --color-down: #ef4444;
+}
+:root[data-market='cn'] {
+  --color-up: #ef4444;
+  --color-down: #22c55e;
+}
+
+/* The connection-status dot encodes STATUS (green = connected), not price
+ * direction, so it must NOT flip on the A-share market. These attribute
+ * selectors (specificity 0,2,0) outrank the single utility class the dot still
+ * carries (bg-terminal-up/down/amber, specificity 0,1,0) and pin fixed colours
+ * without !important. The class names stay unchanged so Header tests pass. */
+[data-testid='connection-status'][data-state='connected'] {
+  background-color: #22c55e;
+}
+[data-testid='connection-status'][data-state='disconnected'] {
+  background-color: #ef4444;
+}
+[data-testid='connection-status'][data-state='reconnecting'] {
+  background-color: #f59e0b;
+}
+
 /* Flash animations use Tailwind animate-flash-up / animate-flash-down keyframe utilities */
 /* Keyframes defined in tailwind.config.js: instant color, fades to transparent over 500ms */
+
+/* News ticker marquee — content is rendered twice for a seamless loop;
+   translating -50% of the doubled track equals one full content width */
+@keyframes ticker-scroll {
+  from { transform: translateX(0); }
+  to { transform: translateX(-50%); }
+}
+
+.news-ticker-track {
+  display: inline-flex;
+  white-space: nowrap;
+  animation: ticker-scroll 40s linear infinite;
+}
+
+.news-ticker-track:hover {
+  animation-play-state: paused;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+
+  .news-ticker-track {
+    animation: none !important;
+    transform: none !important;
+  }
+}

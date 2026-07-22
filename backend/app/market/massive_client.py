@@ -14,6 +14,19 @@ from .interface import MarketDataSource
 logger = logging.getLogger(__name__)
 
 
+def _positive_float(value: object) -> float | None:
+    """Return value as a float if it is a positive real number, else None.
+
+    Guards against absent snapshot fields (None), Massive's zero-filled
+    day/prevDay aggregates outside market hours, and non-numeric values.
+    Returning None lets the PriceCache fall back to its carried session state
+    (first price seen / running extremes).
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value) if value > 0 else None
+
+
 class MassiveDataSource(MarketDataSource):
     """MarketDataSource backed by the Massive (Polygon.io) REST API.
 
@@ -37,6 +50,9 @@ class MassiveDataSource(MarketDataSource):
         self._tickers: list[str] = []
         self._task: asyncio.Task | None = None
         self._client: RESTClient | None = None
+        # Cumulative day volume (day.v) seen on the previous poll, per ticker.
+        # Used to derive per-poll volume deltas.
+        self._prev_day_volume: dict[str, float] = {}
 
     async def start(self, tickers: list[str]) -> None:
         self._client = RESTClient(api_key=self._api_key)
@@ -73,6 +89,7 @@ class MassiveDataSource(MarketDataSource):
         ticker = ticker.upper().strip()
         self._tickers = [t for t in self._tickers if t != ticker]
         self._cache.remove(ticker)
+        self._prev_day_volume.pop(ticker, None)
         logger.info("Massive: removed ticker %s", ticker)
 
     def get_tickers(self) -> list[str]:
@@ -101,10 +118,29 @@ class MassiveDataSource(MarketDataSource):
                     price = snap.last_trade.price
                     # Massive timestamps are Unix milliseconds → convert to seconds
                     timestamp = snap.last_trade.timestamp / 1000.0
+                    # Session fields: prefer the snapshot's previous-day close
+                    # (prevDay.c) and day extremes (day.h / day.l). When absent
+                    # (None passed), the cache falls back to the first price
+                    # seen (held constant) and its running extremes.
+                    prev_day = getattr(snap, "prev_day", None)
+                    day = getattr(snap, "day", None)
+                    # Best bid/ask from the NBBO quote (lastQuote.p / lastQuote.P).
+                    # When absent or non-positive, fall back to the trade price
+                    # (zero spread) — _positive_float returns None and the
+                    # cache/model normalizes None to the price.
+                    last_quote = getattr(snap, "last_quote", None)
                     self._cache.update(
                         ticker=snap.ticker,
                         price=price,
                         timestamp=timestamp,
+                        prev_close=_positive_float(getattr(prev_day, "close", None)),
+                        day_high=_positive_float(getattr(day, "high", None)),
+                        day_low=_positive_float(getattr(day, "low", None)),
+                        volume=self._volume_delta(
+                            snap.ticker, getattr(day, "volume", None)
+                        ),
+                        bid=_positive_float(getattr(last_quote, "bid_price", None)),
+                        ask=_positive_float(getattr(last_quote, "ask_price", None)),
                     )
                     processed += 1
                 except (AttributeError, TypeError) as e:
@@ -119,6 +155,25 @@ class MassiveDataSource(MarketDataSource):
             logger.error("Massive poll failed: %s", e)
             # Don't re-raise — the loop will retry on the next interval.
             # Common failures: 401 (bad key), 429 (rate limit), network errors.
+
+    def _volume_delta(self, ticker: str, day_volume: object) -> float:
+        """Volume traded since the previous poll for a ticker.
+
+        Computed as the delta of the snapshot's cumulative day volume (day.v)
+        vs the previous poll, clamped >= 0 (the cumulative resets across
+        sessions). Returns 0.0 when day.v is unavailable or on the first poll
+        for the ticker (no previous cumulative to diff against).
+        """
+        if isinstance(day_volume, bool) or not isinstance(day_volume, (int, float)):
+            return 0.0
+        cumulative = float(day_volume)
+        if cumulative < 0:
+            return 0.0
+        previous = self._prev_day_volume.get(ticker)
+        self._prev_day_volume[ticker] = cumulative
+        if previous is None:
+            return 0.0
+        return max(0.0, cumulative - previous)
 
     def _fetch_snapshots(self) -> list:
         """Synchronous call to the Massive REST API. Runs in a thread."""

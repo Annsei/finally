@@ -9,7 +9,7 @@
  * Test 9 (D-01): Three distinct layout columns are present.
  */
 import React from 'react';
-import { render, act } from '@testing-library/react';
+import { render, act, screen } from '@testing-library/react';
 
 jest.mock('@/hooks/usePriceStream', () => ({
   usePriceStream: jest.fn(),
@@ -18,6 +18,7 @@ jest.mock('@/hooks/usePriceStream', () => ({
 jest.mock('swr', () => ({
   __esModule: true,
   default: jest.fn().mockReturnValue({ data: undefined, mutate: jest.fn() }),
+  useSWRConfig: jest.fn().mockReturnValue({ mutate: jest.fn() }),
 }));
 
 jest.mock('@/components/SparklineChart', () => ({
@@ -57,8 +58,12 @@ jest.mock('@/components/TradeBar', () => ({
 
 jest.mock('@/components/ChatPanel', () => ({
   __esModule: true,
-  default: ({ open, onToggle }: { open: boolean; onToggle: () => void; onNewTrade?: () => void }) => (
-    <div data-testid="chat-panel" data-open={String(open)} />
+  default: ({ open, onNewTrade }: { open: boolean; onToggle: () => void; onNewTrade?: () => void }) => (
+    <div
+      data-testid="chat-panel"
+      data-open={String(open)}
+      onClick={() => onNewTrade?.()}
+    />
   ),
 }));
 
@@ -79,7 +84,52 @@ describe('Dashboard index page', () => {
     expect(root.className).toContain('bg-terminal-bg');
   });
 
-  it('Test 6: all 6 Phase 4 panels mount', () => {
+  it('Test 5b (FE-06): narrow viewport scrolls naturally; md+ locks internal panels', () => {
+    const { container } = render(<Dashboard />);
+    const root = container.firstChild as HTMLElement;
+    expect(root.className).toContain('min-h-screen');
+    expect(root.className).toContain('md:h-screen');
+    expect(root.className).toContain('md:overflow-hidden');
+    expect(root.classList.contains('h-screen')).toBe(false);
+    expect(root.classList.contains('overflow-hidden')).toBe(false);
+
+    const layout = screen.getByTestId('dashboard-layout');
+    expect(layout.className).toContain('flex-col');
+    expect(layout.className).toContain('md:flex-row');
+    expect(layout.className).toContain('gap-2');
+    expect(layout.className).toContain('lg:gap-4');
+  });
+
+  it('Test 5c (FE-06): 768/1280/1600 breakpoint classes keep all regions reachable', () => {
+    const { getByTestId } = render(<Dashboard />);
+    const watchlist = getByTestId('watchlist-panel');
+    expect(watchlist.className).toContain('w-full');
+    expect(watchlist.className).toContain('md:w-56');
+    expect(watchlist.className).toContain('xl:w-52');
+    expect(watchlist.className).toContain('2xl:w-64');
+
+    const main = getByTestId('dashboard-main');
+    expect(main.className).toContain('w-full');
+    expect(main.className).toContain('min-w-0');
+    expect(main.className).toContain('md:overflow-auto');
+
+    const chat = getByTestId('responsive-chat-dock');
+    expect(chat.className).toContain('fixed');
+    expect(chat.className).toContain('md:w-96');
+    expect(chat.className).toContain('xl:static');
+    expect(chat.className).toContain('xl:w-72');
+    expect(chat.className).toContain('2xl:w-80');
+  });
+
+  it('Test 6: all 6 Phase 4 panels mount once a ticker is auto-selected', () => {
+    // MainChart only renders when a ticker is selected (FIX 7) — provide watchlist data
+    mockUseSWR.mockImplementation((key: any) => {
+      if (key === '/api/watchlist/') {
+        return { data: { tickers: [{ ticker: 'AAPL' }] }, mutate: jest.fn() } as any;
+      }
+      return { data: undefined, mutate: jest.fn() } as any;
+    });
+
     const { getByTestId } = render(<Dashboard />);
     expect(getByTestId('main-chart')).toBeTruthy();
     expect(getByTestId('portfolio-heatmap')).toBeTruthy();
@@ -87,6 +137,17 @@ describe('Dashboard index page', () => {
     expect(getByTestId('positions-table')).toBeTruthy();
     expect(getByTestId('trade-bar')).toBeTruthy();
     expect(getByTestId('chat-panel')).toBeTruthy();
+  });
+
+  it('Test 6b (FIX 7): before any ticker is selected, a stable placeholder renders instead of MainChart', () => {
+    // Default mock: no watchlist data → no auto-select → selectedTicker stays null
+    const { queryByTestId, getByTestId } = render(<Dashboard />);
+
+    expect(queryByTestId('main-chart')).toBeNull();
+    const placeholder = getByTestId('main-chart-placeholder');
+    expect(placeholder).toBeTruthy();
+    // Fixed height keeps the column layout stable while data loads
+    expect(placeholder.style.height).toBe('304px');
   });
 
   it('Test 7 (D-03): first watchlist ticker is auto-selected when no ticker is selected', () => {
@@ -121,5 +182,85 @@ describe('Dashboard index page', () => {
     // Chat column: shrink-0 with w-80 or w-8
     const chatCol = container.querySelector('[class*="shrink-0"]');
     expect(chatCol).toBeTruthy();
+  });
+
+  it('Test 10 (FIX 3): ChatPanel callback revalidates BOTH portfolio and watchlist SWR keys', () => {
+    const mutatePortfolio = jest.fn();
+    const mutateWatchlist = jest.fn();
+    mockUseSWR.mockImplementation((key: any) => {
+      if (key === '/api/portfolio/') {
+        return { data: undefined, mutate: mutatePortfolio } as any;
+      }
+      if (key === '/api/watchlist/') {
+        return { data: { tickers: [{ ticker: 'AAPL' }] }, mutate: mutateWatchlist } as any;
+      }
+      return { data: undefined, mutate: jest.fn() } as any;
+    });
+
+    const { getByTestId } = render(<Dashboard />);
+
+    // The ChatPanel stub invokes onNewTrade on click — simulates an AI response
+    // containing trades and/or watchlist_changes
+    act(() => {
+      getByTestId('chat-panel').click();
+    });
+
+    expect(mutatePortfolio).toHaveBeenCalledTimes(1);
+    expect(mutateWatchlist).toHaveBeenCalledTimes(1);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Batch-3 polish: keyboard shortcuts + shared autocomplete directory
+  // ---------------------------------------------------------------------------
+  it('Test 11: "/" focuses the watchlist add input', () => {
+    const { getByTestId } = render(<Dashboard />);
+    const input = getByTestId('watchlist-add-input') as HTMLInputElement;
+
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: '/' }));
+    });
+
+    expect(document.activeElement).toBe(input);
+  });
+
+  it('Test 12: ArrowDown/ArrowUp move the watchlist selection', () => {
+    mockUseSWR.mockImplementation((key: any) => {
+      if (key === '/api/watchlist/') {
+        return {
+          data: { tickers: [{ ticker: 'AAPL' }, { ticker: 'GOOGL' }, { ticker: 'MSFT' }] },
+          mutate: jest.fn(),
+        } as any;
+      }
+      return { data: undefined, mutate: jest.fn() } as any;
+    });
+
+    const { getByTestId } = render(<Dashboard />);
+
+    // Auto-select picked AAPL; ArrowDown → GOOGL
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown' }));
+    });
+    expect(getByTestId('main-chart').getAttribute('data-ticker')).toBe('GOOGL');
+
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp' }));
+    });
+    expect(getByTestId('main-chart').getAttribute('data-ticker')).toBe('AAPL');
+  });
+
+  it('Test 13: shared ticker-suggestions datalist renders with directory entries', () => {
+    const { container } = render(<Dashboard />);
+
+    const datalist = container.querySelector('datalist#ticker-suggestions');
+    expect(datalist).toBeTruthy();
+    expect(datalist!.querySelectorAll('option').length).toBeGreaterThanOrEqual(20);
+  });
+
+  it('Test 14: NewsTicker and StatusBar mount in the page chrome', () => {
+    const { getByTestId } = render(<Dashboard />);
+
+    expect(getByTestId('news-ticker')).toBeTruthy();
+    expect(getByTestId('status-clock')).toBeTruthy();
+    expect(getByTestId('status-feed-latency')).toBeTruthy();
   });
 });

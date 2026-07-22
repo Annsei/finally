@@ -69,9 +69,118 @@ class TestPriceUpdate:
         assert result["change_percent"] == 0.2632  # (0.50 / 190.00) * 100
         assert result["direction"] == "up"
 
+    def test_session_fields_default_to_price(self):
+        """Omitted session fields normalize to the current price (first tick)."""
+        update = PriceUpdate(ticker="AAPL", price=190.50, previous_price=190.00, timestamp=1234567890.0)
+        assert update.prev_close == 190.50
+        assert update.day_high == 190.50
+        assert update.day_low == 190.50
+        assert update.day_change == 0.0
+        assert update.day_change_percent == 0.0
+
+    def test_explicit_session_fields(self):
+        """Explicit prev_close/day_high/day_low are used verbatim."""
+        update = PriceUpdate(
+            ticker="AAPL",
+            price=190.50,
+            previous_price=190.00,
+            timestamp=1234567890.0,
+            prev_close=180.00,
+            day_high=195.00,
+            day_low=179.50,
+        )
+        assert update.prev_close == 180.00
+        assert update.day_high == 195.00
+        assert update.day_low == 179.50
+        assert update.day_change == 10.50
+        assert update.day_change_percent == round(10.50 / 180.00 * 100, 4)
+
+    def test_day_change_negative(self):
+        """day_change/day_change_percent go negative below prev_close."""
+        update = PriceUpdate(
+            ticker="AAPL",
+            price=175.00,
+            previous_price=176.00,
+            timestamp=1234567890.0,
+            prev_close=180.00,
+        )
+        assert update.day_change == -5.00
+        assert update.day_change_percent == round(-5.00 / 180.00 * 100, 4)
+
+    def test_day_change_percent_guard_nonpositive_prev_close(self):
+        """prev_close <= 0 yields day_change_percent of 0.0 (no division)."""
+        zero = PriceUpdate(ticker="X", price=100.0, previous_price=100.0, prev_close=0.0)
+        negative = PriceUpdate(ticker="X", price=100.0, previous_price=100.0, prev_close=-1.0)
+        assert zero.day_change_percent == 0.0
+        assert negative.day_change_percent == 0.0
+
+    def test_to_dict_includes_day_fields(self):
+        """to_dict() always carries the five session fields."""
+        update = PriceUpdate(
+            ticker="AAPL",
+            price=190.50,
+            previous_price=190.00,
+            timestamp=1234567890.0,
+            prev_close=180.00,
+            day_high=195.00,
+            day_low=179.50,
+        )
+        result = update.to_dict()
+
+        assert result["prev_close"] == 180.00
+        assert result["day_change"] == 10.50
+        assert result["day_change_percent"] == round(10.50 / 180.00 * 100, 4)
+        assert result["day_high"] == 195.00
+        assert result["day_low"] == 179.50
+
     def test_immutability(self):
         """Test that PriceUpdate is immutable."""
         update = PriceUpdate(ticker="AAPL", price=190.50, previous_price=190.00, timestamp=1234567890.0)
 
         with pytest.raises(AttributeError):
             update.price = 200.00  # Should raise error
+
+
+class TestPriceUpdateQuoteFields:
+    """Volume and bid/ask fields (Batch 2 §2.2/§2.3)."""
+
+    def test_defaults_bid_ask_price_volume_zero(self):
+        """Omitted quote fields normalize to bid=ask=price and volume=0.0."""
+        update = PriceUpdate(ticker="AAPL", price=190.50, previous_price=190.00, timestamp=1234567890.0)
+        assert update.volume == 0.0
+        assert update.bid == 190.50
+        assert update.ask == 190.50
+
+    def test_explicit_quote_fields(self):
+        """Explicit volume/bid/ask are used verbatim."""
+        update = PriceUpdate(
+            ticker="AAPL",
+            price=190.50,
+            previous_price=190.00,
+            timestamp=1234567890.0,
+            volume=12345.0,
+            bid=190.48,
+            ask=190.52,
+        )
+        assert update.volume == 12345.0
+        assert update.bid == 190.48
+        assert update.ask == 190.52
+
+    def test_to_dict_always_emits_quote_keys(self):
+        """to_dict() carries volume/bid/ask even when defaulted."""
+        defaulted = PriceUpdate(ticker="AAPL", price=190.50, previous_price=190.00).to_dict()
+        assert defaulted["volume"] == 0.0
+        assert defaulted["bid"] == 190.50
+        assert defaulted["ask"] == 190.50
+
+        explicit = PriceUpdate(
+            ticker="AAPL",
+            price=190.50,
+            previous_price=190.00,
+            volume=5000.0,
+            bid=190.45,
+            ask=190.55,
+        ).to_dict()
+        assert explicit["volume"] == 5000.0
+        assert explicit["bid"] == 190.45
+        assert explicit["ask"] == 190.55

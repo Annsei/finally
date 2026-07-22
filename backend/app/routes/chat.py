@@ -1,14 +1,24 @@
 """Chat API routes for FinAlly.
 
 Provides:
-- POST /api/chat — LLM-powered chat with structured output; auto-executes trades
-  and watchlist changes; persists conversation history to chat_messages.
+- POST /api/chat — LLM-powered chat with structured output; auto-executes
+  trades, advanced orders (limit/stop/stop_limit — M2.1), standing rules
+  (M2.2), strategy backtests (M5 — stateless engine runs, compact outcomes),
+  strategy research batches (D4 — ranked candidate history backtests via
+  ``app.research``), and watchlist changes; persists conversation history
+  to chat_messages.
+- GET /api/chat — last 20 chat_messages rows of every kind
+  ('chat' | 'brief' | 'review' | 'rule'); optional ``kind``/``limit`` query
+  params filter and resize the window (P1 §3.6, defaults unchanged).
+- POST /api/chat/review — on-demand daily AI review (M2.4): summarizes
+  today's trades, rule firings, P&L, and market events as a plain-text
+  assistant message stored with kind='review'.
 
 All routes are created via the factory function ``create_chat_router`` which
 closes over the shared ``PriceCache`` instance and the database path.
 
-When ``LLM_MOCK=true`` the endpoint returns a deterministic response that
-exercises the full auto-execution pipeline without network calls (D-06/D-07).
+When ``LLM_MOCK=true`` the endpoints return deterministic responses without
+network calls (D-06/D-07).
 """
 
 from __future__ import annotations
@@ -23,17 +33,220 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, FiniteFloat
 
+from app.auth import get_current_user_id
+from app.backtest import (
+    STARTING_CASH,
+    attach_history_bars,
+    normalize_backtest_config,
+    normalize_strategy_backtest_config,
+    run_backtest,
+)
 from app.db.connection import get_conn
 from app.market.cache import PriceCache
-from app.routes.portfolio import execute_trade_on_conn
-from app.routes.watchlist import apply_watchlist_change_on_conn
+from app.market.profiles import MarketProfile
+from app.market.sentiment import compute_market_sentiment, sentiment_context_line
+from app.market.session import SessionClock
+from app.research import run_research_on_conn
+from app.routes.backtest_runs import insert_backtest_run_on_conn
+
+# Bind the profile-aware placement impl to the legacy module name: chat
+# auto-exec must pass a market ``profile`` (CN-2), and existing rollback tests
+# monkeypatch ``chat.place_order_on_conn``. The public wrapper stays frozen in
+# app.routes.orders for pre-CN-2 callers.
+from app.routes.orders import _place_order_on_conn as place_order_on_conn
+from app.routes.portfolio import (
+    _execute_trade_on_conn as execute_trade_on_conn,
+)
+from app.routes.portfolio import (
+    _record_snapshot,
+)
+from app.routes.rules import create_rule_on_conn
+from app.routes.strategies import (
+    TEMPLATES_BY_KEY,
+    create_strategy_on_conn,
+    resolve_strategy_on_conn,
+    transition_strategy_on_conn,
+)
+from app.routes.watchlist import (
+    apply_watchlist_change_on_conn,
+    sync_market_source,
+    ticker_watched_by_anyone,
+)
 
 logger = logging.getLogger(__name__)
 
 MODEL = "openrouter/openai/gpt-oss-120b"
 EXTRA_BODY = {"provider": {"order": ["cerebras"]}}
+
+# System prompt for the assistant (M2: the AI is an agent — beyond immediate
+# market trades it can place resting limit/stop/stop_limit orders and create
+# standing rules). The portfolio context is appended per-request.
+SYSTEM_PROMPT = (
+    "You are FinAlly, an AI trading assistant. Be concise and data-driven. "
+    "Execute trades when asked. Always respond with valid structured JSON.\n\n"
+    "You act through five action arrays in your JSON response:\n"
+    "- 'trades': immediate market orders {ticker, side, quantity}.\n"
+    "- 'orders': resting limit/stop/stop-limit orders {ticker, side, quantity, "
+    "kind, limit_price?, stop_price?, time_in_force?}. kind is one of 'limit' "
+    "(limit_price required), 'stop' (stop_price required, market-on-trigger), "
+    "'stop_limit' (both required). time_in_force is 'gtc' (default) or 'day'. "
+    "Use resting orders whenever the user names a trigger price: 'buy X if it "
+    "drops to Y' means a limit buy with limit_price Y; 'protect it with a stop "
+    "at Z' means a sell stop with stop_price Z; 'take profit at W' means a "
+    "limit sell at W. A sell stop must be below the current price, a buy stop "
+    "above it. Limit orders already marketable at placement fill immediately.\n"
+    "- 'rules': standing one-shot automations {ticker, trigger_type, "
+    "threshold, side, quantity, description} evaluated continuously against "
+    "live quotes. trigger_type is exactly one of 'price_above', 'price_below', "
+    "'day_change_pct_above', 'day_change_pct_below'. threshold is a dollar "
+    "price for price_* triggers and a percent for day_change_pct_* triggers "
+    "(negative for drops — 'if NVDA drops 3% today, buy 5' means trigger_type "
+    "'day_change_pct_below' with threshold -3). When a rule fires it executes "
+    "a market trade once and moves to status 'fired' until the user re-arms "
+    "it. Always write a clear human-readable description, e.g. "
+    "'Buy 5 NVDA when day change <= -3%'.\n"
+    "- 'backtests': strategy backtests {ticker, trigger_type, threshold, "
+    "quantity, take_profit_pct?, stop_loss_pct?, days?, runs?} simulated "
+    "against synthetic history. Buy-entry only — there is no side field; "
+    "exits are modeled with take_profit_pct/stop_loss_pct (percent "
+    "above/below entry, each > 0 when given). trigger_type/threshold use "
+    "the same semantics as 'rules'. days defaults to 30 (5-120), runs to 1 "
+    "(1-50 Monte Carlo re-runs). Use this when the user asks to backtest a "
+    "strategy ('backtest', '回测') or how a rule/strategy would have "
+    "performed.\n"
+    "- 'watchlist_changes': {ticker, action} with action 'add' or 'remove'.\n"
+    "- 'strategies': persistent trading strategies {action, name?, ticker?, "
+    "template?, entry?, exits?, sizing?, strategy?, days?, runs?}. action is "
+    "one of 'create', 'backtest', 'deploy', 'pause'. 'create' makes a DRAFT "
+    "strategy: give a short name, a ticker, and either a template key — one "
+    "of 'dip_buyer', 'momentum_breakout', 'ma_golden_cross', 'grid_lite', "
+    "'rsi_rebound', 'trend_rider' — or an explicit config (explicit entry/"
+    "exits/sizing override the template's). entry is a condition group "
+    "{\"all\"|\"any\": [1-5 conditions]}, each condition {field, op: "
+    "'above'|'below', value?, params?} with field one of: 'price' (value = "
+    "price level), 'day_change_pct' (value = percent, negative for drops), "
+    "'ma' (params {period 2-120}, value = percent offset from the SMA), "
+    "'ma_cross'/'ema_cross' (params {fast, slow}, no value; 'above' = golden "
+    "cross), 'rsi' (params {period 2-50}, value 0-100), 'window_high' "
+    "(params {minutes 5-240}, op 'above' breakout), 'window_low' (params "
+    "{minutes 5-240}, op 'below' breakdown), 'pullback_from_high_pct' "
+    "(params {minutes 5-240}, value = percent). exits is {take_profit_pct?, "
+    "stop_loss_pct?, trailing_stop_pct?, max_holding_days?} — deploying "
+    "requires at least one. sizing is {mode: 'fixed_qty', qty} or {mode: "
+    "'cash_pct', pct 1-100}. 'backtest' simulates a saved strategy "
+    "(reference it via 'strategy': its id or name; optional days/runs) and "
+    "stores the result in the run library. 'deploy' turns a draft or paused "
+    "strategy live so the engine trades it automatically; 'pause' freezes a "
+    "live one. Always recommend running a backtest before deploying.\n"
+    "- 'research': strategy research requests. Use when the user asks you to "
+    "research, explore, or compare candidate strategies for a ticker. Each "
+    "item: {ticker, days?, candidates: [{name, hypothesis?, template?, "
+    "entry?, exits?, sizing?}]} with 2-4 candidates. Give each candidate a "
+    "short name and a one-line hypothesis, and vary the approaches (trend "
+    "following, mean reversion, breakout). Candidates may reference a "
+    "template with optional overrides or give explicit entry/exits/sizing; "
+    "every candidate MUST include at least one exit. The platform backtests "
+    "each candidate on stored daily history over 'days' trading days "
+    "(default 120), ranks them by robustness score (return minus half the "
+    "max drawdown), and shows a comparison card with deploy buttons. Do not "
+    "also emit 'strategies' actions in the same turn; never deploy in the "
+    "research turn — the user decides from the card."
+)
+
+# System prompt for the daily review (M2.4) — plain text, no structured output.
+REVIEW_SYSTEM_PROMPT = (
+    "You are FinAlly, an AI trading assistant, writing the user's daily "
+    "review. Reply in plain text (no JSON, no markdown headings), 3-6 "
+    "sentences: what happened today, the best and worst decision, and one "
+    "concrete suggestion. Be concise and data-driven."
+)
+
+# Chinese (zh-CN) variant of SYSTEM_PROMPT, selected when the active market
+# profile's locale is 'zh-CN' (CN-3). It injects A-share trading constraints
+# (整手 100-share lots, T+1 settlement, ¥ currency, 涨跌停 price limits, 印花税
+# stamp tax) so the AI never emits trades the backend would reject, while the
+# structured-output schema keys and enum values stay ENGLISH (trades / orders /
+# rules / backtests / watchlist_changes, and every kind/trigger_type/action/
+# side value) — the frontend and validators need zero adaptation, only the
+# conversational message language changes.
+SYSTEM_PROMPT_ZH = (
+    "你是 FinAlly，一个 AI 交易助手。回答简洁、以数据为依据。用户要求时执行交易。"
+    "始终以合法的结构化 JSON 回复。\n\n"
+    "这是中国 A 股市场（沪深两市）。你建议或执行的所有操作都必须符合 A 股交易"
+    "规则，否则会被系统拒绝：\n"
+    "- 买入数量必须为整手，即 100 股的整数倍（1 手 = 100 股）；卖出可以是任意"
+    "股数（含零股）。\n"
+    "- T+1 交收：当日买入的股票，次日方可卖出。\n"
+    "- 货币单位为人民币 ¥；卖出需缴纳印花税，买卖双向收取佣金。\n"
+    "- 个股有涨跌停限制（主板 ±10%，创业板/科创板 ±20%）；委托价触及涨停或"
+    "跌停时可能无法成交。\n\n"
+    "你通过 JSON 响应中的五个动作数组来行动。数组的键名与所有枚举值一律使用"
+    "英文原文，切勿翻译：\n"
+    "- 'trades'：即时市价单 {ticker, side, quantity}。\n"
+    "- 'orders'：挂单 limit/stop/stop-limit 委托 {ticker, side, quantity, kind, "
+    "limit_price?, stop_price?, time_in_force?}。kind 取 'limit'（须给 "
+    "limit_price）、'stop'（须给 stop_price，触发后市价成交）、'stop_limit'"
+    "（两者都给）之一。time_in_force 取 'gtc'（默认）或 'day'。只要用户给出触发"
+    "价就用挂单：“跌到 Y 就买”表示以 limit_price Y 的限价买单；“在 Z 挂止损"
+    "保护”表示以 stop_price Z 的卖出止损单；“到 W 止盈”表示在 W 的限价卖单。"
+    "卖出止损价须低于现价，买入止损价须高于现价。挂单时已可成交的限价单会立即"
+    "成交。\n"
+    "- 'rules'：常驻的一次性自动化规则 {ticker, trigger_type, threshold, side, "
+    "quantity, description}，持续对实时行情求值。trigger_type 恰好取 "
+    "'price_above'、'price_below'、'day_change_pct_above'、'day_change_pct_below' "
+    "之一。threshold 对 price_* 触发是价格（¥），对 day_change_pct_* 触发是百分比"
+    "（下跌为负——“000858 今天跌 3% 就买 100 股”对应 trigger_type "
+    "'day_change_pct_below'、threshold -3）。规则触发时执行一次市价交易，随后"
+    "置为 'fired' 状态，直到用户重新启用。务必写清楚人类可读的 description，"
+    "例如“当日跌幅 <= -3% 时买入 100 股 000858”。\n"
+    "- 'backtests'：策略回测 {ticker, trigger_type, threshold, quantity, "
+    "take_profit_pct?, stop_loss_pct?, days?, runs?}，在合成历史上模拟。仅支持"
+    "买入建仓——没有 side 字段；退出用 take_profit_pct/stop_loss_pct 建模（相对"
+    "建仓价上/下浮的百分比，给定时均须 > 0）。trigger_type/threshold 语义同 "
+    "'rules'。days 默认 30（5-120），runs 默认 1（1-50 次蒙特卡洛重跑）。当用户"
+    "要求回测某策略（“回测”“backtest”）或询问某规则/策略过去表现时使用。\n"
+    "- 'watchlist_changes'：{ticker, action}，action 取 'add' 或 'remove'。\n"
+    "- 'strategies'：常驻交易策略 {action, name?, ticker?, template?, entry?, "
+    "exits?, sizing?, strategy?, days?, runs?}。action 取 'create'、"
+    "'backtest'、'deploy'、'pause' 之一。'create' 创建一条草稿策略：给出简短 "
+    "name、ticker，以及一个模板 key——'dip_buyer'、'momentum_breakout'、"
+    "'ma_golden_cross'、'grid_lite'、'rsi_rebound'、'trend_rider' 之一——或"
+    "显式配置（显式 entry/exits/sizing 覆盖模板）。entry 是条件组 "
+    "{\"all\"|\"any\": [1-5 个条件]}，每个条件为 {field, op: "
+    "'above'|'below', value?, params?}，field 取：'price'（value 为价格，"
+    "¥）、'day_change_pct'（value 为百分比，下跌为负）、'ma'（params "
+    "{period 2-120}，value 为相对 SMA 的百分比偏移）、'ma_cross'/'ema_cross'"
+    "（params {fast, slow}，无 value；'above' 为金叉）、'rsi'（params "
+    "{period 2-50}，value 0-100）、'window_high'（params {minutes 5-240}，"
+    "op 'above' 突破）、'window_low'（params {minutes 5-240}，op 'below' "
+    "破位）、'pullback_from_high_pct'（params {minutes 5-240}，value 为百分"
+    "比）。exits 为 {take_profit_pct?, stop_loss_pct?, trailing_stop_pct?, "
+    "max_holding_days?}——部署（deploy）时至少一项非空。sizing 为 {mode: "
+    "'fixed_qty', qty}（A 股须整手）或 {mode: 'cash_pct', pct 1-100}。"
+    "'backtest' 回测一条已保存的策略（用 'strategy' 引用其 id 或名称；可选 "
+    "days/runs），结果存入回测库。'deploy' 将草稿/暂停策略转为 live，由引擎"
+    "自动交易；'pause' 冻结 live 策略。务必建议先回测再部署。\n"
+    "- 'research'：策略研究请求。当用户要求研究、探索或对比某只股票的候选"
+    "策略时使用。每项为 {ticker, days?, candidates: [{name, hypothesis?, "
+    "template?, entry?, exits?, sizing?}]}，candidates 须为 2-4 个。给每个"
+    "候选一个简短 name 和一句话 hypothesis，并让思路各不相同（趋势跟随、"
+    "均值回归、突破等）。候选可引用模板 key 并用显式 entry/exits/sizing "
+    "覆盖，也可完全显式给出；每个候选必须至少包含一个退出条件。平台会在"
+    "存储的日线历史上回测每个候选（days 为交易日数，默认 120），按稳健分"
+    "（收益减去一半最大回撤）排名，并展示带部署按钮的对比卡。同一轮不要"
+    "再输出 'strategies' 动作；研究轮次绝不部署——由用户在对比卡上决定。"
+)
+
+# Chinese (zh-CN) variant of REVIEW_SYSTEM_PROMPT (CN-3) — plain-text A-share
+# daily review; currency is ¥. Selected on locale 'zh-CN'.
+REVIEW_SYSTEM_PROMPT_ZH = (
+    "你是 FinAlly，一个 AI 交易助手，正在撰写用户的每日复盘。用纯文本回复"
+    "（不要 JSON、不要 markdown 标题），3-6 句话：今天发生了什么、最好与最差"
+    "的决策、以及一条具体的建议。回答简洁、以数据为依据。这是 A 股市场，货币"
+    "为 ¥。"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -48,7 +261,7 @@ class ChatRequest(BaseModel):
 class TradeInstruction(BaseModel):
     ticker: str
     side: str  # "buy" | "sell"
-    quantity: float
+    quantity: FiniteFloat
 
 
 class WatchlistChange(BaseModel):
@@ -56,10 +269,143 @@ class WatchlistChange(BaseModel):
     action: str  # "add" | "remove"
 
 
+class OrderInstruction(BaseModel):
+    """An advanced order the LLM asks to place (M2.1) — POST /orders fields."""
+
+    ticker: str
+    side: str  # "buy" | "sell"
+    quantity: FiniteFloat
+    kind: str  # "limit" | "stop" | "stop_limit"
+    limit_price: FiniteFloat | None = None
+    stop_price: FiniteFloat | None = None
+    # None tolerated (strict structured-output modes emit null for optionals);
+    # place_order_on_conn normalizes None/empty to "gtc".
+    time_in_force: str | None = None  # "day" | "gtc" (default "gtc")
+
+
+class RuleInstruction(BaseModel):
+    """A standing rule the LLM asks to create (M2.2) — POST /rules fields."""
+
+    ticker: str
+    trigger_type: str  # price_above | price_below | day_change_pct_above | day_change_pct_below
+    threshold: FiniteFloat
+    side: str  # "buy" | "sell"
+    quantity: FiniteFloat
+    description: str | None = None
+
+
+class BacktestInstruction(BaseModel):
+    """A strategy backtest the LLM asks to run (M5) — POST /backtest fields.
+
+    Buy-entry only, so there is no side field; exits are modeled with
+    take_profit_pct/stop_loss_pct. None days/runs fall back to the engine
+    defaults (30 days, 1 run).
+    """
+
+    ticker: str
+    trigger_type: str  # price_above | price_below | day_change_pct_above | day_change_pct_below
+    threshold: FiniteFloat
+    quantity: FiniteFloat
+    take_profit_pct: FiniteFloat | None = None
+    stop_loss_pct: FiniteFloat | None = None
+    days: int | None = None
+    runs: int | None = None
+    source: str | None = None  # D1 §3 passthrough: "synthetic" | "history"
+
+
+class StrategyInstruction(BaseModel):
+    """A strategy action the LLM asks to run (P2 §7).
+
+    action is one of 'create' | 'backtest' | 'deploy' | 'pause'. 'create'
+    takes name/ticker plus a template key and/or explicit entry/exits/sizing
+    (explicit fields override the template's). The other actions reference an
+    existing strategy via ``strategy`` (its id, or its name resolved
+    case-insensitively — newest match wins). ``days``/``runs`` tune a
+    'backtest'; ``seed`` pins its RNG (used by the deterministic LLM_MOCK
+    branch; omitted draws a random seed, echoed in the stored run).
+    """
+
+    action: str  # "create" | "backtest" | "deploy" | "pause"
+    name: str | None = None
+    ticker: str | None = None
+    template: str | None = None
+    entry: dict | None = None
+    exits: dict | None = None
+    sizing: dict | None = None
+    strategy: str | None = None  # id or case-insensitive name
+    days: int | None = None
+    runs: int | None = None
+    seed: int | None = None
+    source: str | None = None  # D1 §3 passthrough: "synthetic" | "history"
+
+
+class ResearchCandidate(BaseModel):
+    """One candidate strategy inside a research request (D4 §2.1).
+
+    ``template`` supplies any of ``entry``/``exits``/``sizing`` the candidate
+    does not give explicitly — the same merge rule as the 'create' strategy
+    action. Every merged candidate must end up with at least one exit
+    (research products must be deployable); the handler enforces it.
+    """
+
+    name: str  # short display name, 1..40 after trim
+    hypothesis: str | None = None  # one-line rationale, shown in the card
+    template: str | None = None  # TEMPLATES_BY_KEY key; supplies missing parts
+    entry: dict | None = None  # condition-group DSL (overrides template)
+    exits: dict | None = None
+    sizing: dict | None = None
+
+
+class ResearchInstruction(BaseModel):
+    """A strategy research batch the LLM asks to run (D4 §2.1).
+
+    The handler (``app.research.run_research_on_conn``) backtests every
+    candidate on stored daily-bar history, persists each success as a DRAFT
+    strategy plus a Run Library entry, and ranks the results by the D4
+    robustness score. ``days`` counts TRADING days — None means 120, then the
+    history mode's existing 20..750 clamp applies. 2-4 candidates per batch;
+    deploying is never part of research (the user clicks it on the card).
+    """
+
+    ticker: str
+    days: int | None = None
+    candidates: list[ResearchCandidate] = []
+
+
 class ChatResponse(BaseModel):
     message: str
     trades: list[TradeInstruction] = []
     watchlist_changes: list[WatchlistChange] = []
+    orders: list[OrderInstruction] = []
+    rules: list[RuleInstruction] = []
+    backtests: list[BacktestInstruction] = []
+
+
+class ChatTurnResponse(ChatResponse):
+    """The P2 §7 structured-output schema (adds ``strategies``).
+
+    The ``strategies`` action array lives on a SUBCLASS so the pre-P2
+    ``ChatResponse`` field set stays frozen for its pinned regression tests
+    (a plain ``ChatResponse`` payload parses into it with ``strategies=[]``).
+    Since D4 the endpoint requests the ``ChatResearchTurnResponse`` extension
+    below; this field set is itself pinned by the P2 regression tests.
+    """
+
+    strategies: list[StrategyInstruction] = []
+
+
+class ChatResearchTurnResponse(ChatTurnResponse):
+    """The structured-output schema the chat endpoint actually requests.
+
+    D4 §2.1 adds the ``research`` action array. Like ``strategies`` before
+    it (P2 §7), the new array lives on a SUBCLASS: the ``ChatTurnResponse``
+    field set is pinned by the P2 regression tests exactly as ``ChatResponse``
+    is by the pre-P2 ones, so the endpoint requests/validates/constructs this
+    extended shape instead (a plain ``ChatTurnResponse`` payload parses into
+    it with ``research=[]``).
+    """
+
+    research: list[ResearchInstruction] = []
 
 
 # ---------------------------------------------------------------------------
@@ -70,28 +416,40 @@ class ChatResponse(BaseModel):
 def _assemble_portfolio_context(
     conn: sqlite3.Connection,
     price_cache: PriceCache,
+    user_id: str = "default",
+    zh: bool = False,
 ) -> str:
     """Build a compact portfolio context string for injection into the system prompt.
 
     Reads current cash, positions, and watchlist from the open connection and
-    enriches positions with live prices from the price cache.
+    enriches both positions and watchlist tickers with live prices from the
+    price cache (spec §9: "watchlist with live prices").
 
     Args:
         conn: An open SQLite connection (caller manages lifecycle).
         price_cache: Live price cache for current market prices.
+        user_id: The requesting user's id (M4 multi-user scoping).
+        zh: Render locale-sensitive context additions (the P4 §1 market
+            sentiment line) in Chinese. The default keeps the English line.
 
     Returns:
-        Multi-line string with cash, total value, positions table, and watchlist.
+        Multi-line string with cash, total value, positions table, watchlist
+        with current prices, (when any exist) the newest market events so the
+        assistant can reference sudden moves, and (P4 §1, only when the cache
+        holds >= 2 tickers) the market sentiment line. The SYSTEM_PROMPT
+        constants are never modified — sentiment rides the per-request
+        context assembled here.
     """
     # Cash balance
     user_row = conn.execute(
-        "SELECT cash_balance FROM users_profile WHERE id = 'default'"
+        "SELECT cash_balance FROM users_profile WHERE id = ?", (user_id,)
     ).fetchone()
     cash: float = user_row["cash_balance"] if user_row else 0.0
 
     # Positions with P&L
     position_rows = conn.execute(
-        "SELECT ticker, quantity, avg_cost FROM positions WHERE user_id = 'default'"
+        "SELECT ticker, quantity, avg_cost FROM positions WHERE user_id = ?",
+        (user_id,),
     ).fetchall()
 
     lines: list[str] = []
@@ -100,7 +458,7 @@ def _assemble_portfolio_context(
         ticker: str = row["ticker"]
         quantity: float = row["quantity"]
         avg_cost: float = row["avg_cost"]
-        current_price: float = price_cache.get_price(ticker) or 0.0
+        current_price: float = price_cache.get_price(ticker) or avg_cost
         pnl = (current_price - avg_cost) * quantity
         pnl_pct = ((current_price - avg_cost) / avg_cost * 100) if avg_cost > 0 else 0.0
         market_value += quantity * current_price
@@ -112,13 +470,21 @@ def _assemble_portfolio_context(
     total = cash + market_value
     positions_block = "\n".join(lines) if lines else "(no open positions)"
 
-    # Watchlist tickers (names only — no prices per D-01/D-02)
+    # Watchlist tickers enriched with live prices from the cache (spec §9)
     watchlist_rows = conn.execute(
-        "SELECT ticker FROM watchlist WHERE user_id = 'default' ORDER BY added_at ASC"
+        "SELECT ticker FROM watchlist WHERE user_id = ? ORDER BY added_at ASC",
+        (user_id,),
     ).fetchall()
-    watchlist_tickers = ", ".join(r["ticker"] for r in watchlist_rows)
+    watchlist_parts: list[str] = []
+    for r in watchlist_rows:
+        wl_ticker: str = r["ticker"]
+        wl_price = price_cache.get_price(wl_ticker)
+        watchlist_parts.append(
+            f"{wl_ticker} ${wl_price:.2f}" if wl_price is not None else f"{wl_ticker} (no price)"
+        )
+    watchlist_tickers = ", ".join(watchlist_parts)
 
-    return (
+    context = (
         f"Cash: ${cash:.2f}\n"
         f"Total portfolio value: ${total:.2f}\n"
         f"Positions (ticker | qty | avg_cost | current_price | pnl | pnl%):\n"
@@ -126,50 +492,274 @@ def _assemble_portfolio_context(
         f"Watchlist: {watchlist_tickers}"
     )
 
+    # Recent market events (sudden >=1% tick moves detected in the cache
+    # funnel). Appended only when events exist so quiet markets add nothing
+    # to the prompt.
+    events = price_cache.get_events(limit=5)
+    if events:
+        event_lines = "\n".join(
+            f"{datetime.fromtimestamp(e.timestamp, tz=timezone.utc):%H:%M:%S} UTC - {e.headline}"
+            for e in events
+        )
+        context += f"\nRecent market events:\n{event_lines}"
+
+    # P4 §1: market sentiment line — appended ONLY when the cache holds at
+    # least 2 tickers (sentiment_context_line returns None below the gate),
+    # so thin/empty caches keep the context byte-identical to pre-P4.
+    sentiment_line = sentiment_context_line(
+        compute_market_sentiment(price_cache), zh=zh
+    )
+    if sentiment_line is not None:
+        context += f"\n{sentiment_line}"
+
+    return context
+
+
+def _assemble_review_context(
+    conn: sqlite3.Connection,
+    price_cache: PriceCache,
+    user_id: str = "default",
+) -> tuple[str, int]:
+    """Build the daily-review context string for the M2.4 review prompt.
+
+    Gathers, for today's UTC date: executed trades (side/qty/price/commission/
+    realized P&L), rule firings (rules whose last_fired_at falls today, with
+    their descriptions), the current portfolio (cash, positions with
+    unrealized P&L, total value, lifetime realized P&L), day P&L per position
+    (qty x (price - prev_close) from the cache), and up to 5 of today's
+    market events.
+
+    Args:
+        conn: An open SQLite connection (caller manages lifecycle).
+        price_cache: Live price cache for current prices and prev_close.
+
+    Returns:
+        (context, trade_count) — the multi-line context string and the number
+        of trades executed today (the LLM_MOCK review interpolates the count).
+    """
+    now = datetime.now(timezone.utc)
+    today = now.strftime("%Y-%m-%d")
+
+    # Today's trades
+    trade_rows = conn.execute(
+        """
+        SELECT ticker, side, quantity, price, commission, realized_pnl
+        FROM trades
+        WHERE user_id = ? AND substr(executed_at, 1, 10) = ?
+        ORDER BY executed_at ASC, rowid ASC
+        """,
+        (user_id, today),
+    ).fetchall()
+    trade_lines = [
+        f"{t['side']} {t['quantity']:g} {t['ticker']} @ ${t['price']:.2f}"
+        f" | commission ${t['commission']:.2f}"
+        + (
+            f" | realized P&L ${t['realized_pnl']:+.2f}"
+            if t["realized_pnl"] is not None
+            else ""
+        )
+        for t in trade_rows
+    ]
+    trades_block = "\n".join(trade_lines) if trade_lines else "(no trades today)"
+
+    # Today's rule firings
+    rule_rows = conn.execute(
+        """
+        SELECT description, last_fired_at
+        FROM rules
+        WHERE user_id = ? AND last_fired_at IS NOT NULL
+              AND substr(last_fired_at, 1, 10) = ?
+        ORDER BY last_fired_at ASC
+        """,
+        (user_id, today),
+    ).fetchall()
+    rules_block = (
+        "\n".join(f"{r['description']} (fired {r['last_fired_at']})" for r in rule_rows)
+        if rule_rows
+        else "(no rules fired today)"
+    )
+
+    # Current portfolio: cash, positions with unrealized + day P&L, totals
+    user_row = conn.execute(
+        "SELECT cash_balance FROM users_profile WHERE id = ?", (user_id,)
+    ).fetchone()
+    cash: float = user_row["cash_balance"] if user_row else 0.0
+    realized_row = conn.execute(
+        "SELECT COALESCE(SUM(realized_pnl), 0.0) AS total FROM trades "
+        "WHERE user_id = ?",
+        (user_id,),
+    ).fetchone()
+    lifetime_realized = round(realized_row["total"] or 0.0, 2)
+
+    position_rows = conn.execute(
+        "SELECT ticker, quantity, avg_cost FROM positions WHERE user_id = ?",
+        (user_id,),
+    ).fetchall()
+    position_lines: list[str] = []
+    market_value = 0.0
+    for row in position_rows:
+        ticker: str = row["ticker"]
+        quantity: float = row["quantity"]
+        avg_cost: float = row["avg_cost"]
+        quote = price_cache.get(ticker)
+        current_price = quote.price if quote else 0.0
+        unrealized = (current_price - avg_cost) * quantity
+        # Day P&L: what the position gained/lost today vs the previous close.
+        day_pnl = quantity * (current_price - quote.prev_close) if quote else 0.0
+        market_value += quantity * current_price
+        position_lines.append(
+            f"{ticker} | qty {quantity:g} | avg {avg_cost:.2f} | cur {current_price:.2f}"
+            f" | unrealized {unrealized:+.2f} | day P&L {day_pnl:+.2f}"
+        )
+    positions_block = "\n".join(position_lines) if position_lines else "(no open positions)"
+    total = cash + market_value
+
+    # Today's market events (up to 5, newest first)
+    today_events = [
+        e
+        for e in price_cache.get_events()
+        if datetime.fromtimestamp(e.timestamp, tz=timezone.utc).strftime("%Y-%m-%d")
+        == today
+    ][:5]
+    events_block = (
+        "\n".join(e.headline for e in today_events)
+        if today_events
+        else "(no market events today)"
+    )
+
+    context = (
+        f"Date: {today} (UTC)\n"
+        f"Today's trades (side qty ticker @ price):\n{trades_block}\n"
+        f"Rules fired today:\n{rules_block}\n"
+        f"Cash: ${cash:.2f}\n"
+        f"Total portfolio value: ${total:.2f}\n"
+        f"Lifetime realized P&L: ${lifetime_realized:+.2f}\n"
+        f"Positions (ticker | qty | avg_cost | current | unrealized | day P&L):\n"
+        f"{positions_block}\n"
+        f"Today's market events:\n{events_block}"
+    )
+    return context, len(trade_rows)
+
 
 # ---------------------------------------------------------------------------
 # Router factory
 # ---------------------------------------------------------------------------
 
 
-def create_chat_router(price_cache: PriceCache, db_path: str) -> APIRouter:
+def create_chat_router(
+    price_cache: PriceCache,
+    db_path: str,
+    commission_bps: float = 0.0,
+    session_clock: SessionClock | None = None,
+    profile: MarketProfile | None = None,
+) -> APIRouter:
     """Factory: build the chat APIRouter with injected dependencies.
 
     Args:
         price_cache: Shared in-memory price cache populated by the market data source.
         db_path: Path to the SQLite database file.
+        commission_bps: Commission in basis points of notional applied to every
+            fill — chat-executed trades pay the same commission as manual ones
+            (FINALLY_COMMISSION_BPS, read once at app startup in main.py).
+        session_clock: Session clock (M3.1) — chat-executed market trades on
+            equities inherit the same "Market closed" rejection as manual
+            trades via the shared ``execute_trade_on_conn`` helper (returned
+            as a failed trade outcome, never an HTTP error).
+        profile: Active market profile (CN-2) — AI-executed trades, orders,
+            rules, and backtests obey the same 整手/涨跌停/T+1/fee mechanics as
+            the REST routes, threaded through the shared helpers. None/us is a
+            no-op.
 
     Returns:
         A configured FastAPI APIRouter ready to be registered with ``app.include_router``.
     """
     router = APIRouter(prefix="/api/chat", tags=["chat"])
+    # CN-3: select the AI's conversational language by the profile locale. With
+    # no profile or an 'en-US' locale the existing English prompts and English
+    # LLM_MOCK text are used byte-for-byte; only a 'zh-CN' locale switches to
+    # the Chinese prompts and the Chinese deterministic mock branches. The
+    # structured-output schema is unaffected — action keys and enums stay
+    # English in both languages.
+    is_zh = profile is not None and profile.locale == "zh-CN"
+    system_prompt = SYSTEM_PROMPT_ZH if is_zh else SYSTEM_PROMPT
+    review_system_prompt = REVIEW_SYSTEM_PROMPT_ZH if is_zh else REVIEW_SYSTEM_PROMPT
+    universe = profile.universe if profile is not None else None
+    market = profile.key if profile is not None else "us"  # daily_bars partition (D1)
+    # Mirror routes/backtest.py: AI-run backtests open the same account the
+    # REST route does — the active profile's seed cash (CN=¥100k), else the
+    # US $10,000. None/us keeps run_backtest's default value-for-value.
+    starting_cash = profile.seed_cash if profile is not None else STARTING_CASH
+    # P2 §7 LLM_MOCK strategy branch ticker: NVDA on the US/no-profile router,
+    # the first universe ticker on a named market (cn → 600519).
+    mock_strategy_ticker = (
+        universe.default_watchlist[0]
+        if is_zh and universe is not None and universe.default_watchlist
+        else "NVDA"
+    )
 
     @router.get("/")
-    async def get_chat_history(request: Request) -> dict:
-        """Return last 20 chat messages in ascending chronological order.
+    async def get_chat_history(
+        request: Request, kind: str | None = None, limit: str | None = None
+    ) -> dict:
+        """Return the last N chat messages in ascending chronological order.
 
         Query selects DESC then reverses so the response is ascending by created_at.
         The ``actions`` field is parsed from its stored JSON string to a dict (or None).
+        Every kind is returned ('chat' | 'brief' | 'review' | 'rule' |
+        'strategy') — the frontend labels non-conversation messages by their
+        ``kind``.
+
+        Query params (P1 §3.6 — defaults keep the pre-P1 behavior byte-for-byte):
+            kind: optional filter to one message kind ('chat' | 'brief' |
+                'review' | 'rule' | 'strategy'). Any other value returns HTTP
+                400 with ``{"error": "message"}``.
+            limit: maximum number of most-recent messages to return. Defaults
+                to 20 and is clamped to the range 1..200. Non-integer values
+                return HTTP 400 with ``{"error": "message"}``.
 
         Returns:
-            {"messages": [{"role", "content", "actions", "created_at"}, ...]}
+            {"messages": [{"role", "content", "actions", "kind", "created_at"}, ...]}
         """
+        if kind is not None and kind not in ("chat", "brief", "review", "rule", "strategy"):
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": "kind must be one of: chat, brief, review, rule, strategy"
+                },
+            )
+
+        if limit is None:
+            limit_value = 20
+        else:
+            try:
+                limit_value = int(limit)
+            except ValueError:
+                return JSONResponse(
+                    status_code=400, content={"error": "limit must be an integer"}
+                )
+        limit_value = max(1, min(200, limit_value))
+
+        user_id = get_current_user_id(request, db_path)
         conn = get_conn(db_path)
         try:
-            rows = conn.execute(
-                """
-                SELECT role, content, actions, created_at
+            query = """
+                SELECT role, content, actions, kind, created_at
                 FROM chat_messages
-                WHERE user_id = 'default'
-                ORDER BY created_at DESC
-                LIMIT 20
+                WHERE user_id = ?
                 """
-            ).fetchall()
+            params: list[object] = [user_id]
+            if kind is not None:
+                query += " AND kind = ?"
+                params.append(kind)
+            query += " ORDER BY created_at DESC LIMIT ?"
+            params.append(limit_value)
+            rows = conn.execute(query, params).fetchall()
             messages = list(reversed([
                 {
                     "role": row["role"],
                     "content": row["content"],
                     "actions": json.loads(row["actions"]) if row["actions"] else None,
+                    "kind": row["kind"],
                     "created_at": row["created_at"],
                 }
                 for row in rows
@@ -182,34 +772,69 @@ def create_chat_router(price_cache: PriceCache, db_path: str) -> APIRouter:
     async def chat(body: ChatRequest, request: Request) -> dict:
         """Process a chat message: call LLM (or mock), auto-execute actions, persist.
 
-        Returns structured JSON with the assistant message, trade outcomes, and
-        watchlist change outcomes. All trade/watchlist failures are returned as
-        outcome dicts (status=failed) — they do NOT raise HTTP errors.
+        Returns structured JSON with the assistant message, trade outcomes,
+        watchlist change outcomes, and — when the turn contained them —
+        advanced-order outcomes ("orders": full order JSON for placed/filled,
+        failed dict otherwise), rule outcomes ("rules":
+        {"status": "created", "rule": {...}} or failed dict), and backtest
+        outcomes ("backtests": compact {"status": "completed", ticker,
+        config, stats} — never curves/trades — or failed dict, M5), and
+        research outcomes ("research": ranked candidate batches with
+        strategy_id/run_id/score per candidate — D4 §2.2). Per-action
+        validation failures are returned as outcome dicts (status=failed) —
+        they do NOT raise HTTP errors and do not abort the remaining actions.
+
+        Ordering: watchlist changes are applied BEFORE trades, and each
+        successful "add" is registered with the live market source
+        immediately (add_ticker seeds the price cache) so a single turn like
+        "add PYPL and buy 5 shares" finds a price at trade time. Advanced
+        orders are placed AFTER trades, then standing rules are created,
+        then backtests run (stateless — they touch no tables). Market source
+        removals stay AFTER the commit so an in-flight turn cannot lose
+        prices and a rollback cannot orphan the source state.
+
+        Transaction boundary: all executed trades, placed orders (including
+        immediate marketable fills), created rules, applied watchlist changes,
+        and both chat_messages rows are committed atomically in ONE commit. An
+        unexpected error anywhere before that commit rolls back everything —
+        no half-applied chat turns — and any pre-commit market source adds are
+        reconciled back to match the DB (best-effort). After the commit, a
+        portfolio snapshot is recorded (own commit) and watchlist removals are
+        synced to the live market data source (best-effort; DB is the source
+        of truth).
 
         LLM errors (when LLM_MOCK=false) return HTTP 500 with
         ``{"error": "LLM unavailable"}``.
         """
+        user_id = get_current_user_id(request, db_path)
         conn = get_conn(db_path)
+        # Tickers registered with the market source before the commit this
+        # turn — used to reconcile the source if the transaction rolls back.
+        source_adds: list[str] = []
         try:
-            # Step 1: Load conversation history (D-04)
+            # Step 1: Load conversation history (D-04). Assistant-initiated
+            # rows (event briefs, daily reviews, rule activations — M2.3/M2.4)
+            # are excluded from the LLM's conversation window: they are
+            # notifications, not turns the user replied to, and would drown
+            # the recent history. GET /api/chat/ still returns every kind.
             rows = conn.execute(
                 "SELECT role, content FROM chat_messages "
-                "WHERE user_id = 'default' ORDER BY created_at DESC LIMIT 20"
+                "WHERE user_id = ? "
+                "AND kind NOT IN ('brief', 'rule', 'review', 'strategy') "
+                "ORDER BY created_at DESC LIMIT 20",
+                (user_id,),
             ).fetchall()
             history = list(reversed(rows))
 
-            # Step 2: Assemble portfolio context (D-01/D-02)
-            context = _assemble_portfolio_context(conn, price_cache)
+            # Step 2: Assemble portfolio context (D-01/D-02; P4 §1 threads the
+            # locale so the sentiment line is Chinese on a zh-CN profile)
+            context = _assemble_portfolio_context(conn, price_cache, user_id, zh=is_zh)
 
             # Step 3: Build messages list for LLM
             messages: list[dict] = [
                 {
                     "role": "system",
-                    "content": (
-                        "You are FinAlly, an AI trading assistant. Be concise and data-driven. "
-                        "Execute trades when asked. Always respond with valid structured JSON.\n\n"
-                        f"Current portfolio:\n{context}"
-                    ),
+                    "content": f"{system_prompt}\n\nCurrent portfolio:\n{context}",
                 }
             ]
             messages.extend(
@@ -219,14 +844,227 @@ def create_chat_router(price_cache: PriceCache, db_path: str) -> APIRouter:
 
             # Step 4: Get LLM response — mock path (D-06/D-07) or real LiteLLM call
             if os.getenv("LLM_MOCK", "false").lower() == "true":
-                # Construct deterministic response; fall through to auto-exec (D-07)
-                parsed = ChatResponse(
-                    message=(
-                        "I've added PYPL to your watchlist and bought 5 shares of AAPL for you."
+                # Construct deterministic responses; fall through to auto-exec
+                # (D-07). On a 'zh-CN' locale (CN-3) the Chinese mock branch
+                # translates ONLY the conversational message — the action
+                # arrays (tickers, sides, quantities) are byte-identical to the
+                # US mocks below, so downstream execution is unchanged and the
+                # profile still governs it (e.g. the buy-5-AAPL non-lot order is
+                # rejected under the CN 整手 rule). The '回测'/'backtest' keyword
+                # both route to the backtest branch. With no/US locale the
+                # English payload below is byte-identical to today (the existing
+                # E2E command depends on it).
+                #
+                # P2 §7: a message containing 'strategy'/'策略' WITHOUT any
+                # backtest keyword takes the deterministic strategy branch
+                # (create ma_golden_cross + a persisted seed-4242 20-day
+                # backtest). Messages with a backtest keyword keep routing to
+                # the M5 backtest branch, and the default branch is untouched
+                # — both are pinned byte-for-byte by the chat-mock goldens.
+                message_lower = body.message.lower()
+                wants_strategy = (
+                    "strategy" in message_lower or "策略" in body.message
+                ) and not ("backtest" in message_lower or "回测" in body.message)
+                # D4 §2.4: 'research'/'研究' routes to the deterministic
+                # research branch BEFORE the strategy check in both chains —
+                # "research ... strategies" phrasings must reach it. The four
+                # golden messages ("hello there" / "你好" / "backtest ..." /
+                # "帮我回测…") contain neither token, so the pinned
+                # default/backtest mocks stay byte-identical.
+                wants_research = "research" in message_lower or "研究" in body.message
+                mock_strategy_actions = [
+                    StrategyInstruction(
+                        action="create",
+                        name="MA Golden Cross",
+                        ticker=mock_strategy_ticker,
+                        template="ma_golden_cross",
                     ),
-                    trades=[TradeInstruction(ticker="AAPL", side="buy", quantity=5)],
-                    watchlist_changes=[WatchlistChange(ticker="PYPL", action="add")],
-                )
+                    StrategyInstruction(
+                        action="backtest",
+                        strategy="MA Golden Cross",
+                        days=20,
+                        runs=1,
+                        seed=4242,
+                    ),
+                ]
+                if is_zh:
+                    # D4 §2.4: deterministic zh research batch — 600519 (in
+                    # the committed CN sample bars), 3 template candidates
+                    # with lot-safe cash_pct sizing, 120 trading days.
+                    if wants_research:
+                        parsed = ChatResearchTurnResponse(
+                            message=(
+                                "[模拟] 研究完成：已在存储的日线历史上回测 "
+                                "600519 的 3 个候选策略，并按稳健分排名。"
+                                "请在对比卡上查看结果，由你决定是否部署。"
+                            ),
+                            research=[
+                                ResearchInstruction(
+                                    ticker="600519",
+                                    days=120,
+                                    candidates=[
+                                        ResearchCandidate(
+                                            name="均线金叉",
+                                            hypothesis=(
+                                                "趋势跟随：5 日均线上穿 20 日"
+                                                "均线时买入，吃中期趋势。"
+                                            ),
+                                            template="ma_golden_cross",
+                                            sizing={"mode": "cash_pct", "pct": 20},
+                                        ),
+                                        ResearchCandidate(
+                                            name="RSI 超跌反弹",
+                                            hypothesis=(
+                                                "均值回归：14 日 RSI 跌破 30 "
+                                                "的超跌区间时低吸。"
+                                            ),
+                                            template="rsi_rebound",
+                                            sizing={"mode": "cash_pct", "pct": 20},
+                                        ),
+                                        ResearchCandidate(
+                                            name="动量突破",
+                                            hypothesis=(
+                                                "动量追涨：价格突破近 60 分钟"
+                                                "高点时顺势进场。"
+                                            ),
+                                            template="momentum_breakout",
+                                            sizing={"mode": "cash_pct", "pct": 20},
+                                        ),
+                                    ],
+                                )
+                            ],
+                        )
+                    elif wants_strategy:
+                        parsed = ChatResearchTurnResponse(
+                            message=(
+                                f"[模拟] 已创建 {mock_strategy_ticker} 的均线金叉"
+                                "策略（草稿），并将 20 日回测结果存入回测库。"
+                                "部署前请先在策略页查看回测表现。"
+                            ),
+                            strategies=mock_strategy_actions,
+                        )
+                    elif "backtest" in body.message.lower() or "回测" in body.message:
+                        parsed = ChatResearchTurnResponse(
+                            message=(
+                                "[模拟] 回测完成：已在 20 个模拟交易日上测试 NVDA "
+                                "逢跌买入策略。"
+                            ),
+                            backtests=[
+                                BacktestInstruction(
+                                    ticker="NVDA",
+                                    trigger_type="day_change_pct_below",
+                                    threshold=-3,
+                                    quantity=5,
+                                    take_profit_pct=5,
+                                    stop_loss_pct=3,
+                                    days=20,
+                                    runs=1,
+                                )
+                            ],
+                        )
+                    else:
+                        parsed = ChatResearchTurnResponse(
+                            message="已将 PYPL 加入你的自选，并为你买入 5 股 AAPL。",
+                            trades=[
+                                TradeInstruction(ticker="AAPL", side="buy", quantity=5)
+                            ],
+                            watchlist_changes=[
+                                WatchlistChange(ticker="PYPL", action="add")
+                            ],
+                        )
+                # D4 §2.4: deterministic en research batch — AAPL (in the
+                # committed US sample bars), the same 3 template candidates
+                # as the zh branch with lot-safe cash_pct sizing.
+                elif wants_research:
+                    parsed = ChatResearchTurnResponse(
+                        message=(
+                            "[MOCK] Research complete: 3 candidate strategies "
+                            "for AAPL backtested on stored daily history and "
+                            "ranked by robustness score. Review the comparison "
+                            "card and deploy the one you like."
+                        ),
+                        research=[
+                            ResearchInstruction(
+                                ticker="AAPL",
+                                days=120,
+                                candidates=[
+                                    ResearchCandidate(
+                                        name="Golden Cross",
+                                        hypothesis=(
+                                            "Trend following: buy when the "
+                                            "5-day MA crosses above the "
+                                            "20-day MA."
+                                        ),
+                                        template="ma_golden_cross",
+                                        sizing={"mode": "cash_pct", "pct": 20},
+                                    ),
+                                    ResearchCandidate(
+                                        name="RSI Rebound",
+                                        hypothesis=(
+                                            "Mean reversion: buy oversold "
+                                            "dips when the 14-day RSI drops "
+                                            "below 30."
+                                        ),
+                                        template="rsi_rebound",
+                                        sizing={"mode": "cash_pct", "pct": 20},
+                                    ),
+                                    ResearchCandidate(
+                                        name="Momentum Breakout",
+                                        hypothesis=(
+                                            "Breakout: enter when price "
+                                            "clears the recent 60-minute "
+                                            "window high."
+                                        ),
+                                        template="momentum_breakout",
+                                        sizing={"mode": "cash_pct", "pct": 20},
+                                    ),
+                                ],
+                            )
+                        ],
+                    )
+                # P2 §7: 'strategy' (without 'backtest') → the deterministic
+                # strategy branch mirroring the zh one above (same actions,
+                # NVDA ticker).
+                elif wants_strategy:
+                    parsed = ChatResearchTurnResponse(
+                        message=(
+                            "[MOCK] Created the MA Golden Cross strategy on "
+                            f"{mock_strategy_ticker} as a draft and saved a "
+                            "20-day backtest to the run library. Review it on "
+                            "the strategy page before deploying."
+                        ),
+                        strategies=mock_strategy_actions,
+                    )
+                # Messages mentioning "backtest" get the M5 backtest mock;
+                # everything else keeps the original PYPL/AAPL payload
+                # byte-identical for the E2E suite.
+                elif "backtest" in body.message.lower():
+                    parsed = ChatResearchTurnResponse(
+                        message=(
+                            "[MOCK] Backtest complete: NVDA dip-buy strategy "
+                            "tested over 20 simulated days."
+                        ),
+                        backtests=[
+                            BacktestInstruction(
+                                ticker="NVDA",
+                                trigger_type="day_change_pct_below",
+                                threshold=-3,
+                                quantity=5,
+                                take_profit_pct=5,
+                                stop_loss_pct=3,
+                                days=20,
+                                runs=1,
+                            )
+                        ],
+                    )
+                else:
+                    parsed = ChatResearchTurnResponse(
+                        message=(
+                            "I've added PYPL to your watchlist and bought 5 shares of AAPL for you."
+                        ),
+                        trades=[TradeInstruction(ticker="AAPL", side="buy", quantity=5)],
+                        watchlist_changes=[WatchlistChange(ticker="PYPL", action="add")],
+                    )
             else:
                 from litellm import completion  # lazy import — never reached when mocked
 
@@ -235,11 +1073,11 @@ def create_chat_router(price_cache: PriceCache, db_path: str) -> APIRouter:
                         completion,
                         model=MODEL,
                         messages=messages,
-                        response_format=ChatResponse,
+                        response_format=ChatResearchTurnResponse,
                         reasoning_effort="low",
                         extra_body=EXTRA_BODY,
                     )
-                    parsed = ChatResponse.model_validate_json(
+                    parsed = ChatResearchTurnResponse.model_validate_json(
                         response.choices[0].message.content
                     )
                 except Exception:
@@ -248,7 +1086,28 @@ def create_chat_router(price_cache: PriceCache, db_path: str) -> APIRouter:
                         status_code=500, content={"error": "LLM unavailable"}
                     )
 
-            # Step 5: Auto-execute trades (T-02-05/T-02-06 — ticker normalized in helper)
+            # Step 5: Auto-execute watchlist changes FIRST (DB writes join the
+            # single transaction committed in Step 7). Each successful "add"
+            # is registered with the live market source immediately —
+            # add_ticker seeds the price cache, so a same-turn trade on a
+            # brand-new ticker (e.g. "add PYPL and buy 5 shares") finds a
+            # price in Step 6. Market source REMOVALS are deferred to Step 9
+            # (post-commit) so an in-flight turn keeps its prices and a
+            # rollback cannot orphan the source state.
+            watch_outcomes: list[dict] = []
+            for w in parsed.watchlist_changes:
+                outcome = apply_watchlist_change_on_conn(
+                    conn, w.ticker, w.action, user_id=user_id
+                )
+                watch_outcomes.append(outcome)
+                if outcome["status"] == "added":
+                    source_adds.append(outcome["ticker"])
+                    await sync_market_source(request, outcome["ticker"], "add")
+
+            # Step 6: Auto-execute trades (T-02-05/T-02-06 — ticker normalized in
+            # helper). Helpers do NOT commit — everything joins one transaction
+            # committed in Step 7. Per-trade validation failures return outcome
+            # dicts and never abort the batch.
             trade_outcomes = [
                 execute_trade_on_conn(
                     conn,
@@ -256,41 +1115,514 @@ def create_chat_router(price_cache: PriceCache, db_path: str) -> APIRouter:
                     t.ticker.strip().upper(),
                     t.side.lower(),
                     t.quantity,
+                    commission_bps=commission_bps,
+                    session_clock=session_clock,
+                    user_id=user_id,
+                    profile=profile,
                 )
                 for t in parsed.trades
             ]
 
-            # Step 6: Auto-execute watchlist changes (DB-only per Pitfall 6)
-            watch_outcomes = [
-                apply_watchlist_change_on_conn(conn, w.ticker, w.action)
-                for w in parsed.watchlist_changes
+            # Step 6b (M2.1): Place advanced orders AFTER trades, on the same
+            # shared connection/transaction — order rows (and any immediate
+            # marketable fill + its snapshot) commit atomically with the rest
+            # of the turn in Step 7. Per-order validation failures return
+            # {"status": "failed", ...} dicts and never abort the batch;
+            # placed/filled orders yield their full public order JSON.
+            order_outcomes = [
+                place_order_on_conn(
+                    conn,
+                    price_cache,
+                    ticker=o.ticker,
+                    side=o.side,
+                    quantity=o.quantity,
+                    kind=o.kind,
+                    limit_price=o.limit_price,
+                    stop_price=o.stop_price,
+                    time_in_force=o.time_in_force,
+                    commission_bps=commission_bps,
+                    user_id=user_id,
+                    profile=profile,
+                )
+                for o in parsed.orders
             ]
+
+            # Step 6c (M2.2): Create standing rules on the shared connection —
+            # same single-transaction semantics and non-fatal per-rule
+            # failures as trades and orders.
+            rule_outcomes = [
+                create_rule_on_conn(
+                    conn,
+                    price_cache,
+                    ticker=r.ticker,
+                    trigger_type=r.trigger_type,
+                    threshold=r.threshold,
+                    side=r.side,
+                    quantity=r.quantity,
+                    description=r.description,
+                    user_id=user_id,
+                    profile=profile,
+                )
+                for r in parsed.rules
+            ]
+
+            # Step 6d (M5): Run strategy backtests — stateless compute, so
+            # nothing joins the transaction. Validation shares
+            # normalize_backtest_config with POST /api/backtest (identical
+            # error messages) and per-instruction failures never abort the
+            # batch. Outcomes stay compact: config + stats only — curves and
+            # trades are never stored in chat actions. The engine runs off
+            # the event loop like the LLM call itself.
+            backtest_outcomes: list[dict] = []
+            for b in parsed.backtests:
+                normalized = normalize_backtest_config(
+                    price_cache,
+                    ticker=b.ticker,
+                    trigger_type=b.trigger_type,
+                    threshold=b.threshold,
+                    quantity=b.quantity,
+                    take_profit_pct=b.take_profit_pct,
+                    stop_loss_pct=b.stop_loss_pct,
+                    days=b.days,
+                    runs=b.runs,
+                    universe=universe,
+                    profile=profile,
+                    source=b.source,
+                )
+                if normalized["status"] == "failed":
+                    backtest_outcomes.append(normalized)
+                    continue
+                # D1 §3: history mode reads the stored daily-bar window on
+                # the turn's connection (read-only — nothing joins the
+                # transaction); a short window fails just this instruction.
+                if normalized["config"].get("data_source") == "history":
+                    error = attach_history_bars(
+                        normalized["config"], conn, market=market
+                    )
+                    if error is not None:
+                        backtest_outcomes.append(
+                            {
+                                "status": "failed",
+                                "ticker": normalized["config"]["ticker"],
+                                "error": error,
+                            }
+                        )
+                        continue
+                result = await asyncio.to_thread(
+                    run_backtest,
+                    normalized["config"],
+                    commission_bps=commission_bps,
+                    starting_cash=starting_cash,
+                    profile=profile,
+                )
+                backtest_outcomes.append(
+                    {
+                        "status": "completed",
+                        "ticker": result["config"]["ticker"],
+                        "config": result["config"],
+                        "stats": result["stats"],
+                    }
+                )
+
+            # Step 6e (P2 §7): Execute strategy actions on the shared
+            # connection/transaction — created drafts, state transitions, and
+            # persisted backtest runs all commit atomically with the rest of
+            # the turn in Step 7. Per-item failures return
+            # {"status": "failed", ...} outcomes and never abort the batch
+            # (the existing per-action semantics). 'backtest' outcomes stay
+            # compact — stats + the persisted run's id, never curves.
+            strategy_outcomes: list[dict] = []
+            for s in parsed.strategies:
+                action = (s.action or "").strip().lower()
+                if action == "create":
+                    template_key = s.template.strip().lower() if s.template else None
+                    template_cfg = (
+                        TEMPLATES_BY_KEY.get(template_key) if template_key else None
+                    )
+                    if template_key and template_cfg is None:
+                        strategy_outcomes.append(
+                            {
+                                "status": "failed",
+                                "action": "create",
+                                "ticker": (s.ticker or "").strip().upper(),
+                                "error": f"Unknown template '{s.template}'",
+                            }
+                        )
+                        continue
+                    # Template supplies the config; explicit fields override.
+                    entry = s.entry if s.entry is not None else (
+                        template_cfg["entry"] if template_cfg else None
+                    )
+                    s_exits = s.exits if s.exits is not None else (
+                        template_cfg["exits"] if template_cfg else None
+                    )
+                    sizing = s.sizing if s.sizing is not None else (
+                        template_cfg["sizing"] if template_cfg else None
+                    )
+                    name = (s.name or "").strip() or (
+                        template_key.replace("_", " ").title()
+                        if template_key
+                        else f"{(s.ticker or '').strip().upper()} strategy"
+                    )
+                    result = create_strategy_on_conn(
+                        conn,
+                        price_cache,
+                        name=name,
+                        ticker=s.ticker or "",
+                        entry=entry,
+                        exits=s_exits,
+                        sizing=sizing,
+                        template=template_key,
+                        user_id=user_id,
+                        universe=universe,
+                        profile=profile,
+                    )
+                    if result["status"] == "failed":
+                        strategy_outcomes.append(
+                            {
+                                "status": "failed",
+                                "action": "create",
+                                "name": name,
+                                "ticker": result["ticker"],
+                                "error": result["error"],
+                            }
+                        )
+                    else:
+                        created = result["strategy"]
+                        strategy_outcomes.append(
+                            {
+                                "status": "created",
+                                "action": "create",
+                                "strategy_id": created["id"],
+                                "name": created["name"],
+                                "ticker": created["ticker"],
+                            }
+                        )
+                    continue
+
+                if action not in ("backtest", "deploy", "pause"):
+                    strategy_outcomes.append(
+                        {
+                            "status": "failed",
+                            "action": action,
+                            "error": "action must be one of 'create', "
+                            "'backtest', 'deploy', 'pause'",
+                        }
+                    )
+                    continue
+
+                # backtest/deploy/pause reference an existing strategy by id
+                # or case-insensitive name (newest name-match wins) — a
+                # same-turn 'create' is visible here (same connection).
+                reference = (s.strategy or "").strip() or (s.name or "").strip()
+                row = (
+                    resolve_strategy_on_conn(conn, user_id, reference)
+                    if reference
+                    else None
+                )
+                if row is None:
+                    strategy_outcomes.append(
+                        {
+                            "status": "failed",
+                            "action": action,
+                            "name": reference,
+                            "error": "Strategy not found",
+                        }
+                    )
+                    continue
+
+                if action == "backtest":
+                    normalized = normalize_strategy_backtest_config(
+                        price_cache,
+                        strategy_row=row,
+                        days=s.days,
+                        runs=s.runs,
+                        seed=s.seed,
+                        universe=universe,
+                        profile=profile,
+                        source=s.source,
+                    )
+                    # D1 §3: history mode loads the stored window (read-only
+                    # on the shared connection) before the engine runs.
+                    if (
+                        normalized["status"] == "ok"
+                        and normalized["config"].get("data_source") == "history"
+                    ):
+                        error = attach_history_bars(
+                            normalized["config"], conn, market=market
+                        )
+                        if error is not None:
+                            normalized = {
+                                "status": "failed",
+                                "ticker": normalized["config"]["ticker"],
+                                "error": error,
+                            }
+                    if normalized["status"] == "failed":
+                        strategy_outcomes.append(
+                            {
+                                "status": "failed",
+                                "action": "backtest",
+                                "strategy_id": row["id"],
+                                "name": row["name"],
+                                "ticker": normalized["ticker"],
+                                "error": normalized["error"],
+                            }
+                        )
+                        continue
+                    result = await asyncio.to_thread(
+                        run_backtest,
+                        normalized["config"],
+                        commission_bps=commission_bps,
+                        starting_cash=starting_cash,
+                        profile=profile,
+                    )
+                    run = insert_backtest_run_on_conn(
+                        conn,
+                        user_id=user_id,
+                        strategy_id=row["id"],
+                        label=None,
+                        result=result,
+                    )
+                    strategy_outcomes.append(
+                        {
+                            "status": "completed",
+                            "action": "backtest",
+                            "strategy_id": row["id"],
+                            "name": row["name"],
+                            "ticker": result["config"]["ticker"],
+                            "run_id": run["id"],
+                            "stats": result["stats"],
+                        }
+                    )
+                    continue
+
+                # deploy / pause — the §6 state machine (deploy without any
+                # exit fails here exactly like PATCH would 400).
+                target = "live" if action == "deploy" else "paused"
+                error = transition_strategy_on_conn(conn, row, target)
+                if error is not None:
+                    strategy_outcomes.append(
+                        {
+                            "status": "failed",
+                            "action": action,
+                            "strategy_id": row["id"],
+                            "name": row["name"],
+                            "ticker": row["ticker"],
+                            "error": error,
+                        }
+                    )
+                else:
+                    strategy_outcomes.append(
+                        {
+                            "status": "deployed" if action == "deploy" else "paused",
+                            "action": action,
+                            "strategy_id": row["id"],
+                            "name": row["name"],
+                            "ticker": row["ticker"],
+                        }
+                    )
+
+            # Step 6f (D4 §2.2): Run research batches — each instruction
+            # backtests 2-4 candidate strategies on stored daily history,
+            # persists the successes as drafts + Run Library rows on the
+            # shared connection, and ranks them. The handler never commits
+            # (everything joins the single Step 7 commit) and each
+            # instruction fails independently — the existing per-action
+            # isolation. Sources for universe/profile/commission/cash/market
+            # are exactly the strategies-backtest step's. The whole batch
+            # runs off the event loop like the engine calls above; the
+            # shared connection is safe there (check_same_thread=False) and
+            # never used concurrently — the request awaits the worker.
+            research_outcomes: list[dict] = []
+            for r in parsed.research:
+                outcome = await asyncio.to_thread(
+                    run_research_on_conn,
+                    conn,
+                    price_cache,
+                    ticker=r.ticker,
+                    days=r.days,
+                    candidates=[c.model_dump() for c in r.candidates],
+                    user_id=user_id,
+                    universe=universe,
+                    profile=profile,
+                    market=market,
+                    commission_bps=commission_bps,
+                    starting_cash=starting_cash,
+                )
+                research_outcomes.append(outcome)
 
             # Step 7: Persist both messages (T-02-12 — parameterized SQL)
             # Separate timestamps guarantee deterministic ORDER BY created_at ordering
             # even when both rows are written in the same request (WR-02).
+            # The "orders"/"rules"/"backtests" keys are appended only when
+            # the turn contained such instructions, keeping the default
+            # LLM_MOCK response (no orders/rules/backtests) byte-identical
+            # for the E2E suite.
             actions = {"trades": trade_outcomes, "watchlist_changes": watch_outcomes}
+            if order_outcomes:
+                actions["orders"] = order_outcomes
+            if rule_outcomes:
+                actions["rules"] = rule_outcomes
+            if backtest_outcomes:
+                actions["backtests"] = backtest_outcomes
+            if strategy_outcomes:
+                actions["strategies"] = strategy_outcomes
+            if research_outcomes:
+                actions["research"] = research_outcomes
             user_ts = datetime.now(timezone.utc).isoformat()
             conn.execute(
-                "INSERT INTO chat_messages (id, user_id, role, content, actions, created_at) "
-                "VALUES (?, 'default', 'user', ?, NULL, ?)",
-                (str(uuid.uuid4()), body.message, user_ts),
+                "INSERT INTO chat_messages (id, user_id, role, content, actions, kind, created_at) "
+                "VALUES (?, ?, 'user', ?, NULL, 'chat', ?)",
+                (str(uuid.uuid4()), user_id, body.message, user_ts),
             )
             asst_ts = datetime.now(timezone.utc).isoformat()
             conn.execute(
-                "INSERT INTO chat_messages (id, user_id, role, content, actions, created_at) "
-                "VALUES (?, 'default', 'assistant', ?, ?, ?)",
-                (str(uuid.uuid4()), parsed.message, json.dumps(actions), asst_ts),
+                "INSERT INTO chat_messages (id, user_id, role, content, actions, kind, created_at) "
+                "VALUES (?, ?, 'assistant', ?, ?, 'chat', ?)",
+                (str(uuid.uuid4()), user_id, parsed.message, json.dumps(actions), asst_ts),
             )
+            # Single atomic commit: all trades + watchlist changes + both
+            # chat messages succeed or fail together.
             conn.commit()
 
-            # Step 8: Return structured response
-            return {
+            # Step 8: Record a portfolio snapshot if any trade executed
+            # (spec §7: snapshot immediately after trade execution). Runs after
+            # the main commit; best-effort — a snapshot failure must not fail
+            # the already-committed chat turn.
+            if any(t["status"] == "executed" for t in trade_outcomes):
+                try:
+                    _record_snapshot(conn, price_cache, user_id)
+                    conn.commit()
+                except Exception:
+                    logger.exception("Post-trade snapshot failed (chat turn already committed)")
+
+            # Step 9: Sync watchlist REMOVALS to the live market data source
+            # so removed tickers stop simulating/streaming — but only when NO
+            # user still watches the ticker (M4: the source tracks the union
+            # of all users' watchlists). Adds were already synced in Step 5
+            # (pre-trade). Runs after the commit — DB is the source of truth
+            # and the sync is best-effort (failures logged inside the helper).
+            for outcome in watch_outcomes:
+                if outcome["status"] == "removed" and not ticker_watched_by_anyone(
+                    conn, outcome["ticker"]
+                ):
+                    await sync_market_source(request, outcome["ticker"], "remove")
+
+            # Step 10: Return structured response (mirrors the stored actions:
+            # "orders"/"rules"/"backtests" keys appear only when the turn
+            # contained them, keeping the default LLM_MOCK payload
+            # byte-identical for E2E).
+            response_payload = {
                 "message": parsed.message,
                 "trades": trade_outcomes,
                 "watchlist_changes": watch_outcomes,
             }
+            if order_outcomes:
+                response_payload["orders"] = order_outcomes
+            if rule_outcomes:
+                response_payload["rules"] = rule_outcomes
+            if backtest_outcomes:
+                response_payload["backtests"] = backtest_outcomes
+            if strategy_outcomes:
+                response_payload["strategies"] = strategy_outcomes
+            if research_outcomes:
+                response_payload["research"] = research_outcomes
+            return response_payload
 
+        except Exception:
+            conn.rollback()
+            # Best-effort reconcile: successful adds were registered with the
+            # market source BEFORE the commit (Step 5). After a rollback the
+            # DB may no longer contain those tickers — remove any such ticker
+            # from the source so it matches the DB again. Tickers still in
+            # ANY user's watchlist (idempotent re-adds of already-watched
+            # tickers, or tickers other users watch) keep streaming.
+            for added_ticker in source_adds:
+                try:
+                    if not ticker_watched_by_anyone(conn, added_ticker):
+                        await sync_market_source(request, added_ticker, "remove")
+                except Exception:
+                    logger.exception(
+                        "Market source reconcile failed for %s after rollback",
+                        added_ticker,
+                    )
+            raise
+        finally:
+            conn.close()
+
+    @router.post("/review")
+    async def daily_review(request: Request) -> dict:
+        """Generate the daily AI review on demand (M2.4). No request body.
+
+        Assembles today's activity (trades, rule firings, portfolio state,
+        day P&L per position, market events) and asks the LLM for a concise
+        plain-text review. The review is stored as an assistant chat_messages
+        row with kind='review' and actions NULL — it appears in GET /api/chat/
+        history but never feeds back into the chat LLM's conversation window.
+
+        Returns:
+            200 ``{"message": "<text>", "kind": "review"}`` on success.
+            500 ``{"error": "LLM unavailable"}`` on any LLM failure — nothing
+            is stored in that case.
+
+        When ``LLM_MOCK=true`` a deterministic review with the real trade
+        count interpolated is returned — no network call.
+        """
+        user_id = get_current_user_id(request, db_path)
+        conn = get_conn(db_path)
+        try:
+            context, trade_count = _assemble_review_context(conn, price_cache, user_id)
+
+            if os.getenv("LLM_MOCK", "false").lower() == "true":
+                # CN-3: Chinese deterministic review on a 'zh-CN' locale; the
+                # English mock stays byte-identical otherwise.
+                if is_zh:
+                    text = (
+                        f"[模拟复盘] 你今天进行了 {trade_count} 笔交易。请在下一个"
+                        "交易时段开始前检视你的持仓与风险。"
+                    )
+                else:
+                    text = (
+                        f"[MOCK REVIEW] You made {trade_count} trades today. "
+                        "Review your positions and risk before the next session."
+                    )
+            else:
+                from litellm import completion  # lazy import — never reached when mocked
+
+                messages = [
+                    {"role": "system", "content": review_system_prompt},
+                    {
+                        "role": "user",
+                        "content": f"Write my daily review.\n\n{context}",
+                    },
+                ]
+                try:
+                    response = await asyncio.to_thread(
+                        completion,
+                        model=MODEL,
+                        messages=messages,
+                        reasoning_effort="low",
+                        extra_body=EXTRA_BODY,
+                    )
+                    text = (response.choices[0].message.content or "").strip()
+                except Exception:
+                    logger.exception("Daily review LLM call failed")
+                    return JSONResponse(
+                        status_code=500, content={"error": "LLM unavailable"}
+                    )
+                if not text:
+                    logger.error("Daily review LLM returned empty content")
+                    return JSONResponse(
+                        status_code=500, content={"error": "LLM unavailable"}
+                    )
+
+            conn.execute(
+                "INSERT INTO chat_messages (id, user_id, role, content, actions, kind, created_at) "
+                "VALUES (?, ?, 'assistant', ?, NULL, 'review', ?)",
+                (str(uuid.uuid4()), user_id, text, datetime.now(timezone.utc).isoformat()),
+            )
+            conn.commit()
+            return {"message": text, "kind": "review"}
         except Exception:
             conn.rollback()
             raise

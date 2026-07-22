@@ -16,10 +16,132 @@
  *   Labels:          text-xs / font-semibold (label size, 12px / weight 600)
  * Both numeric spans use tabular-nums to prevent layout shift on digit changes.
  */
+import { useState } from 'react';
 import useSWR from 'swr';
+import Link from 'next/link';
+// next/compat/router (NOT next/router): returns null instead of throwing when
+// no RouterContext is mounted — jest renders <Header/> bare (P1 invariant).
+import { useRouter } from 'next/compat/router';
 import { usePriceStore } from '@/stores/priceStore';
-import type { PortfolioResponse } from '@/types/market';
+import type { PortfolioResponse, AuthMeResponse } from '@/types/market';
 import { fetcher } from '@/lib/fetcher';
+import { hardReload } from '@/lib/reload';
+import { useMarketProfile } from '@/lib/marketProfile';
+import { useT } from '@/lib/i18n';
+import { formatMoney } from '@/lib/format';
+
+// M4.1 — name-only identity chip. Anonymous acts as the Guest ('default')
+// user; signing in/out reloads so every SWR key refetches under the new cookie.
+function AuthChip() {
+  const t = useT();
+  const { data } = useSWR<AuthMeResponse>('/api/auth/me', fetcher);
+  const [editing, setEditing] = useState(false);
+  const [name, setName] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [pending, setPending] = useState(false);
+
+  const user = data?.user;
+  const isGuest = !user || user.id === 'default';
+
+  const login = async () => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    setPending(true);
+    setError(null);
+    try {
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: trimmed }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body?.error ?? t('header.signInFailedStatus', { status: res.status }));
+      }
+      hardReload();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : t('header.signInFailed'));
+      setPending(false);
+    }
+  };
+
+  const logout = async () => {
+    setPending(true);
+    try {
+      await fetch('/api/auth/logout', { method: 'POST' });
+    } finally {
+      hardReload();
+    }
+  };
+
+  if (!isGuest) {
+    return (
+      <span className="flex items-center gap-2 text-xs">
+        <span data-testid="auth-user" className="text-terminal-text font-semibold">
+          {user!.name}
+        </span>
+        <button
+          type="button"
+          data-testid="auth-logout"
+          onClick={() => void logout()}
+          disabled={pending}
+          className="text-terminal-muted hover:text-terminal-down text-[10px] font-semibold uppercase tracking-wider disabled:opacity-50"
+        >
+          {t('header.signOut')}
+        </button>
+      </span>
+    );
+  }
+
+  if (!editing) {
+    return (
+      <button
+        type="button"
+        data-testid="auth-signin"
+        onClick={() => setEditing(true)}
+        className="text-[10px] font-semibold uppercase tracking-wider text-terminal-muted hover:text-terminal-accent transition-colors"
+      >
+        {t('header.guestSignIn')}
+      </button>
+    );
+  }
+
+  return (
+    <span className="flex items-center gap-1">
+      <input
+        type="text"
+        data-testid="auth-name-input"
+        aria-label={t('header.traderNameAria')}
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') void login();
+          if (e.key === 'Escape') setEditing(false);
+        }}
+        placeholder={t('header.traderNamePlaceholder')}
+        maxLength={24}
+        disabled={pending}
+        autoFocus
+        className="w-28 px-2 py-0.5 text-xs font-mono bg-terminal-bg border border-terminal-border text-terminal-text rounded focus:outline-none focus:border-terminal-blue disabled:opacity-50"
+      />
+      <button
+        type="button"
+        data-testid="auth-submit"
+        onClick={() => void login()}
+        disabled={pending || !name.trim()}
+        className="px-2 py-0.5 rounded text-[10px] font-semibold text-white disabled:opacity-50"
+        style={{ backgroundColor: '#753991' }}
+      >
+        {t('header.go')}
+      </button>
+      {error && (
+        <span data-testid="auth-error" className="text-[10px] text-terminal-down">
+          {error}
+        </span>
+      )}
+    </span>
+  );
+}
 
 // Dot color map — amber for reconnecting so accent yellow stays reserved for row selection (UI-SPEC)
 const DOT_COLORS: Record<'connected' | 'reconnecting' | 'disconnected', string> = {
@@ -28,51 +150,181 @@ const DOT_COLORS: Record<'connected' | 'reconnecting' | 'disconnected', string> 
   disconnected: 'bg-terminal-down',
 };
 
+// P1 §2 — global navigation between the brand and the right cluster.
+// P2 §8 adds the strategy center (/strategies) and the Run Library (/runs).
+// P3 §8 adds the developer portal (/developers).
+const NAV_ITEMS: { href: string; labelKey: string; testid: string }[] = [
+  { href: '/', labelKey: 'nav.desk', testid: 'nav-desk' },
+  { href: '/market', labelKey: 'nav.market', testid: 'nav-market' },
+  { href: '/strategies', labelKey: 'nav.strategies', testid: 'nav-strategies' },
+  { href: '/runs', labelKey: 'nav.runs', testid: 'nav-runs' },
+  { href: '/journal', labelKey: 'nav.journal', testid: 'nav-journal' },
+  { href: '/arena', labelKey: 'nav.arena', testid: 'nav-arena' },
+  { href: '/developers', labelKey: 'nav.developers', testid: 'nav-developers' },
+];
+
+// Slash-normalize a path for active-state comparison: '/market/' → '/market',
+// '' → '/'. router.pathname already excludes the trailing slash, but asPath
+// (and defensive inputs) may carry one under trailingSlash: true.
+function normalizePath(path: string): string {
+  const stripped = path.replace(/\/+$/, '');
+  return stripped === '' ? '/' : stripped;
+}
+
+function HeaderNav() {
+  const t = useT();
+  // Null-safe: jest mounts <Header/> without a RouterContext → router is null.
+  const router = useRouter();
+  const current = normalizePath(router?.pathname ?? '/');
+
+  return (
+    <nav
+      data-testid="primary-nav"
+      className="order-2 flex w-full min-w-0 items-center gap-3 overflow-x-auto whitespace-nowrap py-1 xl:order-none xl:w-auto xl:gap-4 xl:py-0"
+      aria-label="Primary"
+    >
+      {NAV_ITEMS.map((item) => {
+        const active = current === normalizePath(item.href);
+        return (
+          <Link
+            key={item.href}
+            href={item.href}
+            data-testid={item.testid}
+            data-active={String(active)}
+            className={`text-xs font-semibold uppercase tracking-wider border-b-2 transition-colors ${
+              active
+                ? 'text-terminal-accent border-terminal-accent'
+                : 'text-terminal-muted border-transparent hover:text-terminal-text'
+            }`}
+          >
+            {t(item.labelKey)}
+          </Link>
+        );
+      })}
+    </nav>
+  );
+}
+
 export default function Header() {
+  const t = useT();
+  const profile = useMarketProfile();
+  const money = { currency_symbol: profile.currency_symbol, locale: profile.locale };
   // Single-atom selector — avoids Zustand v5 "Maximum update depth exceeded" (RESEARCH Pitfall 2)
   const connectionStatus = usePriceStore((s) => s.connectionStatus);
+
+  // Live prices for the Day P&L computation (re-renders per tick — the header
+  // is small and every watchlist row already updates at the same cadence)
+  const prices = usePriceStore((s) => s.prices);
 
   // SWR polling every 5s — satisfies FE-02 "live updating" for portfolio numbers (D-04)
   const { data } = useSWR<PortfolioResponse>('/api/portfolio/', fetcher, {
     refreshInterval: 5000,
   });
 
-  // Format number with US locale and 2 decimal places; fall back to '—' when undefined
-  const fmt = (n: number | undefined) =>
-    n !== undefined ? n.toLocaleString('en-US', { minimumFractionDigits: 2 }) : '—';
+  // Signed currency amount (sign before the symbol); '—' when undefined.
+  const fmtSigned = (n: number | undefined) => {
+    if (n === undefined) return '—';
+    const sign = n > 0 ? '+' : n < 0 ? '-' : '';
+    return `${sign}${formatMoney(Math.abs(n), money)}`;
+  };
+
+  // Day P&L = Σ qty × (price − prev_close) over positions (FRONTEND_REALISM §2.4).
+  // undefined until portfolio AND a prev_close-bearing price exist for ≥1 position.
+  const dayPnl = data?.positions?.length
+    ? data.positions.reduce<number | undefined>((sum, p) => {
+        const u = prices[p.ticker];
+        if (!u || u.prev_close == null) return sum;
+        return (sum ?? 0) + p.quantity * (u.price - u.prev_close);
+      }, undefined)
+    : data
+      ? 0
+      : undefined;
+  const dayPnlColor =
+    dayPnl === undefined || dayPnl === 0
+      ? 'text-terminal-muted'
+      : dayPnl > 0
+        ? 'text-terminal-up'
+        : 'text-terminal-down';
 
   return (
-    <header className="flex items-center justify-between px-4 py-2 border-b border-terminal-border bg-terminal-surface">
-      {/* Brand */}
-      <span className="text-terminal-accent font-semibold text-lg tracking-wide">
-        FinAlly
+    <header
+      data-testid="responsive-header"
+      className="flex flex-wrap items-center gap-x-4 gap-y-1 px-2 sm:px-4 py-2 border-b border-terminal-border bg-terminal-surface xl:flex-nowrap xl:justify-between"
+    >
+      {/* Brand + identity */}
+      <span className="order-1 flex shrink-0 items-center gap-2 sm:gap-4 xl:order-none">
+        <span className="text-terminal-accent font-semibold text-lg tracking-wide">
+          FinAlly
+        </span>
+        <AuthChip />
       </span>
 
+      {/* Global navigation (P1 §2) */}
+      <HeaderNav />
+
       {/* Right cluster: Cash · Portfolio · Connection dot */}
-      <div className="flex items-center gap-6">
+      <div
+        data-testid="header-metrics"
+        className="order-3 flex w-full min-w-0 items-center gap-4 overflow-x-auto whitespace-nowrap pt-1 xl:order-none xl:w-auto xl:gap-6 xl:overflow-visible xl:pt-0"
+      >
         {/* Cash balance */}
-        <div className="flex flex-col items-end">
+        <div className="flex shrink-0 flex-col items-end">
           <span className="text-xs font-semibold text-terminal-muted uppercase tracking-wider">
-            Cash
+            {t('header.cash')}
           </span>
           <span className="text-sm font-normal text-terminal-text tabular-nums">
-            ${fmt(data?.cash)}
+            {formatMoney(data?.cash, money)}
+          </span>
+        </div>
+
+        {/* Realized P&L — lifetime, from closed trades (M1.4) */}
+        <div className="flex shrink-0 flex-col items-end">
+          <span className="text-xs font-semibold text-terminal-muted uppercase tracking-wider">
+            {t('header.realized')}
+          </span>
+          <span
+            data-testid="realized-pnl"
+            className={`text-sm font-normal tabular-nums ${
+              data?.realized_pnl == null || data.realized_pnl === 0
+                ? 'text-terminal-muted'
+                : data.realized_pnl > 0
+                  ? 'text-terminal-up'
+                  : 'text-terminal-down'
+            }`}
+          >
+            {data?.realized_pnl != null ? fmtSigned(data.realized_pnl) : '—'}
+          </span>
+        </div>
+
+        {/* Day P&L — positions only, vs previous close */}
+        <div className="flex shrink-0 flex-col items-end">
+          <span className="text-xs font-semibold text-terminal-muted uppercase tracking-wider">
+            {t('header.dayPnl')}
+          </span>
+          <span
+            data-testid="day-pnl"
+            className={`text-sm font-normal tabular-nums ${dayPnlColor}`}
+          >
+            {fmtSigned(dayPnl)}
           </span>
         </div>
 
         {/* Portfolio total value — display size (largest live number) */}
-        <div className="flex flex-col items-end">
+        <div className="flex shrink-0 flex-col items-end">
           <span className="text-xs font-semibold text-terminal-muted uppercase tracking-wider">
-            Portfolio
+            {t('header.portfolio')}
           </span>
           <span className="text-xl font-semibold text-terminal-text tabular-nums">
-            ${fmt(data?.total_value)}
+            {formatMoney(data?.total_value, money)}
           </span>
         </div>
 
-        {/* Connection status dot — 8px circle, color driven by Zustand SSE state */}
+        {/* Connection status dot — 8px circle, color driven by Zustand SSE state.
+            data-testid/data-state form the E2E contract: state ∈ connected | reconnecting | disconnected */}
         <div
-          className={`w-2 h-2 rounded-full ${DOT_COLORS[connectionStatus]}`}
+          data-testid="connection-status"
+          data-state={connectionStatus}
+          className={`w-2 h-2 shrink-0 rounded-full ${DOT_COLORS[connectionStatus]}`}
           title={connectionStatus}
         />
       </div>

@@ -1,0 +1,1 @@
+{"message":"[模拟] 回测完成：已在 20 个模拟交易日上测试 NVDA 逢跌买入策略。","trades":[],"watchlist_changes":[],"backtests":[{"status":"failed","ticker":"NVDA","error":"Ticker not found"}]}

@@ -2,11 +2,36 @@
 -- All tables use user_id defaulting to "default" for single-user use
 -- while keeping the door open for future multi-user support.
 
--- User profile: cash balance and account state
+-- User profile: cash balance and account state.
+-- display_name (M4.1) is the login name with its original casing; the row id
+-- is the lowercased name. The anonymous 'default' row displays as 'Guest'.
+-- public_profile (P4 §4) is the player-page privacy toggle: 1 (default)
+-- exposes the public summary on GET /api/players/{id}; 0 hides it from
+-- everyone but the owner.
+-- NOTE: new columns here must also be added to _migrate_schema() in
+-- connection.py — CREATE TABLE IF NOT EXISTS does not evolve existing tables.
 CREATE TABLE IF NOT EXISTS users_profile (
-    id           TEXT PRIMARY KEY,
-    cash_balance REAL NOT NULL DEFAULT 10000.0,
-    created_at   TEXT NOT NULL
+    id             TEXT PRIMARY KEY,
+    cash_balance   REAL NOT NULL DEFAULT 10000.0,
+    created_at     TEXT NOT NULL,
+    display_name   TEXT,
+    public_profile INTEGER NOT NULL DEFAULT 1
+);
+
+-- App-level key/value metadata (M4.1). Holds the HMAC session secret
+-- ('session_secret'), generated once at first boot by init_db().
+CREATE TABLE IF NOT EXISTS app_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
+-- Lightweight migration ledger.  The application still applies its small,
+-- idempotent SQLite migrations in connection.py; this table makes the
+-- resulting schema version explicit for startup checks, backups, and support.
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version    INTEGER PRIMARY KEY,
+    name       TEXT NOT NULL,
+    applied_at TEXT NOT NULL
 );
 
 -- Watchlist: tickers the user wants to track
@@ -18,7 +43,11 @@ CREATE TABLE IF NOT EXISTS watchlist (
     UNIQUE (user_id, ticker)
 );
 
--- Positions: current holdings (one row per ticker per user)
+-- Positions: current holdings (one row per ticker per user).
+-- t1_locked (CN-2) is the share count bought today that the T+1 rule keeps
+-- non-sellable until the next trading day; 0 in markets without T+1 (us).
+-- NOTE: new columns here must also be added to _migrate_schema() in
+-- connection.py — CREATE TABLE IF NOT EXISTS does not evolve existing tables.
 CREATE TABLE IF NOT EXISTS positions (
     id         TEXT PRIMARY KEY,
     user_id    TEXT NOT NULL DEFAULT 'default',
@@ -26,18 +55,30 @@ CREATE TABLE IF NOT EXISTS positions (
     quantity   REAL NOT NULL,
     avg_cost   REAL NOT NULL,
     updated_at TEXT NOT NULL,
+    t1_locked  REAL NOT NULL DEFAULT 0,
     UNIQUE (user_id, ticker)
 );
 
--- Trades: append-only log of all executed orders
+-- Trades: append-only log of all executed orders.
+-- commission is the fee charged on the fill (0 unless FINALLY_COMMISSION_BPS
+-- is set). realized_pnl is set on sells only: (fill_price - avg_cost_at_sale)
+-- * quantity - commission, rounded to 2dp; NULL for buys.
+-- strategy_id (P2) attributes fills executed by the strategy engine to their
+-- strategy row; NULL for every other execution path (manual, chat, rules,
+-- orders). Strategy deletion keeps the attribution (no FK — append-only log).
+-- NOTE: new columns here must also be added to _migrate_schema() in
+-- connection.py — CREATE TABLE IF NOT EXISTS does not evolve existing tables.
 CREATE TABLE IF NOT EXISTS trades (
-    id          TEXT PRIMARY KEY,
-    user_id     TEXT NOT NULL DEFAULT 'default',
-    ticker      TEXT NOT NULL,
-    side        TEXT NOT NULL,
-    quantity    REAL NOT NULL,
-    price       REAL NOT NULL,
-    executed_at TEXT NOT NULL
+    id           TEXT PRIMARY KEY,
+    user_id      TEXT NOT NULL DEFAULT 'default',
+    ticker       TEXT NOT NULL,
+    side         TEXT NOT NULL,
+    quantity     REAL NOT NULL,
+    price        REAL NOT NULL,
+    commission   REAL NOT NULL DEFAULT 0,
+    realized_pnl REAL,
+    strategy_id  TEXT,
+    executed_at  TEXT NOT NULL
 );
 
 -- Portfolio snapshots: total value over time for P&L chart
@@ -48,12 +89,323 @@ CREATE TABLE IF NOT EXISTS portfolio_snapshots (
     recorded_at TEXT NOT NULL
 );
 
--- Chat messages: conversation history with the LLM assistant
+-- Chat messages: conversation history with the LLM assistant.
+-- kind marks who initiated the message and why (M2.3/M2.4):
+--   'chat'   — ordinary conversation turns (user + assistant)
+--   'brief'  — assistant-initiated event-driven AI brief (M2.3)
+--   'review' — daily AI review generated via POST /api/chat/review (M2.4)
+--   'rule'   — rule-fired activation record written by the rules evaluator
+--   'strategy' — strategy lifecycle record (created/backtested/deployed via chat, P2)
+-- Only kind='chat' rows feed the LLM conversation history; GET /api/chat/
+-- returns all kinds. NOTE: new columns here must also be added to
+-- _migrate_schema() in connection.py — CREATE TABLE IF NOT EXISTS does not
+-- evolve existing tables.
 CREATE TABLE IF NOT EXISTS chat_messages (
     id         TEXT PRIMARY KEY,
     user_id    TEXT NOT NULL DEFAULT 'default',
     role       TEXT NOT NULL,
     content    TEXT NOT NULL,
     actions    TEXT,
+    kind       TEXT NOT NULL DEFAULT 'chat',
     created_at TEXT NOT NULL
 );
+
+-- Orders: resting orders processed by the background fill loop.
+-- kind is one of 'limit', 'stop', 'stop_limit'; status is one of 'open',
+-- 'filled', 'cancelled', 'rejected', 'expired'. limit_price is NULL for
+-- 'stop' orders; stop_price is NULL for 'limit' orders. time_in_force is
+-- 'gtc' (expires_at NULL) or 'day' (expires_at = created_at + 24h until the
+-- M3 session clock lands). triggered_at is stamped when a stop/stop_limit
+-- order's trigger condition first fires; always NULL for 'limit'.
+-- init_db() executes this script on every startup (even for pre-existing
+-- database files), so old deployments pick this table up idempotently via
+-- IF NOT EXISTS. NOTE: new columns here must also be added to
+-- _migrate_schema() in connection.py — CREATE TABLE IF NOT EXISTS does not
+-- evolve existing tables.
+CREATE TABLE IF NOT EXISTS orders (
+    id            TEXT PRIMARY KEY,
+    user_id       TEXT NOT NULL DEFAULT 'default',
+    ticker        TEXT NOT NULL,
+    side          TEXT NOT NULL,
+    quantity      REAL NOT NULL,
+    kind          TEXT NOT NULL DEFAULT 'limit',
+    limit_price   REAL,
+    stop_price    REAL,
+    time_in_force TEXT NOT NULL DEFAULT 'gtc',
+    expires_at    TEXT,
+    triggered_at  TEXT,
+    status        TEXT NOT NULL DEFAULT 'open',
+    reject_reason TEXT,
+    created_at    TEXT NOT NULL,
+    filled_at     TEXT,
+    fill_price    REAL,
+    fill_trade_id TEXT
+);
+
+-- Rules: standing one-shot automations evaluated every ~1s against live
+-- quotes (M2.2). trigger_type is one of 'price_above', 'price_below',
+-- 'day_change_pct_above', 'day_change_pct_below'; status is one of 'active',
+-- 'paused', 'fired'. Rules are one-shot: on firing they move to 'fired' (even
+-- when the resulting trade fails validation) and must be re-armed via
+-- PATCH /api/rules/{id} {"status": "active"} to fire again. init_db() executes
+-- this script on every startup, so pre-existing database volumes pick this
+-- table up idempotently via IF NOT EXISTS (new table — no column migration).
+CREATE TABLE IF NOT EXISTS rules (
+    id            TEXT PRIMARY KEY,
+    user_id       TEXT NOT NULL DEFAULT 'default',
+    ticker        TEXT NOT NULL,
+    description   TEXT NOT NULL,
+    trigger_type  TEXT NOT NULL,
+    threshold     REAL NOT NULL,
+    side          TEXT NOT NULL,
+    quantity      REAL NOT NULL,
+    status        TEXT NOT NULL DEFAULT 'active',
+    created_at    TEXT NOT NULL,
+    last_fired_at TEXT,
+    fire_count    INTEGER NOT NULL DEFAULT 0
+);
+
+-- Strategies (P2 §1): user-authored declarative trading strategies evaluated
+-- by the strategy engine every ~1s. entry is a JSON condition group
+-- ({"all":[...]} | {"any":[...]}, whitelisted fields only); exits is a JSON
+-- object of optional exit params (take_profit_pct / stop_loss_pct /
+-- trailing_stop_pct / max_holding_days); sizing is {"mode":"fixed_qty","qty"}
+-- or {"mode":"cash_pct","pct"}. status is one of 'draft' | 'live' | 'paused'
+-- | 'archived'. The open_* / high_water / cooldown_until columns are the
+-- engine's live position state; counters track lifetime entries/exits.
+-- init_db() executes this script on every startup, so pre-existing database
+-- volumes pick this table up idempotently via IF NOT EXISTS (new table — no
+-- column migration).
+CREATE TABLE IF NOT EXISTS strategies (
+    id             TEXT PRIMARY KEY,
+    user_id        TEXT NOT NULL DEFAULT 'default',
+    name           TEXT NOT NULL,
+    ticker         TEXT NOT NULL,
+    status         TEXT NOT NULL DEFAULT 'draft',
+    entry          TEXT NOT NULL,
+    exits          TEXT NOT NULL,
+    sizing         TEXT NOT NULL,
+    template       TEXT,
+    created_at     TEXT NOT NULL,
+    deployed_at    TEXT,
+    open_qty       REAL NOT NULL DEFAULT 0,
+    open_price     REAL,
+    opened_at      TEXT,
+    high_water     REAL,
+    cooldown_until REAL,
+    entered_count  INTEGER NOT NULL DEFAULT 0,
+    exited_count   INTEGER NOT NULL DEFAULT 0,
+    last_fired_at  TEXT
+);
+
+-- Backtest runs (P2 §1): the Run Library — persisted backtest results.
+-- config/stats/equity_curve/baseline_curve/trades are the engine response
+-- blocks stored as JSON text (curves already <=400-point downsampled by the
+-- engine; trades truncated to the first 200 entries at write time).
+-- runs_summary is NULL for single runs. strategy_id is NULL for runs saved
+-- from the standalone Backtest tab (no FK — runs outlive their strategy).
+-- init_db() executes this script on every startup, so pre-existing database
+-- volumes pick this table up idempotently via IF NOT EXISTS (new table — no
+-- column migration).
+CREATE TABLE IF NOT EXISTS backtest_runs (
+    id             TEXT PRIMARY KEY,
+    user_id        TEXT NOT NULL,
+    strategy_id    TEXT,
+    label          TEXT,
+    created_at     TEXT NOT NULL,
+    config         TEXT NOT NULL,
+    stats          TEXT NOT NULL,
+    equity_curve   TEXT NOT NULL,
+    baseline_curve TEXT NOT NULL,
+    trades         TEXT NOT NULL,
+    runs_summary   TEXT
+);
+
+-- Seasons (M4.3): one row per competitive season. Exactly one season has
+-- ended_at IS NULL (the current one); init_db() inserts season 1 when the
+-- table is empty. POST /api/season/reset stamps ended_at and inserts the next.
+CREATE TABLE IF NOT EXISTS seasons (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at TEXT NOT NULL,
+    ended_at   TEXT
+);
+
+-- Season results (M4.3): final standings archived by POST /api/season/reset.
+CREATE TABLE IF NOT EXISTS season_results (
+    season_id   INTEGER NOT NULL,
+    user_id     TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    final_value REAL NOT NULL,
+    return_pct  REAL NOT NULL,
+    rank        INTEGER NOT NULL,
+    PRIMARY KEY (season_id, user_id)
+);
+
+-- Market events (P1 §3.1): durable archive of the PriceCache's in-memory
+-- event ring buffer (sudden >=1% single-tick moves). A background loop in
+-- main.py upserts the buffer every ~5s (ON CONFLICT(id) DO UPDATE SET
+-- narrative) so late-arriving LLM narratives backfill rows already written.
+-- Market-level data — no user_id. init_db() executes this script on every
+-- startup, so pre-existing database volumes pick this table up idempotently
+-- via IF NOT EXISTS (new table — no column migration).
+CREATE TABLE IF NOT EXISTS market_events (
+    id             TEXT PRIMARY KEY,
+    ticker         TEXT NOT NULL,
+    headline       TEXT NOT NULL,
+    narrative      TEXT,
+    change_percent REAL NOT NULL,
+    direction      TEXT NOT NULL,
+    timestamp      REAL NOT NULL
+);
+
+-- Daily bars (D1 §1): real-history daily OHLCV store backing the history
+-- backtest mode and the /api/market/history/{sync,daily,coverage} endpoints.
+-- Rows are written ONLY by user-triggered syncs (sample CSVs, yfinance,
+-- akshare) — the live simulator/SSE/trading paths never read or write this
+-- table. Adjustment convention: cn rows store 前复权 (qfq) prices, us rows
+-- store adj-close-scaled OHLC (yfinance auto_adjust). source is one of
+-- 'sample' | 'yfinance' | 'akshare'. Market-level data — no user_id; the
+-- (market, ticker, date) primary key doubles as the query index and makes
+-- INSERT OR REPLACE upserts idempotent. init_db() executes this script on
+-- every startup, so pre-existing database volumes pick this table up
+-- idempotently via IF NOT EXISTS (new table — no column migration).
+CREATE TABLE IF NOT EXISTS daily_bars (
+    market     TEXT NOT NULL,
+    ticker     TEXT NOT NULL,
+    date       TEXT NOT NULL,
+    open       REAL NOT NULL,
+    high       REAL NOT NULL,
+    low        REAL NOT NULL,
+    close      REAL NOT NULL,
+    volume     REAL NOT NULL,
+    source     TEXT NOT NULL,
+    fetched_at TEXT NOT NULL,
+    PRIMARY KEY (market, ticker, date)
+);
+
+-- Competitions (D2 §3): timed private competitions. code is the 6-char
+-- share-to-join invite (A-Z2-9 minus the confusable I/O; 0/1 are excluded by
+-- construction), UNIQUE at the database level. Status is derived from time
+-- (no background loop): now < starts_at -> upcoming, now < ends_at ->
+-- running, else ended; this phase stamps starts_at = created_at so
+-- competitions are born running. init_db() executes this script on every
+-- startup, so pre-existing database volumes pick this table up idempotently
+-- via IF NOT EXISTS (new table — no column migration).
+CREATE TABLE IF NOT EXISTS competitions (
+    id         TEXT PRIMARY KEY,
+    name       TEXT NOT NULL,
+    code       TEXT NOT NULL UNIQUE,
+    created_by TEXT NOT NULL,
+    starts_at  TEXT NOT NULL,
+    ends_at    TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+-- Competition members (D2 §3): one row per (competition, user).
+-- baseline_value is the member's total portfolio value at join time
+-- (compute_standings caliber) — the fixed denominator of their board
+-- return %. Competitions do not isolate money: one portfolio may compete
+-- in several competitions at once (teaching trade-off, contract §3).
+CREATE TABLE IF NOT EXISTS competition_members (
+    competition_id TEXT NOT NULL,
+    user_id        TEXT NOT NULL,
+    joined_at      TEXT NOT NULL,
+    baseline_value REAL NOT NULL,
+    PRIMARY KEY (competition_id, user_id)
+);
+
+-- API keys (P3 §1): programmatic Bearer credentials for the open paper-broker
+-- API. Only the sha256 hex of the full plaintext is stored (key_hash) plus an
+-- 11-char display prefix ("fk_XXXXXXXX") for list identification — the
+-- plaintext appears exactly once, in the POST /api/keys creation response.
+-- allowed_tickers is a JSON array or NULL (= unrestricted); max_order_qty /
+-- daily_trade_cap NULL = unlimited. frozen=1 is the kill switch: the gateway
+-- middleware rejects the key with 403 on every request (checked per request).
+-- init_db() executes this script on every startup, so pre-existing database
+-- volumes pick this table up idempotently via IF NOT EXISTS (new table — no
+-- column migration).
+CREATE TABLE IF NOT EXISTS api_keys (
+    id              TEXT PRIMARY KEY,
+    user_id         TEXT NOT NULL,
+    label           TEXT NOT NULL,
+    key_hash        TEXT NOT NULL UNIQUE,
+    prefix          TEXT NOT NULL,
+    created_at      TEXT NOT NULL,
+    last_used_at    TEXT,
+    frozen          INTEGER NOT NULL DEFAULT 0,
+    allowed_tickers TEXT,
+    max_order_qty   REAL,
+    daily_trade_cap INTEGER
+);
+
+-- API audit ledger (P3 §5): one row per mutating Bearer request after its
+-- response (result 'ok' on 2xx, 'error' otherwise), plus 'denied' rows for
+-- frozen-key / guardrail rejections and throttled 'rate_limited' rows.
+-- payload_digest is the SHA-256 hex digest of the exact request body, never
+-- raw business content or key material. Rows outlive key deletion (no FK —
+-- append-only ledger).
+-- init_db() executes this script on every startup, so pre-existing database
+-- volumes pick this table up idempotently via IF NOT EXISTS (new table — no
+-- column migration).
+CREATE TABLE IF NOT EXISTS api_audit (
+    id             TEXT PRIMARY KEY,
+    key_id         TEXT NOT NULL,
+    user_id        TEXT NOT NULL,
+    method         TEXT NOT NULL,
+    endpoint       TEXT NOT NULL,
+    payload_digest TEXT,
+    result         TEXT NOT NULL,
+    status_code    INTEGER,
+    created_at     TEXT NOT NULL
+);
+
+-- Administrator actions are separate from API-key audit rows because they
+-- authenticate with the dedicated FINALLY_ADMIN_TOKEN. request_id is the
+-- idempotency key supplied by the caller; details stores the completed reset
+-- response so an exact retry can return without running the mutation twice.
+CREATE TABLE IF NOT EXISTS admin_audit (
+    id         TEXT PRIMARY KEY,
+    action     TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    result     TEXT NOT NULL,
+    details    TEXT,
+    created_at TEXT NOT NULL,
+    UNIQUE (action, request_id)
+);
+
+-- Indexes for the hot query paths (chat history and P&L chart both filter by
+-- user_id and order by timestamp; the fill loop scans open orders and the
+-- rules evaluator scans active rules every second). init_db() executes this
+-- script on every
+-- startup, so existing databases pick these up idempotently via IF NOT EXISTS.
+CREATE INDEX IF NOT EXISTS idx_chat_messages_user_created
+    ON chat_messages (user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_portfolio_snapshots_user_recorded
+    ON portfolio_snapshots (user_id, recorded_at);
+CREATE INDEX IF NOT EXISTS idx_orders_user_status
+    ON orders (user_id, status);
+CREATE INDEX IF NOT EXISTS idx_rules_user_status
+    ON rules (user_id, status);
+CREATE INDEX IF NOT EXISTS idx_market_events_timestamp
+    ON market_events (timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_market_events_ticker_timestamp
+    ON market_events (ticker, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_strategies_user_status
+    ON strategies (user_id, status);
+CREATE INDEX IF NOT EXISTS idx_strategies_status
+    ON strategies (status);
+CREATE INDEX IF NOT EXISTS idx_backtest_runs_user_created
+    ON backtest_runs (user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_backtest_runs_strategy
+    ON backtest_runs (strategy_id);
+CREATE INDEX IF NOT EXISTS idx_api_keys_user
+    ON api_keys (user_id);
+CREATE INDEX IF NOT EXISTS idx_api_audit_key_created
+    ON api_audit (key_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_admin_audit_created
+    ON admin_audit (created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_competition_members_user
+    ON competition_members (user_id);
+-- Database-level backstop for the season-reset concurrency invariant.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_seasons_one_current
+    ON seasons ((1)) WHERE ended_at IS NULL;

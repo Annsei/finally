@@ -20,6 +20,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from app.auth import get_current_user_id
 from app.db.connection import get_conn
 from app.market.cache import PriceCache
 
@@ -30,10 +31,46 @@ class AddTickerRequest(BaseModel):
     ticker: str
 
 
+def required_market_tickers(conn: sqlite3.Connection) -> list[str]:
+    """All tickers required by user-visible or trade-capable state."""
+    return [
+        row["ticker"]
+        for row in conn.execute(
+            "SELECT ticker FROM watchlist "
+            "UNION SELECT ticker FROM positions "
+            "UNION SELECT ticker FROM orders WHERE status = 'open' "
+            "UNION SELECT ticker FROM rules WHERE status = 'active' "
+            "UNION SELECT ticker FROM strategies WHERE status = 'live' "
+            "ORDER BY ticker"
+        )
+    ]
+
+
+def ticker_required_by_anyone(conn: sqlite3.Connection, ticker: str) -> bool:
+    """True while any watchlist/position/order/rule/strategy needs ``ticker``."""
+    row = conn.execute(
+        "SELECT 1 FROM ("
+        " SELECT ticker FROM watchlist"
+        " UNION SELECT ticker FROM positions"
+        " UNION SELECT ticker FROM orders WHERE status = 'open'"
+        " UNION SELECT ticker FROM rules WHERE status = 'active'"
+        " UNION SELECT ticker FROM strategies WHERE status = 'live'"
+        ") WHERE ticker = ? LIMIT 1",
+        (ticker,),
+    ).fetchone()
+    return row is not None
+
+
+def ticker_watched_by_anyone(conn: sqlite3.Connection, ticker: str) -> bool:
+    """Backward-compatible alias for the stronger market-demand check."""
+    return ticker_required_by_anyone(conn, ticker)
+
+
 def apply_watchlist_change_on_conn(
     conn: sqlite3.Connection,
     ticker: str,
     action: str,
+    user_id: str = "default",
 ) -> dict:
     """Apply a watchlist add or remove operation on an open SQLite connection.
 
@@ -41,10 +78,17 @@ def apply_watchlist_change_on_conn(
     All validation failures return a dict with status="failed" and an "error" key
     — this function never raises on validation errors.
 
+    Does NOT commit — the caller owns the transaction boundary and must commit
+    (or roll back). This allows callers to batch watchlist changes with other
+    writes (trades, chat messages) atomically in a single transaction. This
+    helper also does not touch the live market data source; callers must sync
+    applied changes via ``sync_market_source`` (see its docstring for timing).
+
     Args:
-        conn: An open SQLite connection (caller manages lifecycle).
+        conn: An open SQLite connection (caller manages lifecycle and commit).
         ticker: Ticker symbol (normalized with .strip().upper() internally).
         action: "add" or "remove" (normalized to lowercase internally).
+        user_id: Whose watchlist to mutate (M4 — defaults to the anonymous user).
 
     Returns:
         On add success:    {"status": "added",   "ticker": T, "action": "add"}
@@ -62,21 +106,58 @@ def apply_watchlist_change_on_conn(
 
     if action == "add":
         conn.execute(
-            "INSERT OR IGNORE INTO watchlist (id, user_id, ticker, added_at) VALUES (?, 'default', ?, ?)",
-            (str(uuid.uuid4()), ticker, datetime.now(timezone.utc).isoformat()),
+            "INSERT OR IGNORE INTO watchlist (id, user_id, ticker, added_at) VALUES (?, ?, ?, ?)",
+            (str(uuid.uuid4()), user_id, ticker, datetime.now(timezone.utc).isoformat()),
         )
-        conn.commit()
         return {"status": "added", "ticker": ticker, "action": "add"}
 
     if action == "remove":
         conn.execute(
-            "DELETE FROM watchlist WHERE user_id = 'default' AND ticker = ?",
-            (ticker,),
+            "DELETE FROM watchlist WHERE user_id = ? AND ticker = ?",
+            (user_id, ticker),
         )
-        conn.commit()
         return {"status": "removed", "ticker": ticker, "action": "remove"}
 
     return {"status": "failed", "ticker": ticker, "error": "Action must be 'add' or 'remove'"}
+
+
+async def sync_market_source(request: Request, ticker: str, action: str) -> None:
+    """Best-effort sync of a committed watchlist change to the market data source.
+
+    Looks up the ``MarketDataSource`` stored at ``request.app.state.market_source``
+    (set in main.py's lifespan) and calls ``add_ticker``/``remove_ticker`` so newly
+    watched tickers start producing prices (SSE, trades) and removed tickers stop
+    simulating/streaming.
+
+    Consistency model: the database is the source of truth. Removals must be
+    called AFTER the DB change is committed. Adds are normally synced after
+    the commit too, but the chat flow deliberately syncs adds BEFORE its
+    commit (add_ticker seeds the price cache so same-turn trades on a
+    just-added ticker can execute) and reconciles the source on rollback. If
+    the source is absent (e.g. unit tests without a market source on
+    app.state) or the source call raises, the DB change stands, the error is
+    logged, and the source re-syncs from the DB watchlist on the next app
+    startup — divergence self-heals.
+
+    Args:
+        request: Current request (used to reach ``app.state.market_source``).
+        ticker: Normalized ticker symbol.
+        action: "add" or "remove".
+    """
+    source = getattr(request.app.state, "market_source", None)
+    if source is None:
+        return
+    try:
+        if action == "add":
+            await source.add_ticker(ticker)
+        elif action == "remove":
+            await source.remove_ticker(ticker)
+    except Exception:
+        logger.exception(
+            "Market source %s failed for %s (DB change stands; source re-syncs on restart)",
+            action,
+            ticker,
+        )
 
 
 def create_watchlist_router(price_cache: PriceCache, db_path: str) -> APIRouter:
@@ -94,10 +175,12 @@ def create_watchlist_router(price_cache: PriceCache, db_path: str) -> APIRouter:
     @router.get("/")
     async def get_watchlist(request: Request) -> dict:
         """Return all watchlist tickers enriched with live price data from cache."""
+        user_id = get_current_user_id(request, db_path)
         conn = get_conn(db_path)
         try:
             rows = conn.execute(
-                "SELECT ticker, added_at FROM watchlist WHERE user_id = 'default' ORDER BY added_at ASC"
+                "SELECT ticker, added_at FROM watchlist WHERE user_id = ? ORDER BY added_at ASC",
+                (user_id,),
             ).fetchall()
 
             tickers = []
@@ -112,6 +195,7 @@ def create_watchlist_router(price_cache: PriceCache, db_path: str) -> APIRouter:
                         "price": update.price if update else None,
                         "change_percent": update.change_percent if update else None,
                         "direction": update.direction if update else None,
+                        "day_change_percent": update.day_change_percent if update else None,
                     }
                 )
 
@@ -121,11 +205,15 @@ def create_watchlist_router(price_cache: PriceCache, db_path: str) -> APIRouter:
 
     @router.post("/")
     async def add_ticker(body: AddTickerRequest, request: Request) -> dict:
-        """Add a ticker to the watchlist.
+        """Add a ticker to the watchlist and register it with the market data source.
 
         Idempotent — if the ticker already exists, returns 200 without error.
         Ticker is normalized to uppercase.
         Returns HTTP 400 for invalid tickers (empty or longer than 10 characters).
+
+        The DB row is committed first, then the live market data source starts
+        tracking the ticker so it immediately gets prices (SSE stream, trades).
+        If the source call fails the DB change stands (see ``sync_market_source``).
         """
         ticker = body.ticker.strip().upper()
 
@@ -135,36 +223,50 @@ def create_watchlist_router(price_cache: PriceCache, db_path: str) -> APIRouter:
         if len(ticker) > 10:
             return JSONResponse(status_code=400, content={"error": "Ticker must be 10 characters or fewer"})
 
+        user_id = get_current_user_id(request, db_path)
         conn = get_conn(db_path)
         try:
             conn.execute(
-                "INSERT OR IGNORE INTO watchlist (id, user_id, ticker, added_at) VALUES (?, 'default', ?, ?)",
-                (str(uuid.uuid4()), ticker, datetime.now(timezone.utc).isoformat()),
+                "INSERT OR IGNORE INTO watchlist (id, user_id, ticker, added_at) VALUES (?, ?, ?, ?)",
+                (str(uuid.uuid4()), user_id, ticker, datetime.now(timezone.utc).isoformat()),
             )
             conn.commit()
         finally:
             conn.close()
+
+        await sync_market_source(request, ticker, "add")
 
         return {"status": "ok", "ticker": ticker}
 
     @router.delete("/{ticker}")
     async def remove_ticker(ticker: str, request: Request) -> dict:
-        """Remove a ticker from the watchlist.
+        """Remove a ticker from the caller's watchlist.
 
         Idempotent — returns 200 even if the ticker was not in the watchlist.
         Ticker is normalized to uppercase.
+
+        The DB row is deleted and committed first. The live market data
+        source stops simulating/streaming the ticker ONLY when no user
+        watches it anymore (M4 — the source tracks the union of all users'
+        watchlists). If the source call fails the DB change stands (see
+        ``sync_market_source``).
         """
         ticker = ticker.strip().upper()
 
+        user_id = get_current_user_id(request, db_path)
         conn = get_conn(db_path)
         try:
             conn.execute(
-                "DELETE FROM watchlist WHERE user_id = 'default' AND ticker = ?",
-                (ticker,),
+                "DELETE FROM watchlist WHERE user_id = ? AND ticker = ?",
+                (user_id, ticker),
             )
             conn.commit()
+            still_required = ticker_required_by_anyone(conn, ticker)
         finally:
             conn.close()
+
+        if not still_required:
+            await sync_market_source(request, ticker, "remove")
 
         return {"status": "ok", "ticker": ticker}
 

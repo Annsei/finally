@@ -5,7 +5,7 @@
  * Test 3: Empty/no-data state does not throw and does not call setData with points
  */
 import React from 'react';
-import { render } from '@testing-library/react';
+import { render, fireEvent } from '@testing-library/react';
 
 jest.mock('lightweight-charts', () => {
   const mockSeriesUpdate = jest.fn();
@@ -25,7 +25,8 @@ jest.mock('lightweight-charts', () => {
   });
   const LineSeries = { __sentinelType: 'LineSeries' };
   const AreaSeries = { __sentinelType: 'AreaSeries' };
-  return { createChart: mockCreateChart, LineSeries, AreaSeries };
+  const BaselineSeries = { __sentinelType: 'BaselineSeries' };
+  return { createChart: mockCreateChart, LineSeries, AreaSeries, BaselineSeries };
 });
 
 jest.mock('swr', () => ({
@@ -34,7 +35,7 @@ jest.mock('swr', () => ({
 }));
 
 import useSWR from 'swr';
-import { createChart, AreaSeries } from 'lightweight-charts';
+import { createChart, BaselineSeries } from 'lightweight-charts';
 import PnLChart from '@/components/PnLChart';
 
 const mockUseSWR = jest.mocked(useSWR);
@@ -44,7 +45,7 @@ describe('PnLChart', () => {
     jest.clearAllMocks();
   });
 
-  it('Test 1: On mount, createChart is called once and addSeries is called with AreaSeries sentinel', () => {
+  it('Test 1: On mount, createChart is called once and addSeries is called with BaselineSeries anchored at $10k', () => {
     mockUseSWR.mockReturnValue({ data: undefined } as any);
 
     render(<PnLChart />);
@@ -53,10 +54,13 @@ describe('PnLChart', () => {
     expect(mc).toHaveBeenCalledTimes(1);
 
     const chart = mc.mock.results[0].value as { addSeries: jest.Mock };
-    expect(chart.addSeries).toHaveBeenCalledWith(AreaSeries, expect.any(Object));
+    expect(chart.addSeries).toHaveBeenCalledWith(
+      BaselineSeries,
+      expect.objectContaining({ baseValue: { type: 'price', price: 10000 } })
+    );
   });
 
-  it('Test 2: When useSWR returns snapshot data, series.setData is called with index-based time points', () => {
+  it('Test 2: When useSWR returns snapshot data, series.setData is called with real recorded_at timestamps', () => {
     const snapshots = [
       { total_value: 10000, recorded_at: '2026-06-07T00:00:00Z' },
       { total_value: 10500, recorded_at: '2026-06-07T00:00:30Z' },
@@ -70,10 +74,35 @@ describe('PnLChart', () => {
     const chart = mc.mock.results[0].value as { addSeries: jest.Mock };
     const series = (chart.addSeries.mock.results[0] as jest.MockResult<{ setData: jest.Mock }>).value;
 
+    const t = (iso: string) => Math.floor(Date.parse(iso) / 1000);
     expect(series.setData).toHaveBeenCalledWith([
-      { time: 1, value: 10000 },
-      { time: 2, value: 10500 },
-      { time: 3, value: 10250 },
+      { time: t('2026-06-07T00:00:00Z'), value: 10000 },
+      { time: t('2026-06-07T00:00:30Z'), value: 10500 },
+      { time: t('2026-06-07T00:01:00Z'), value: 10250 },
+    ]);
+  });
+
+  it('Test 2b: same-second snapshots (30s tick + post-trade) are deduped keeping the LAST value', () => {
+    const snapshots = [
+      { total_value: 10000, recorded_at: '2026-06-07T00:00:00Z' },
+      // Two snapshots in the same second: periodic tick then post-trade — keep 10800
+      { total_value: 10500, recorded_at: '2026-06-07T00:00:30Z' },
+      { total_value: 10800, recorded_at: '2026-06-07T00:00:30.400Z' },
+      { total_value: 10250, recorded_at: '2026-06-07T00:01:00Z' },
+    ];
+    mockUseSWR.mockReturnValue({ data: { snapshots } } as any);
+
+    render(<PnLChart />);
+
+    const mc = jest.mocked(createChart);
+    const chart = mc.mock.results[0].value as { addSeries: jest.Mock };
+    const series = (chart.addSeries.mock.results[0] as jest.MockResult<{ setData: jest.Mock }>).value;
+
+    const t = (iso: string) => Math.floor(Date.parse(iso) / 1000);
+    expect(series.setData).toHaveBeenCalledWith([
+      { time: t('2026-06-07T00:00:00Z'), value: 10000 },
+      { time: t('2026-06-07T00:00:30Z'), value: 10800 },
+      { time: t('2026-06-07T00:01:00Z'), value: 10250 },
     ]);
   });
 
@@ -88,5 +117,53 @@ describe('PnLChart', () => {
 
     // setData should NOT have been called with any points when there is no data
     expect(series.setData).not.toHaveBeenCalled();
+  });
+
+  it('Test 4: 1H range keeps only snapshots within an hour of the LAST snapshot', () => {
+    const snapshots = [
+      { total_value: 10000, recorded_at: '2026-06-07T10:00:00Z' }, // 1.5h before last — dropped
+      { total_value: 10500, recorded_at: '2026-06-07T10:30:00Z' }, // exactly 1h before — kept
+      { total_value: 10250, recorded_at: '2026-06-07T11:30:00Z' }, // last
+    ];
+    mockUseSWR.mockReturnValue({ data: { snapshots } } as any);
+
+    const { getByTestId } = render(<PnLChart />);
+
+    const mc = jest.mocked(createChart);
+    const chart = mc.mock.results[0].value as { addSeries: jest.Mock };
+    const series = (chart.addSeries.mock.results[0] as jest.MockResult<{ setData: jest.Mock }>).value;
+
+    fireEvent.click(getByTestId('pnl-range-1H'));
+
+    const t = (iso: string) => Math.floor(Date.parse(iso) / 1000);
+    expect(series.setData).toHaveBeenLastCalledWith([
+      { time: t('2026-06-07T10:30:00Z'), value: 10500 },
+      { time: t('2026-06-07T11:30:00Z'), value: 10250 },
+    ]);
+  });
+
+  it('CN profile anchors the baseline at ¥100k seed cash', () => {
+    mockUseSWR.mockImplementation(((key: string) => {
+      if (key === '/api/market/profile') {
+        return {
+          data: {
+            market: 'cn',
+            currency_symbol: '¥',
+            locale: 'zh-CN',
+            lot_size: 100,
+            up_is_red: true,
+            seed_cash: 100000,
+          },
+        };
+      }
+      return { data: undefined };
+    }) as never);
+
+    render(<PnLChart />);
+    const chart = jest.mocked(createChart).mock.results[0].value as { addSeries: jest.Mock };
+    expect(chart.addSeries).toHaveBeenCalledWith(
+      BaselineSeries,
+      expect.objectContaining({ baseValue: { type: 'price', price: 100000 } })
+    );
   });
 });

@@ -14,6 +14,15 @@ class MockEventSource {
   onopen: ((event: Event) => void) | null = null;
   onmessage: ((event: MessageEvent) => void) | null = null;
   onerror: ((event: Event) => void) | null = null;
+  private listeners = new Map<string, EventListener[]>();
+  addEventListener = jest.fn((type: string, listener: EventListenerOrEventListenerObject) => {
+    const fn: EventListener =
+      typeof listener === 'function' ? listener : (event) => listener.handleEvent(event);
+    this.listeners.set(type, [...(this.listeners.get(type) ?? []), fn]);
+  });
+  emit(type: string) {
+    for (const listener of this.listeners.get(type) ?? []) listener(new Event(type));
+  }
   close = jest.fn(() => {
     this.readyState = MockEventSource.CLOSED;
   });
@@ -26,25 +35,30 @@ class MockEventSource {
 
 // Capture the last constructed EventSource instance
 let mockInstance: MockEventSource | null = null;
+type MockEventSourceConstructor = jest.Mock<MockEventSource, [string]> & {
+  CONNECTING: number;
+  OPEN: number;
+  CLOSED: number;
+};
+let mockEventSourceConstructor: MockEventSourceConstructor;
 
 // Install global mock before all tests
 beforeAll(() => {
-  // @ts-ignore
-  const MockES = jest.fn().mockImplementation((url: string) => {
-    mockInstance = new MockEventSource(url);
-    return mockInstance;
-  });
+  const MockES = jest.fn((url: string) => {
+    const instance = new MockEventSource(url);
+    mockInstance = instance;
+    return instance;
+  }) as MockEventSourceConstructor;
   // Attach static constants so the hook can read EventSource.CONNECTING etc.
   MockES.CONNECTING = MockEventSource.CONNECTING;
   MockES.OPEN = MockEventSource.OPEN;
   MockES.CLOSED = MockEventSource.CLOSED;
-  // @ts-ignore
-  global.EventSource = MockES;
+  mockEventSourceConstructor = MockES;
+  global.EventSource = MockES as unknown as typeof EventSource;
 });
 
 afterAll(() => {
-  // @ts-ignore
-  delete global.EventSource;
+  delete (global as { EventSource?: typeof EventSource }).EventSource;
 });
 
 beforeEach(() => {
@@ -53,7 +67,7 @@ beforeEach(() => {
   // Reset mock instance
   mockInstance = null;
   // Clear mock calls
-  (global.EventSource as jest.Mock).mockClear();
+  mockEventSourceConstructor.mockClear();
 });
 
 const aaplUpdate: PriceUpdate = {
@@ -114,6 +128,21 @@ describe('usePriceStream', () => {
     expect(usePriceStore.getState().prices).toEqual({});
   });
 
+  test('Test 4b: structurally invalid JSON is rejected and leaves the last valid prices intact', () => {
+    renderHook(() => usePriceStream());
+    act(() => {
+      mockInstance!.onmessage!(
+        new MessageEvent('message', { data: JSON.stringify({ AAPL: aaplUpdate }) })
+      );
+      mockInstance!.onmessage!(
+        new MessageEvent('message', {
+          data: JSON.stringify({ AAPL: { ...aaplUpdate, price: 'not-a-number' } }),
+        })
+      );
+    });
+    expect(usePriceStore.getState().prices.AAPL.price).toBe(192.5);
+  });
+
   test('Test 5a: onerror with readyState CONNECTING sets status reconnecting', () => {
     renderHook(() => usePriceStream());
     expect(mockInstance).not.toBeNull();
@@ -142,6 +171,61 @@ describe('usePriceStream', () => {
     });
 
     expect(usePriceStore.getState().connectionStatus).toBe('disconnected');
+  });
+
+  test('Test 7: staleness watchdog recreates a silent OPEN connection and sets reconnecting', () => {
+    jest.useFakeTimers();
+    try {
+      renderHook(() => usePriceStream());
+      expect(mockInstance).not.toBeNull();
+      const first = mockInstance!;
+
+      act(() => {
+        first.readyState = MockEventSource.OPEN;
+        first.onopen!(new Event('open'));
+      });
+      expect(usePriceStore.getState().connectionStatus).toBe('connected');
+
+      // Server pushes every ~500ms; simulate >5s of silence on an OPEN
+      // connection (network died without a TCP reset — no error event fires).
+      act(() => {
+        jest.advanceTimersByTime(8_000);
+      });
+
+      expect(usePriceStore.getState().connectionStatus).toBe('reconnecting');
+      expect(first.close).toHaveBeenCalled();
+      expect(global.EventSource).toHaveBeenCalledTimes(2);
+
+      // The replacement connection succeeding flips the status back.
+      act(() => {
+        mockInstance!.onopen!(new Event('open'));
+      });
+      expect(usePriceStore.getState().connectionStatus).toBe('connected');
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('Test 8: named heartbeats keep a quiet OPEN connection alive during a closed session', () => {
+    jest.useFakeTimers();
+    try {
+      renderHook(() => usePriceStream());
+      const first = mockInstance!;
+      act(() => {
+        first.readyState = MockEventSource.OPEN;
+        first.onopen!(new Event('open'));
+        jest.advanceTimersByTime(4_000);
+        first.emit('heartbeat');
+        jest.advanceTimersByTime(4_000);
+      });
+
+      expect(first.addEventListener).toHaveBeenCalledWith('heartbeat', expect.any(Function));
+      expect(first.close).not.toHaveBeenCalled();
+      expect(mockEventSourceConstructor).toHaveBeenCalledTimes(1);
+      expect(usePriceStore.getState().connectionStatus).toBe('connected');
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   test('Test 6: unmounting the hook calls es.close() exactly once', () => {

@@ -5,6 +5,7 @@ import asyncio
 import pytest
 
 from app.market.cache import PriceCache
+from app.market.seed_prices import SEED_PRICES
 from app.market.simulator import SimulatorDataSource
 
 
@@ -124,6 +125,60 @@ class TestSimulatorDataSource:
 
         await source.stop()
 
+    async def test_prev_close_is_seed_price_and_constant(self):
+        """prev_close equals the GBM starting (seed) price and never moves."""
+        cache = PriceCache()
+        source = SimulatorDataSource(price_cache=cache, update_interval=0.02)
+        await source.start(["AAPL"])
+
+        first = cache.get("AAPL")
+        assert first is not None
+        assert first.prev_close == SEED_PRICES["AAPL"]
+
+        initial_version = cache.version
+        await asyncio.sleep(0.2)  # Let several GBM ticks land
+        assert cache.version > initial_version  # Prices actually updated
+
+        later = cache.get("AAPL")
+        assert later.prev_close == SEED_PRICES["AAPL"]
+
+        await source.stop()
+
+    async def test_day_extremes_and_day_change_consistency(self):
+        """day_high/day_low bracket the price and seed; day_change matches math."""
+        cache = PriceCache()
+        source = SimulatorDataSource(price_cache=cache, update_interval=0.02)
+        await source.start(["AAPL"])
+        await asyncio.sleep(0.2)
+
+        update = cache.get("AAPL")
+        assert update is not None
+        # Extremes always bracket the current price and the seed (first) price
+        assert update.day_low <= update.price <= update.day_high
+        assert update.day_low <= SEED_PRICES["AAPL"] <= update.day_high
+        # Derived day fields are consistent with price vs prev_close
+        assert update.day_change == round(update.price - update.prev_close, 4)
+        assert update.day_change_percent == round(
+            (update.price - update.prev_close) / update.prev_close * 100, 4
+        )
+
+        await source.stop()
+
+    async def test_add_ticker_gets_prev_close(self):
+        """A dynamically added ticker's prev_close is its GBM starting price."""
+        cache = PriceCache()
+        source = SimulatorDataSource(price_cache=cache, update_interval=0.1)
+        await source.start(["AAPL"])
+
+        await source.add_ticker("TSLA")
+        update = cache.get("TSLA")
+        assert update is not None
+        assert update.prev_close == SEED_PRICES["TSLA"]
+        assert update.day_high == SEED_PRICES["TSLA"]
+        assert update.day_low == SEED_PRICES["TSLA"]
+
+        await source.stop()
+
     async def test_custom_event_probability(self):
         """Test creating source with custom event probability."""
         cache = PriceCache()
@@ -135,4 +190,71 @@ class TestSimulatorDataSource:
 
         # Just verify it starts and stops cleanly
         await asyncio.sleep(0.2)
+        await source.stop()
+
+    async def test_ticks_carry_positive_varying_volume(self):
+        """Every simulated tick has volume > 0, and volume varies tick to tick."""
+        cache = PriceCache()
+        source = SimulatorDataSource(price_cache=cache, update_interval=0.02)
+        await source.start(["AAPL"])
+
+        volumes: list[float] = []
+        for _ in range(10):
+            await asyncio.sleep(0.03)
+            update = cache.get("AAPL")
+            assert update.volume > 0
+            volumes.append(update.volume)
+
+        assert len(set(volumes)) > 1  # Lognormal draws vary
+        await source.stop()
+
+    async def test_bid_price_ask_ordering_with_1_to_5_bp_spread(self):
+        """bid < price < ask and the quoted spread is within 1-5 bp (+rounding)."""
+        cache = PriceCache()
+        source = SimulatorDataSource(price_cache=cache, update_interval=0.02)
+        await source.start(["AAPL", "GOOGL"])
+        await asyncio.sleep(0.1)
+
+        for ticker in ("AAPL", "GOOGL"):
+            update = cache.get(ticker)
+            assert update.bid < update.price < update.ask
+            measured_bps = (update.ask - update.bid) / update.price * 10_000
+            # Rounding to cents can shift each side by up to a cent
+            slop_bps = 2 * 0.01 / update.price * 10_000
+            assert 1 - slop_bps <= measured_bps <= 5 + slop_bps
+
+        await source.stop()
+
+    async def test_spread_stable_per_ticker(self):
+        """A ticker's quoted spread (in bp) stays fixed across ticks."""
+        from app.market.simulator import spread_bps_for
+
+        cache = PriceCache()
+        source = SimulatorDataSource(price_cache=cache, update_interval=0.02)
+        await source.start(["AAPL"])
+
+        expected_bps = spread_bps_for("AAPL")
+        for _ in range(5):
+            await asyncio.sleep(0.04)
+            update = cache.get("AAPL")
+            measured_bps = (update.ask - update.bid) / update.price * 10_000
+            slop_bps = 2 * 0.01 / update.price * 10_000
+            assert abs(measured_bps - expected_bps) <= slop_bps
+
+        await source.stop()
+
+    async def test_ticks_populate_history_buffer(self):
+        """Simulator ticks flow into the cache's OHLCV ring buffer."""
+        cache = PriceCache()
+        source = SimulatorDataSource(price_cache=cache, update_interval=0.02)
+        await source.start(["AAPL"])
+        await asyncio.sleep(0.1)
+
+        bars = cache.get_history("AAPL")
+        assert len(bars) >= 1
+        bar = bars[-1]
+        assert bar["low"] <= bar["open"] <= bar["high"]
+        assert bar["low"] <= bar["close"] <= bar["high"]
+        assert bar["volume"] > 0
+
         await source.stop()
